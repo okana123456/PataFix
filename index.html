@@ -362,7 +362,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-23-cache-v1';
+const APP_VERSION = 'patafix-2026-07-24-products-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1052,13 +1052,50 @@ async function loadSettings(){
   }
 }
 
-function getAutoRate(amount){
-  // Repayment terms are weekly, so 20% per four-week month is 5% per week.
-  return 5;
-}
+const PATAFIX_PRODUCTS = [
+  {key:'inua-biz',name:'INUA BIZ',min:5000,max:10000,registrationFee:200,monthlyRate:20,feeType:'flat',feeValue:500,paymentEveryWeeks:1,description:'5k-10k | registration fee KES 200 | interest 20% p.m | processing fee KES 500 flat | weekly payments'},
+  {key:'kuza',name:'KUZA',min:11000,max:15000,registrationFee:300,monthlyRate:20,feeType:'percent',feeValue:5,paymentEveryWeeks:1,description:'11k-15k | registration fee KES 300 | interest 20% p.m | processing fee 5% of principal | weekly payments'},
+  {key:'nawiri',name:'NAWIRI',min:16000,max:20000,registrationFee:400,monthlyRate:20,feeType:'percent',feeValue:6,paymentEveryWeeks:1,description:'16k-20k | registration fee KES 400 | interest 20% p.m | application fee 6% of principal | weekly payments'},
+  {key:'komanza',name:'KOMANZA',min:16000,max:40000,registrationFee:400,monthlyRate:18,feeType:'percent',feeValue:10,paymentEveryWeeks:2,description:'16k-40k | registration fee KES 400 | interest 18% p.m | application fee 10% of principal | biweekly payments'}
+];
 
-function getAutoTier(amount){
-  return Number(amount)<5000?'Below KES 5,000':'KES 5,000 and above';
+function patafixProductByName(name){
+  const clean=String(name||'').trim().toLowerCase();
+  return PATAFIX_PRODUCTS.find(p=>p.name.toLowerCase()===clean||p.key===clean)||null;
+}
+function patafixProductsForAmount(amount){
+  const n=Number(amount||0);
+  return PATAFIX_PRODUCTS.filter(p=>n>=p.min&&n<=p.max);
+}
+function getPataFixProduct(amount, productName=''){
+  return patafixProductByName(productName) || patafixProductsForAmount(amount)[0] || null;
+}
+function getAutoRate(amount, productName=''){
+  const product=getPataFixProduct(amount, productName);
+  return product ? product.monthlyRate/4 : 0;
+}
+function getAutoTier(amount, productName=''){
+  const product=getPataFixProduct(amount, productName);
+  return product ? product.name : 'No matching PataFix product';
+}
+function patafixFeeLabel(product){
+  if(!product) return 'No matching product';
+  const fee=product.feeType==='flat' ? fmtMoney(product.feeValue) : `${product.feeValue}% of principal`;
+  const feeName=product.name==='INUA BIZ'?'Processing fee':'Application fee';
+  return `${feeName}: ${fee}`;
+}
+function processingFeeFor(amount, productName=''){
+  const product=getPataFixProduct(amount, productName);
+  if(!product) return 0;
+  return product.feeType==='flat' ? Number(product.feeValue) : Number((Number(amount||0)*product.feeValue/100).toFixed(2));
+}
+function calcPataFixLoan(principal, termWeeks, productName='', type='flat'){
+  const product=getPataFixProduct(principal, productName);
+  const interval=product?.paymentEveryWeeks||1;
+  const installments=Math.max(1, Math.ceil(Number(termWeeks||1)/interval));
+  const periodRate=(product?.monthlyRate||0)/4*interval;
+  const calc=calcLoan(Number(principal||0),periodRate,type,installments);
+  return {...calc,product,periodRate,intervalWeeks:interval,installments,installmentLabel:interval===2?'Biweekly Installment':'Weekly Installment'};
 }
 
 // ═══ AUTH — EMAIL + GOOGLE ═══
@@ -1643,24 +1680,28 @@ function calcLoan(principal,rate,type,weeks){return type==='reducing_balance'?ca
 
 
 // Registration fee is applied once and deducted from the first loan disbursement.
-const REGISTRATION_FEE = 500;
+const REGISTRATION_FEE = 0;
 // ═══ PROCESSING FEE (flat KES 500 per loan disbursement) ═══
 const PATAFIX_MONTHLY_INTEREST_RATE = 20;
-function processingFeeFor(amount){ return Number(amount)<=5000 ? 250 : 500; }
 function regFeeTag(amount, dateISO){ return `[REG_FEE:${amount}:${dateISO}]`; }
+function regFeePendingTag(dateISO){ return `[REG_FEE_PENDING:${dateISO}]`; }
 function parseRegFeeFromNotes(notes){
   if(!notes) return null;
   const m = String(notes).match(/\[REG_FEE:(\d+(?:\.\d+)?):([^\]]+)\]/);
   if(!m) return null;
   return { amount: Number(m[1]), date: m[2] };
 }
+function hasPendingRegFee(notes){ return /\[REG_FEE_PENDING:[^\]]+\]/.test(String(notes||'')); }
 function stripRegFeeTag(notes){ return String(notes||'').replace(/\s*\[REG_FEE:[^\]]+\]\s*/g,'').trim(); }
-function registrationFeeForClient(client, previousLoans){
+function registrationFeeForClient(client, previousLoans, productName=''){
   const tag = parseRegFeeFromNotes(client?.notes);
+  const pending = hasPendingRegFee(client?.notes);
   const hasPreviousLoan = (previousLoans||[]).length > 0;
-  return tag && !hasPreviousLoan ? Number(tag.amount || REGISTRATION_FEE) : 0;
+  const product = getPataFixProduct(0, productName);
+  const productFee = Number(product?.registrationFee || tag?.amount || 0);
+  return (tag || pending) && !hasPreviousLoan ? productFee : 0;
 }
-async function recordRegistrationFeeIncome(clientId, clientName, dateISO){
+async function recordRegistrationFeeIncome(clientId, clientName, dateISO, amount=REGISTRATION_FEE){
   // Best-effort: try to insert into a generic income table. Silently ignore if it doesn't exist.
   try{
     await sb('journal_entries').insert({
@@ -1671,7 +1712,7 @@ async function recordRegistrationFeeIncome(clientId, clientName, dateISO){
       description:`Registration fee — ${clientName}`,
       debit:'Cash',
       credit:'Registration Fee Income',
-      amount:REGISTRATION_FEE,
+      amount:Number(amount||0),
       synced:false
     });
   }catch(_){ /* table may not exist; tagged note in client.notes is the fallback source of truth */ }
@@ -2262,8 +2303,8 @@ async function openAddClientModal(){
     <div class="form-group"><label>Notes</label><textarea class="textarea" id="cNotes"></textarea></div>
     ${officerDropdown}
     <div style="padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;margin-bottom:12px;font-size:13px;display:flex;justify-content:space-between;align-items:center">
-      <span>A one-time <strong>Registration Fee</strong> is applied to this client and deducted from the first loan disbursement.</span>
-      <strong style="color:var(--accent-green)">KES \${REGISTRATION_FEE}</strong>
+      <span>A one-time product-based <strong>Registration Fee</strong> is applied to new clients and deducted from their first loan disbursement.</span>
+      <strong style="color:var(--accent-green)">KES 200-400</strong>
     </div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnSaveClient" onclick="saveClient()">Save Client</button></div>
   `,true);
@@ -2295,7 +2336,7 @@ async function saveClient(){
     const userNotes=($('#cNotes').value||'').trim();
     const assignedOfficerId = ($('#cAssignedOfficer')?.value || currentUser?.id || '').trim();
     const officerTag = assignedOfficerId ? ` [OFFICER:${assignedOfficerId}]` : '';
-    const taggedNotes=(userNotes?userNotes+' ':'')+regFeeTag(REGISTRATION_FEE, todayStr)+officerTag;
+    const taggedNotes=(userNotes?userNotes+' ':'')+regFeePendingTag(todayStr)+officerTag;
     const rec={full_name:name,id_number:idNo,phone,email:$('#cEmail').value,gender:$('#cGender').value,dob:$('#cDob').value||null,address:$('#cAddress').value,occupation:$('#cOccupation').value,employer:$('#cEmployer').value,monthly_income:Number($('#cIncome').value)||0,next_of_kin_name:$('#cNokName').value,next_of_kin_phone:$('#cNokPhone').value,next_of_kin_relation:$('#cNokRel').value,notes:taggedNotes,business_id:currentUser?.business_id,created_by:currentUser?.id};
     const{data,error}=await sb('loan_clients').insert(rec).select().single();
     if(error)throw error;
@@ -2306,8 +2347,7 @@ async function saveClient(){
       if(window._clientOffMap) window._clientOffMap[data.id] = assignedOfficerId;
     }
     await audit('client_created','loan_clients',data.id,null,rec);
-    await recordRegistrationFeeIncome(data.id, name, today);
-    toast(`Client added. Registration fee of KES ${REGISTRATION_FEE} will be deducted from the first loan disbursement.`,'success');closeModal();renderClients();
+    toast('Client added. Product registration fee will be deducted from the first loan disbursement.','success');closeModal();renderClients();
   }catch(e){
     if(btn){ btn.disabled=false; btn.textContent='Save Client'; }
     toast(e.message,'error');
@@ -2349,8 +2389,8 @@ async function viewClient(id){
         <div><strong>Daily Income:</strong> ${fmtMoney(c.monthly_income)}</div>
         <div><strong>Next of Kin:</strong> ${c.next_of_kin_name||'-'} (${c.next_of_kin_relation||'-'}) ${c.next_of_kin_phone||''}</div>
         <div style="grid-column:1/-1;padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;display:flex;justify-content:space-between;align-items:center">
-          <span><strong style="color:var(--accent-green)">Registration Fee Applied</strong> <span style="color:var(--text-secondary);font-size:12px">deducted from first loan disbursement</span></span>
-          <strong style="color:var(--accent-green)">${fmtMoney((parseRegFeeFromNotes(c.notes)?.amount)||REGISTRATION_FEE)}</strong>
+          <span><strong style="color:var(--accent-green)">Registration Fee Pending</strong> <span style="color:var(--text-secondary);font-size:12px">product-based fee deducted from first loan disbursement</span></span>
+          <strong style="color:var(--accent-green)">KES 200-400</strong>
         </div>
       </div>
       <div class="card" style="margin-bottom:16px">
@@ -2620,10 +2660,37 @@ async function exportClientsExcel(){
 }
 
 // ═══ PRODUCTS ═══
+async function ensurePataFixProducts(){
+  if(!currentUser?.business_id) return [];
+  const {data:existing,error}=await sb('loan_products').select('*').eq('business_id', currentUser.business_id);
+  if(error) throw error;
+  const byName=new Map((existing||[]).map(p=>[String(p.name||'').trim().toLowerCase(),p]));
+  const missing=PATAFIX_PRODUCTS.filter(p=>!byName.has(p.name.toLowerCase())).map(p=>({
+    business_id:currentUser.business_id,
+    name:p.name,
+    description:p.description,
+    min_amount:p.min,
+    max_amount:p.max,
+    interest_rate:p.monthlyRate,
+    interest_period:'monthly',
+    interest_type:'flat',
+    min_term_weeks:p.paymentEveryWeeks,
+    max_term_weeks:52,
+    processing_fee_pct:p.feeType==='percent'?p.feeValue:0,
+    late_penalty_pct:5,
+    grace_period_days:3,
+    requires_guarantor:true,
+    is_active:true
+  }));
+  if(missing.length) await sb('loan_products').insert(missing);
+  const {data:products}=await sb('loan_products').select('*').eq('business_id', currentUser.business_id).order('min_amount',{ascending:true});
+  return products||[];
+}
+
 async function renderProducts(){
   const main=$('#mainContent');
   try{
-    const{data:products}=await sb('loan_products').select('*').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
+    const products=await ensurePataFixProducts();
     cachedData.products=products||[];
     main.innerHTML=`
       <div class="page-header"><h1>Loan Products</h1>${hasRole('admin')?'<button class="btn btn-primary" onclick="openAddProductModal()">+ Add Product</button>':''}</div>
@@ -2634,12 +2701,13 @@ async function renderProducts(){
             <div><strong style="font-size:16px">${p.name}</strong></div>
             ${p.is_active?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>'}
           </div>
-          <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">${p.description||'No description'}</p>
+          <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">${p.description||patafixProductByName(p.name)?.description||'No description'}</p>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
             <div><span style="color:var(--text-secondary)">Amount:</span> ${fmtMoney(p.min_amount)} - ${fmtMoney(p.max_amount)}</div>
             <div><span style="color:var(--text-secondary)">Rate:</span> ${p.interest_rate}% / ${p.interest_period||'weekly'}</div>
-            <div><span style="color:var(--text-secondary)">Term:</span> ${p.min_term_weeks}-${p.max_term_weeks} weeks</div>
-            <div><span style="color:var(--text-secondary)">Fee:</span> ${p.processing_fee_pct}%</div>
+            <div><span style="color:var(--text-secondary)">Payments:</span> ${(patafixProductByName(p.name)?.paymentEveryWeeks||1)===2?'Biweekly':'Weekly'}</div>
+            <div><span style="color:var(--text-secondary)">Reg. Fee:</span> ${fmtMoney(patafixProductByName(p.name)?.registrationFee||0)}</div>
+            <div><span style="color:var(--text-secondary)">Fee:</span> ${patafixFeeLabel(patafixProductByName(p.name))}</div>
           </div>
           <div style="margin-top:12px;display:flex;gap:6px">${hasRole('admin')?`<button class="btn btn-outline btn-sm" onclick="editProduct('${p.id}')">Edit</button><button class="btn btn-outline btn-sm" onclick="deleteProduct('${p.id}')">Delete</button>`:'<span style="font-size:12px;color:var(--text-secondary)">View only</span>'}</div>
         </div>
@@ -2690,7 +2758,7 @@ let appPage=1;
 async function renderApplications(page=1){
   appPage=page;const main=$('#mainContent');
   try{
-    const{data:apps}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,asset_photo_paths)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
+    const{data:apps}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,asset_photo_paths),loan_products(name)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
     cachedData.applications=apps||[];
     const isOnlyOfficer = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     if(isOnlyOfficer) cachedData.applications = cachedData.applications.filter(a => a.loan_officer_id === currentUser.id);
@@ -2716,7 +2784,7 @@ function renderAppRows(apps){
     <td><strong>${a.loan_clients?.full_name||'—'}</strong></td>
     <td>${a.loan_clients?.phone||'-'}</td>
     <td>${fmtMoney(a.applied_amount)}</td><td>${a.applied_term_weeks}w</td>
-    <td><span class="badge badge-blue">${getAutoTier(a.applied_amount)}</span></td>
+    <td><span class="badge badge-blue">${escapeHtml(a.loan_products?.name||getAutoTier(a.applied_amount))}</span></td>
     <td>${statusBadge(a.status)}</td><td>${fmtDate(a.created_at)}</td>
     <td>
       <div class="row-action-menu" id="${menuId}">
@@ -2755,7 +2823,8 @@ function filterAppStatus(v){const f=v?(cachedData.applications||[]).filter(a=>a.
 
 async function openNewApplication(){
   const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number').eq('business_id', currentUser.business_id).order('full_name');
-  const{data:products}=await sb('loan_products').select('*').eq('business_id', currentUser.business_id).eq('is_active',true);
+  const products=(await ensurePataFixProducts()).filter(p=>p.is_active!==false);
+  const productOptions=products.map(p=>`<option value="${p.id}" data-name="${escapeHtml(p.name)}">${escapeHtml(p.name)} - ${escapeHtml(patafixProductByName(p.name)?.description||p.description||'')}</option>`).join('');
   // Build datalist; encode id in option's data-id via a hidden lookup map
   window._appClientLookup = {};
   const optionsHtml = (clients||[]).map(c=>{
@@ -2780,6 +2849,7 @@ async function openNewApplication(){
       <p style="font-size:12px;color:var(--text-secondary);margin-top:6px">Select the client first. Guarantor details will be captured on this loan application.</p>
     </div>
     <div id="appStep2" style="display:none">
+      <div class="form-group"><label>PataFix Product *</label><select class="select" id="appProduct" onchange="appCalcUpdate()"><option value="">Select product</option>${productOptions}</select></div>
       <div class="form-group"><label>Loan Amount *</label><input class="input" type="number" id="appAmount" oninput="appCalcUpdate()" placeholder="Enter amount"></div>
       <div id="appTierInfo" class="card" style="margin:8px 0;font-size:13px;display:none"></div>
       <div class="form-group"><label>Term (weeks) *</label><input class="input" type="number" id="appTerm" oninput="appCalcUpdate()" placeholder="Number of weeks"></div>
@@ -2820,6 +2890,12 @@ function onAppClientPick(val){
   }
 }
 
+function selectedAppProduct(){
+  const sel=document.getElementById('appProduct');
+  const row=(window._appProducts||[]).find(p=>p.id===sel?.value);
+  return patafixProductByName(row?.name||sel?.selectedOptions?.[0]?.dataset?.name||'');
+}
+
 window._appStep=1;
 function appStepNav(dir){
   const s=window._appStep+dir;
@@ -2828,6 +2904,10 @@ function appStepNav(dir){
   if(s===3){
     const amt=Number($('#appAmount').value);
     if(!amt||amt<=0)return toast('Enter a valid loan amount','warning');
+    if(!$('#appProduct')?.value)return toast('Select a PataFix product','warning');
+    const product=selectedAppProduct();
+    if(!product)return toast('Selected product is not configured','warning');
+    if(amt<product.min||amt>product.max)return toast(`${product.name} allows ${fmtMoney(product.min)} to ${fmtMoney(product.max)}`,'warning');
     if(!$('#appTerm').value)return toast('Enter loan term in weeks','warning');
     buildAppReview();
   }
@@ -2842,15 +2922,17 @@ function appStepNav(dir){
 
 function appCalcUpdate(){
   const amt=Number($('#appAmount').value)||0;const term=Number($('#appTerm').value)||0;
+  const product=selectedAppProduct();
   const tierInfo=$('#appTierInfo');
   if(amt>0&&tierInfo){
-    const rate=getAutoRate(amt);
-    const tier=getAutoTier(amt);
+    const rate=getAutoRate(amt, product?.name);
+    const tier=getAutoTier(amt, product?.name);
     tierInfo.style.display='block';
-    tierInfo.innerHTML=`PataFix rate: <strong>${PATAFIX_MONTHLY_INTEREST_RATE}% per month</strong> (${rate}% weekly equivalent)`;
+    const valid=product && amt>=product.min && amt<=product.max;
+    tierInfo.innerHTML=`<strong>${tier}</strong> | Rate: <strong>${product?.monthlyRate||0}% p.m</strong> | ${patafixFeeLabel(product)} | Registration fee: <strong>${fmtMoney(product?.registrationFee||0)}</strong> | Payments: <strong>${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'}</strong>${valid?'':`<br><span style="color:var(--accent-red)">Amount must be ${fmtMoney(product?.min||0)} - ${fmtMoney(product?.max||0)}</span>`}`;
     if(term>0){
-      const c=calcLoan(amt,rate,'flat',term);
-      $('#appCalcResult').innerHTML=`<div style="font-size:13px"><strong>Weekly:</strong> ${fmtMoney(c.weekly)} | <strong>Total Interest:</strong> ${fmtMoney(c.totalInterest)} | <strong>Total:</strong> ${fmtMoney(c.totalPayable)}</div>`;
+      const c=calcPataFixLoan(amt,term,product?.name,'flat');
+      $('#appCalcResult').innerHTML=`<div style="font-size:13px"><strong>${c.installmentLabel}:</strong> ${fmtMoney(c.weekly)} | <strong>Total Interest:</strong> ${fmtMoney(c.totalInterest)} | <strong>Total:</strong> ${fmtMoney(c.totalPayable)}</div>`;
     }
   }else if(tierInfo){tierInfo.style.display='none'}
 }
@@ -2860,19 +2942,19 @@ function buildAppReview(){
   const c=(window._appClients||[]).find(x=>x.id===id);
   const client = c?`${c.full_name} (${c.phone||''})`:'-';
   const amt=Number($('#appAmount').value);
-  const rate=getAutoRate(amt);
-  const tier=getAutoTier(amt);
-  const calc=calcLoan(amt,rate,'flat',Number($('#appTerm').value));
+  const product=selectedAppProduct();
+  const tier=getAutoTier(amt, product?.name);
+  const calc=calcPataFixLoan(amt,Number($('#appTerm').value),product?.name,'flat');
   $('#appReview').innerHTML=`<div class="card"><h3 style="font-size:14px;margin-bottom:12px">Application Summary</h3>
-    <p><strong>Client:</strong> ${client}</p><p><strong>Tier:</strong> ${tier}</p>
-    <p><strong>Amount:</strong> ${fmtMoney(amt)}</p><p><strong>Rate:</strong> ${PATAFIX_MONTHLY_INTEREST_RATE}% per month</p>
+    <p><strong>Client:</strong> ${client}</p><p><strong>Product:</strong> ${tier}</p>
+    <p><strong>Amount:</strong> ${fmtMoney(amt)}</p><p><strong>Rate:</strong> ${product?.monthlyRate||0}% per month</p>
     <p><strong>Term:</strong> ${$('#appTerm').value} weeks</p>
     <p><strong>Purpose:</strong> ${$('#appPurpose').value||'-'}</p>
     <p><strong>Guarantor:</strong> ${$('#appGuarantorName')?.value||'-'} ${$('#appGuarantorPhone')?.value?`(${ $('#appGuarantorPhone').value })`:''}</p>
     <p><strong>Guarantor Relationship:</strong> ${$('#appGuarantorRel')?.value||'-'}</p>
-    <p><strong>Weekly Installment:</strong> ${fmtMoney(calc.weekly)}</p>
+    <p><strong>${calc.installmentLabel}:</strong> ${fmtMoney(calc.weekly)}</p>
     <p><strong>Total Payable:</strong> ${fmtMoney(calc.totalPayable)}</p>
-    <p><strong>Processing Fee:</strong> ${fmtMoney(processingFeeFor(amt))}</p>
+    <p><strong>${patafixFeeLabel(product)}:</strong> ${fmtMoney(processingFeeFor(amt, product?.name))}</p>
   </div>`;
 }
 
@@ -2907,6 +2989,11 @@ async function submitApplication(){
 
     const appNo = generateUniqueNo('APP');
     const amt=Number($('#appAmount').value);
+    const productId=$('#appProduct')?.value||'';
+    const product=(window._appProducts||[]).find(p=>p.id===productId);
+    const productRule=patafixProductByName(product?.name);
+    if(!productId||!productRule) return toast('Select a valid PataFix product','warning');
+    if(amt<productRule.min||amt>productRule.max) return toast(`${productRule.name} allows ${fmtMoney(productRule.min)} to ${fmtMoney(productRule.max)}`,'warning');
     // Determine loan type: 'new_loan' if this is the client's first ever loan, 'repeat_loan' otherwise
     const{data:prevLoanCheck}=await sb('loans').select('id,loan_officer_id,created_at').eq('client_id',selectedClientId).eq('business_id',currentUser?.business_id).order('created_at',{ascending:false}).limit(1);
     const loanType=(prevLoanCheck&&prevLoanCheck.length>0)?'repeat_loan':'new_loan';
@@ -2923,20 +3010,8 @@ async function submitApplication(){
         appOfficerId = prevLoanCheck[0].loan_officer_id;
       }
     }
-    const rec={application_no:appNo,client_id:selectedClientId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRel')?.value||'').trim(),status:'submitted',loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType};
+    const rec={application_no:appNo,client_id:selectedClientId,product_id:productId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRel')?.value||'').trim(),status:'submitted',loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType};
     
-    // Robust auto-tier → product mapping (case-insensitive, trims, fallbacks)
-    const tier=getAutoTier(amt);
-    const tierLower=tier.toLowerCase();
-    const{data:bizProducts}=await sb('loan_products').select('id,name,is_active').eq('business_id', currentUser.business_id).eq('is_active',true);
-    let matchProduct=(bizProducts||[]).find(p=>(p.name||'').trim().toLowerCase()===tierLower);
-    if(!matchProduct) matchProduct=(bizProducts||[]).find(p=>(p.name||'').toLowerCase().includes(tierLower.split(' ')[0]));
-    if(matchProduct){
-      rec.product_id=matchProduct.id;
-    } else {
-      console.warn(`No product matched tier "${tier}" for business; submitting without product_id.`);
-      // Do NOT add product_id if no match — prevents 400 from unknown column
-    }
     // Try with product_id first; if Supabase rejects (column may not exist), retry without
     let insertedApp=null;
     let{data:inserted,error}=await sb('loan_applications').insert(rec).select('id,application_no').single();
@@ -2986,15 +3061,17 @@ function renderApplicationAssetManager(app){
 }
 
 async function viewApplication(id){
-  const{data:a}=await sb('loan_applications').select('*,loan_clients(id,full_name,phone,id_number,asset_photo_paths)').eq('id',id).eq('business_id',currentUser.business_id).single();
+    const{data:a}=await sb('loan_applications').select('*,loan_clients(id,full_name,phone,id_number,asset_photo_paths),loan_products(name)').eq('id',id).eq('business_id',currentUser.business_id).single();
   if(!a)return;
-  const rate=getAutoRate(a.applied_amount);const tier=getAutoTier(a.applied_amount);
+  const product=patafixProductByName(a.loan_products?.name)||getPataFixProduct(a.applied_amount);
+  const tier=product?.name||getAutoTier(a.applied_amount);
   openModal(`
     <h2>Application ${a.application_no||'DRAFT'}</h2>
     <div style="margin-bottom:12px">${statusBadge(a.status)} <span class="badge badge-blue">${tier}</span></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
       <p><strong>Client:</strong> ${escapeHtml(a.loan_clients?.full_name||'-')}</p><p><strong>Phone:</strong> ${escapeHtml(a.loan_clients?.phone||'-')}</p>
-      <p><strong>Amount:</strong> ${fmtMoney(a.applied_amount)}</p><p><strong>Rate:</strong> ${PATAFIX_MONTHLY_INTEREST_RATE}% / month</p>
+      <p><strong>Amount:</strong> ${fmtMoney(a.applied_amount)}</p><p><strong>Rate:</strong> ${product?.monthlyRate||0}% / month</p>
+      <p><strong>Payments:</strong> ${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'}</p><p><strong>Fee:</strong> ${patafixFeeLabel(product)}</p>
       <p><strong>Term:</strong> ${a.applied_term_weeks} weeks</p><p><strong>Date:</strong> ${fmtDate(a.created_at)}</p>
       <p><strong>Purpose:</strong> ${a.purpose||'-'}</p>
       <p><strong>Guarantor:</strong> ${escapeHtml(a.guarantor_name||'-')} ${a.guarantor_phone?`(${escapeHtml(a.guarantor_phone)})`:''}</p>
@@ -3138,7 +3215,7 @@ function renderDisbursementRows(rows){
       <td>${a.loan_clients?.phone||'-'}</td>
       <td>${fmtMoney(loan.disbursed_amount||a.applied_amount)}</td>
       <td>${a.applied_term_weeks||'-'}w</td>
-      <td><span class="badge badge-blue">${getAutoTier(a.applied_amount)}</span></td>
+      <td><span class="badge badge-blue">${escapeHtml(a.loan_products?.name||getAutoTier(a.applied_amount))}</span></td>
       <td>${isDisbursed?statusBadge('disbursed'):statusBadge('approved')}</td>
       <td>${fmtDate(a.approved_at)}</td>
       <td>${isDisbursed?fmtDate(loan.disbursement_date):'-'}</td>
@@ -3171,35 +3248,37 @@ function applyDisbursementFilters(){
 }
 
 async function openDisburseModal(appId){
-  const{data:app}=await sb('loan_applications').select('*,loan_clients(full_name,phone,notes)').eq('id',appId).single();
+  const{data:app}=await sb('loan_applications').select('*,loan_clients(full_name,phone,notes),loan_products(name)').eq('id',appId).single();
   if(!app)return toast('Application not found','error');
   const amt=app.applied_amount;
-  const rate=getAutoRate(amt);
-  const procFee=processingFeeFor(amt);
+  const product=patafixProductByName(app.loan_products?.name)||getPataFixProduct(amt);
+  const calc=calcPataFixLoan(amt,app.applied_term_weeks,product?.name,'flat');
+  const procFee=processingFeeFor(amt, product?.name);
   // Registration fee only applies to newly registered clients on their first loan.
   const{data:prevLoans}=await sb('loans').select('id').eq('client_id',app.client_id).eq('business_id',currentUser?.business_id).limit(2);
-  const regFee=registrationFeeForClient(app.loan_clients, prevLoans);
+  const regFee=registrationFeeForClient(app.loan_clients, prevLoans, product?.name);
   // Net disbursement is principal less processing fee and first-loan registration fee.
   const netDisbursement=Math.max(0,amt-procFee-regFee);
-  const firstRep=new Date();firstRep.setDate(firstRep.getDate()+7);
+  const firstRep=new Date();firstRep.setDate(firstRep.getDate()+((product?.paymentEveryWeeks||1)*7));
   const clientName=app.loan_clients?.full_name||'Unknown Client';
   const clientPhone=app.loan_clients?.phone||'';
   openModal(`
     <h2>Disburse Loan — ${app.application_no}</h2>
     <div class="card" style="margin-bottom:12px;font-size:13px;background:rgba(59,130,246,0.08);border-color:rgba(59,130,246,0.3)">
       <p style="font-size:15px;font-weight:700;margin-bottom:4px">👤 ${clientName}</p>
-      <p style="color:var(--text-secondary)">${clientPhone} &nbsp;|&nbsp; <strong>Tier:</strong> ${getAutoTier(amt)} | <strong>Rate:</strong> ${PATAFIX_MONTHLY_INTEREST_RATE}% / month | <strong>Term:</strong> ${app.applied_term_weeks} weeks</p>
+      <p style="color:var(--text-secondary)">${clientPhone} &nbsp;|&nbsp; <strong>Product:</strong> ${product?.name||'-'} | <strong>Rate:</strong> ${product?.monthlyRate||0}% / month | <strong>Payments:</strong> ${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'} | <strong>Term:</strong> ${app.applied_term_weeks} weeks</p>
     </div>
     <div class="form-row"><div class="form-group"><label>Approved Loan Amount</label><input class="input" type="number" id="dAmt" value="${amt}"></div><div class="form-group"><label>Disbursement Method</label><select class="select" id="dMethod"><option value="cash">Cash</option><option value="mpesa" selected>M-Pesa</option><option value="bank_transfer">Bank Transfer</option></select></div></div>
     <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="dRef"></div><div class="form-group"><label>Disbursement Date</label><input class="input" type="date" id="dDate" value="${today()}"></div></div>
     <div class="form-group"><label>First Repayment Date</label><input class="input" type="date" id="dFirstRep" value="${localISODate(firstRep)}"></div>
     <div class="card" style="margin-top:12px;font-size:13px">
       <p style="display:flex;justify-content:space-between"><span>Gross Amount</span><strong>${fmtMoney(amt)}</strong></p>
-      <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Processing Fee - deducted from disbursed amount</span><strong>${fmtMoney(procFee)}</strong></p>
+      <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>${patafixFeeLabel(product)} - deducted from disbursed amount</span><strong>${fmtMoney(procFee)}</strong></p>
       ${regFee>0
         ?`<p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Registration Fee <span style="font-size:10px">(new client, one-time) - deducted from disbursed amount</span></span><strong>${fmtMoney(regFee)}</strong></p>`
         :`<p style="font-size:11px;color:var(--accent-green)">No registration fee - applies only to newly registered clients on their first loan</p>`}
       <hr style="border:none;border-top:1px solid var(--border);margin:6px 0">
+      <p style="display:flex;justify-content:space-between"><span>${calc.installmentLabel}</span><strong>${fmtMoney(calc.weekly)}</strong></p>
       <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Net Disbursement</strong></span><strong style="color:var(--accent-green)">${fmtMoney(netDisbursement)}</strong></p>
       <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">Fees totaling ${fmtMoney(procFee+regFee)} are deducted from the approved loan amount before funds are released.</p>
     </div>
@@ -3211,7 +3290,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
   const btn = document.getElementById('btnConfirmDisburse');
   if(btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
   try{
-    const {data: appCheck} = await sb('loan_applications').select('status').eq('id', appId).single();
+    const {data: appCheck} = await sb('loan_applications').select('status,loan_products(name)').eq('id', appId).single();
     if(appCheck?.status === 'disbursed') {
         toast('This application has already been disbursed!', 'warning');
         closeModal();
@@ -3220,17 +3299,17 @@ async function confirmDisburse(appId,clientId,termWeeks){
     }
 
     const amt=Number($('#dAmt').value);const term=Number(termWeeks);
-    const rate=getAutoRate(amt);
-    const c=calcLoan(amt,rate,'flat',term);
-    const procFee=processingFeeFor(amt);
+    const product=patafixProductByName(appCheck?.loan_products?.name)||getPataFixProduct(amt);
+    const c=calcPataFixLoan(amt,term,product?.name,'flat');
+    const procFee=processingFeeFor(amt, product?.name);
     // Registration fee only applies to newly registered clients on their first loan.
     const{data:prevLoans}=await sb('loans').select('id,loan_officer_id,created_at').eq('client_id',clientId).eq('business_id',currentUser?.business_id).order('created_at',{ascending:false}).limit(2);
-    const{data:feeClient}=await sb('loan_clients').select('notes').eq('id',clientId).eq('business_id',currentUser?.business_id).single();
+    const{data:feeClient}=await sb('loan_clients').select('full_name,notes').eq('id',clientId).eq('business_id',currentUser?.business_id).single();
     const isReturningClient=(prevLoans&&prevLoans.length>0);
-    const regFee=registrationFeeForClient(feeClient, prevLoans);
+    const regFee=registrationFeeForClient(feeClient, prevLoans, product?.name);
     const netDisbursement=Math.max(0,amt-procFee-regFee);
     const disbDate=$('#dDate').value;const firstRep=$('#dFirstRep').value;
-    const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(term-1)*7);
+    const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(c.installments-1)*c.intervalWeeks*7);
 
     const loanNo = generateUniqueNo('LN');
 
@@ -3250,7 +3329,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
       disbOfficerId = prevLoans[0].loan_officer_id;
     }
     // Fees are deducted from the released amount; loan balance still follows the approved principal plus interest.
-    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:rate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:netDisbursement,disbursement_method:$('#dMethod').value,disbursement_reference:$('#dRef').value,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:'active',outstanding_balance:c.totalPayable,total_paid:0,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType};
+    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:c.periodRate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:netDisbursement,disbursement_method:$('#dMethod').value,disbursement_reference:$('#dRef').value,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:'active',outstanding_balance:c.totalPayable,total_paid:0,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType};
 
     // Guard: if loan_type column doesn't exist yet in DB, retry without it
     let{data:loan,error:lErr}=await sb('loans').insert(loanRec).select().single();
@@ -3262,8 +3341,12 @@ async function confirmDisburse(appId,clientId,termWeeks){
     }
     if(lErr)throw lErr;
 
+    if(regFee>0){
+      await recordRegistrationFeeIncome(clientId, feeClient?.full_name || 'Client', disbDate, regFee);
+    }
+
     const schedules=c.schedule.map((s,i)=>{
-      const due=parseLocalDate(firstRep);due.setDate(due.getDate()+i*7);
+      const due=parseLocalDate(firstRep);due.setDate(due.getDate()+i*c.intervalWeeks*7);
       return{loan_id:loan.id,business_id:currentUser?.business_id,installment_no:s.no,due_date:localISODate(due),principal_due:s.principal,interest_due:s.interest,total_due:s.total,principal_paid:0,interest_paid:0,total_paid:0,penalty_charged:0,status:'pending'};
     });
     
@@ -3417,7 +3500,7 @@ async function viewLoan(id){
     <div style="font-size:13px;margin-bottom:12px;color:var(--text-secondary)">👤 <strong style="color:var(--text)">${loan.loan_clients?.full_name||'-'}</strong> &nbsp; ${loan.loan_clients?.phone||''}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:13px;margin-bottom:16px">
       <div><strong>Principal:</strong> ${fmtMoney(loan.principal_amount)}</div>
-      <div><strong>Rate:</strong> ${PATAFIX_MONTHLY_INTEREST_RATE}% / month</div>
+      <div><strong>Rate:</strong> ${Number(loan.interest_rate||0)}% / repayment period</div>
       <div><strong>Term:</strong> ${loan.term_weeks} weeks</div>
       <div><strong>Weekly:</strong> ${fmtMoney(loan.weekly_installment)}</div>
       <div><strong>Balance:</strong> <span style="color:var(--accent-yellow)">${fmtMoney(loan.outstanding_balance)}</span></div>
@@ -3658,7 +3741,7 @@ async function exportLoanPDF(id){
   const{jsPDF}=window.jspdf;const doc=new jsPDF();
   doc.setFontSize(16);doc.text('PataFix - Loan Statement',14,20);
   doc.setFontSize(10);doc.text(`Loan: ${loan.loan_no} | Generated: ${fmtDate(today())}`,14,28);
-  doc.text(`Principal: ${fmtMoney(loan.principal_amount)} | Rate: ${PATAFIX_MONTHLY_INTEREST_RATE}%/month | Term: ${loan.term_weeks} weeks`,14,34);
+  doc.text(`Principal: ${fmtMoney(loan.principal_amount)} | Rate: ${Number(loan.interest_rate||0)}%/period | Term: ${loan.term_weeks} weeks`,14,34);
   doc.text(`Balance: ${fmtMoney(loan.outstanding_balance)} | Status: ${loan.status}`,14,40);
   doc.autoTable({startY:44,head:[['#','Due Date','Due','Paid','Status']],body:(schedules||[]).map(s=>[s.installment_no,s.due_date,fmtMoney(s.total_due),fmtMoney(s.total_paid),s.status]),styles:{fontSize:8}});
   // Combined payment + penalty timeline
@@ -6226,9 +6309,9 @@ function renderCalculator(){
   main.innerHTML=`
     <div class="page-header"><h1>Loan Calculator</h1></div>
     <div class="card" style="max-width:700px">
-      <div class="form-row"><div class="form-group"><label>Loan Amount</label><input class="input" type="number" id="calcAmt" value="10000" oninput="updateCalc()"></div><div class="form-group"><label>Interest Rate (% per month)</label><input class="input" type="number" step="0.01" id="calcRate" value="20" oninput="updateCalc()"></div></div>
+      <div class="form-row"><div class="form-group"><label>Product</label><select class="select" id="calcProduct" onchange="updateCalc()">${PATAFIX_PRODUCTS.map(p=>`<option value="${p.name}">${p.name}</option>`).join('')}</select></div><div class="form-group"><label>Loan Amount</label><input class="input" type="number" id="calcAmt" value="10000" oninput="updateCalc()"></div></div>
       <div class="form-row"><div class="form-group"><label>Term (weeks)</label><input class="input" type="number" id="calcTerm" value="4" oninput="updateCalc()"></div><div class="form-group"><label>Interest Type</label><select class="select" id="calcType" onchange="updateCalc()"><option value="flat">Flat Rate</option><option value="reducing_balance">Reducing Balance</option></select></div></div>
-      <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(37,99,235,.06)">KES 250 below KES 5,000; KES 500 from KES 5,000 upward</div></div>
+      <div class="form-group"><label>Product Fees</label><div class="input" style="background:rgba(37,99,235,.06)">Inua Biz: KES 500 flat. Kuza: 5%. Nawiri: 6%. Komanza: 10%. Registration fee is product-based.</div></div>
       <div class="card" style="margin-top:8px;font-size:13px" id="calcTierDetect"></div>
       <div id="calcResults" style="margin-top:16px"></div>
       <button class="btn btn-outline" style="margin-top:12px" onclick="downloadCalcExcel()">Download Schedule (Excel)</button>
@@ -6240,24 +6323,24 @@ function renderCalculator(){
 
 let lastCalcSchedule=[];
 function updateCalc(){
-  const amt=Number($('#calcAmt')?.value)||0;const monthlyRate=Number($('#calcRate')?.value)||0;const rate=monthlyRate/4;
+  const amt=Number($('#calcAmt')?.value)||0;const productName=$('#calcProduct')?.value||'';const product=getPataFixProduct(amt,productName);
   const term=Number($('#calcTerm')?.value)||1;const type=$('#calcType')?.value||'flat';
   
   const tierEl=$('#calcTierDetect');
   if(tierEl&&amt>0){
-    const autoRate=getAutoRate(amt);const tier=getAutoTier(amt);
-    tierEl.innerHTML=`PataFix policy: <strong>${PATAFIX_MONTHLY_INTEREST_RATE}% per month</strong>; processing fee <strong>${fmtMoney(processingFeeFor(amt))}</strong>`;
+    const tier=getAutoTier(amt, productName);
+    tierEl.innerHTML=`<strong>${tier}</strong> | Rate: <strong>${product?.monthlyRate||0}% p.m</strong> | ${patafixFeeLabel(product)} | Registration fee: <strong>${fmtMoney(product?.registrationFee||0)}</strong> | Payments: <strong>${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'}</strong>`;
     tierEl.style.display='block';
   }
   
-  const c=calcLoan(amt,rate,type,term);
+  const c=calcPataFixLoan(amt,term,productName,type);
   lastCalcSchedule=c.schedule;
   const el=$('#calcResults');if(!el)return;
   el.innerHTML=`
     <div class="kpi-grid" style="margin-bottom:16px">
-      <div class="kpi-card"><div class="kpi-label">Weekly Installment</div><div class="kpi-value" style="color:var(--accent-blue)">${fmtMoney(c.weekly)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">${c.installmentLabel}</div><div class="kpi-value" style="color:var(--accent-blue)">${fmtMoney(c.weekly)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Total Interest</div><div class="kpi-value" style="color:var(--accent-yellow)">${fmtMoney(c.totalInterest)}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Processing Fee</div><div class="kpi-value">${fmtMoney(processingFeeFor(amt))}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Loan Fee</div><div class="kpi-value">${fmtMoney(processingFeeFor(amt, productName))}</div></div>
       <div class="kpi-card"><div class="kpi-label">Total Payable</div><div class="kpi-value" style="color:var(--accent-red)">${fmtMoney(c.totalPayable)}</div></div>
     </div>
     <div class="table-wrap"><table><thead><tr><th>#</th><th>Principal</th><th>Interest</th><th>Installment</th><th>Balance</th></tr></thead><tbody>
@@ -6289,13 +6372,18 @@ async function renderSettings(){
       </div>
       <div class="card" style="max-width:700px;margin-bottom:16px">
         <h3 style="font-size:16px;margin-bottom:10px">PataFix Interest Policy</h3>
-        <div class="input" style="background:rgba(37,99,235,.06);line-height:1.5"><strong>${PATAFIX_MONTHLY_INTEREST_RATE}% per month</strong><br><span style="font-size:11px;color:var(--text-secondary)">Repayment schedules remain weekly, using a 5% weekly equivalent.</span></div>
+        <div class="input" style="background:rgba(37,99,235,.06);line-height:1.6;min-height:auto">
+          <strong>INUA BIZ:</strong> 5k-10k, 20% p.m, KES 200 registration, KES 500 flat processing, weekly<br>
+          <strong>KUZA:</strong> 11k-15k, 20% p.m, KES 300 registration, 5% processing, weekly<br>
+          <strong>NAWIRI:</strong> 16k-20k, 20% p.m, KES 400 registration, 6% application fee, weekly<br>
+          <strong>KOMANZA:</strong> 16k-40k, 18% p.m, KES 400 registration, 10% application fee, biweekly
+        </div>
         <input type="hidden" id="setStdRate" value="5"><input type="hidden" id="setMicroRate" value="5"><input type="hidden" id="setThreshold" value="5000">
       </div>
       <div class="card" style="max-width:700px;margin-bottom:16px">
         <h3 style="font-size:16px;margin-bottom:16px">Defaults</h3>
         <div class="form-row"><div class="form-group"><label>Grace Period (days)</label><input class="input" type="number" id="setGrace" value="${settings.default_grace_period||7}"></div><div class="form-group"><label>Late Penalty %</label><input class="input" type="number" id="setPenalty" value="${settings.default_late_penalty_pct||5}"></div></div>
-        <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(59,130,246,0.06);display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong style="color:var(--accent-blue)">KES 250</strong><span style="color:var(--text-secondary);font-size:12px">below KES 5,000</span><strong style="color:var(--accent-blue)">KES 500</strong><span style="color:var(--text-secondary);font-size:12px">from KES 5,000 upward</span><span style="color:var(--text-secondary);font-size:12px">deducted from disbursed amount</span></div><input type="hidden" id="setFee" value="0"></div>
+        <div class="form-group"><label>Loan Fees</label><div class="input" style="background:rgba(59,130,246,0.06);line-height:1.5;min-height:auto">Fees are product-based and deducted from the disbursed amount. Registration fee applies only to newly registered clients on their first loan.</div><input type="hidden" id="setFee" value="0"></div>
         <div class="form-group"><label>Default Disbursement Method</label><select class="select" id="setDisbMethod"><option value="cash" ${settings.disbursement_method==='cash'?'selected':''}>Cash (Manual)</option><option value="mpesa" ${(!settings.disbursement_method||settings.disbursement_method==='mpesa')?'selected':''}>M-Pesa</option><option value="bank_transfer" ${settings.disbursement_method==='bank_transfer'?'selected':''}>Bank Transfer</option></select></div>
         <div style="background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);border-radius:8px;padding:12px;margin-top:8px">
           <strong style="font-size:13px;color:var(--accent-red)">Rollover Penalty Policy</strong>
