@@ -362,7 +362,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-24-products-v1';
+const APP_VERSION = 'patafix-2026-07-24-products-v2';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -383,7 +383,7 @@ let charts = {};
 let appSettings = null; 
 let serviceBilling = { status:'unknown', paid:false, locked:false, reminder:false, pending:false, cycleMonth:null, checkedAt:null };
 let emailLoginInProgress = false;
-const SERVICE_BILLING_AMOUNT = 2000;
+const SERVICE_BILLING_AMOUNT = 3000;
 const SERVICE_BILLING_FIRST_REMINDER_DATE = '2026-08-02';
 const SERVICE_BILLING_REMINDER_DAY = 2;
 const SERVICE_BILLING_LOCK_DAY = 4;
@@ -623,8 +623,8 @@ function escapeHtml(v){
   return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
 }
 
-const CLIENT_PHOTO_BUCKET = 'client-photos';
-const CLIENT_ASSET_BUCKET = 'client-assets';
+const CLIENT_PHOTO_BUCKET = 'patafix-client-photos';
+const CLIENT_ASSET_BUCKET = 'patafix-client-assets';
 function clientInitials(name){
   const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
   return (parts[0]?.[0] || 'C') + (parts[1]?.[0] || '');
