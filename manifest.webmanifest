@@ -1,0 +1,30 @@
+{
+  "name": "PataFix",
+  "short_name": "PataFix",
+  "description": "Fast Loans. Fresh Starts. Brighter Growth.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f8fbff",
+  "theme_color": "#0ea5e9",
+  "icons": [
+    {
+      "src": "assets/patafix-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/patafix-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/patafix-icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
