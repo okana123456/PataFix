@@ -214,9 +214,13 @@ tr:hover{background:rgba(37,99,235,.04)}
 .kpi-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
 }
 @media(max-width:640px){
+#appShell{height:auto;min-height:100dvh}
 .sidebar{transform:translateX(-100%);width:200px}
 .sidebar.open{transform:translateX(0)}
-.main-content{margin-left:0;padding:8px;padding-top:48px}
+.sidebar-header{padding-left:68px;min-height:86px}
+.sidebar-header h2{font-size:14px}
+.sidebar-header span{display:block;line-height:1.35}
+.main-content{margin-left:0;min-height:100dvh;padding:8px;padding-top:48px;padding-bottom:calc(112px + env(safe-area-inset-bottom));overflow-y:visible}
 .hamburger{display:block}
 .form-row{grid-template-columns:1fr}
 .kpi-grid{grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:10px}
@@ -363,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-24-products-v2';
+const APP_VERSION = 'patafix-2026-07-24-mobile-layout-v3';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
