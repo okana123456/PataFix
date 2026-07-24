@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-24-daraja-auth-v4';
+const APP_VERSION = 'patafix-2026-07-24-daraja-debug-v5';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -6491,7 +6491,8 @@ async function saveSettings(){
         });
         const regJson = await regResp.json().catch(()=>({}));
         if(!regResp.ok || regJson.error){
-          alert('Failed to register webhook with Safaricom: ' + (regJson.error || regJson.message || regResp.status));
+          const detail = regJson.response ? `\n\nDetails: ${JSON.stringify(regJson.response).slice(0,500)}` : '';
+          alert('Failed to register webhook with Safaricom: ' + (regJson.error || regJson.message || regResp.status) + detail);
           if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }
           return;
         }

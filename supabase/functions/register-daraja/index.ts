@@ -38,20 +38,32 @@ serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("PATAFIX_PROJECT_URL") || "";
     const serviceKey = Deno.env.get("PATAFIX_SERVICE_ROLE_KEY") || "";
+    if (!supabaseUrl || !serviceKey) {
+      return json({
+        success: false,
+        error: "PataFix Supabase secrets are missing. Add PATAFIX_PROJECT_URL and PATAFIX_SERVICE_ROLE_KEY.",
+      }, 400);
+    }
     const supabase = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    const { data: userData } = await supabase.auth.getUser(jwt);
+    const { data: userData, error: userError } = await supabase.auth.getUser(jwt);
     const user = userData?.user;
-    if (!user) return json({ success: false, error: "Please sign in again." }, 401);
+    if (!user) {
+      return json({
+        success: false,
+        error: userError?.message || "Please sign in again.",
+      }, 401);
+    }
 
     const { data: staff } = await supabase
       .from("loan_staff")
       .select("id, role, is_active")
       .eq("auth_user_id", user.id)
       .maybeSingle();
-    if (!staff?.is_active || staff.role !== "admin") {
+    const roles = String(staff?.role || "").split(",").map((role) => role.trim());
+    if (!staff?.is_active || !roles.includes("admin")) {
       return json({ success: false, error: "Only the business admin can register Daraja URLs." }, 403);
     }
 
