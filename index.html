@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-24-daraja-debug-v5';
+const APP_VERSION = 'patafix-2026-07-24-console-clean-v6';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -425,7 +425,6 @@ async function refreshPataFixBrowserCache(){
 async function keepSupabaseAlive() {
     try {
         await sb('loan_settings').select('id').limit(1);
-        console.log("Supabase keep-alive ping successful.");
     } catch(e) {}
 }
 
@@ -1322,7 +1321,6 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
     let staff = staffCache;
     
     if(!staff && authUser){
-        console.log('PataFix auth user:', authUser?.id, authUser?.email);
         const staffMatches = [];
         const addStaffRows = rows => (rows||[]).forEach(row => {
           if(row && !staffMatches.find(existing => existing.id === row.id)) staffMatches.push(row);
@@ -1353,16 +1351,7 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
           else row.auth_user_id = authUser.id;
         }
 
-        console.log('PataFix matched staff:', staffMatches.map(row => ({
-          id: row.id,
-          business_id: row.business_id,
-          auth_user_id: row.auth_user_id,
-          email: row.email,
-          active: row.is_active
-        })));
-
         staff = await choosePataFixStaffRecord(staffMatches, authUser);
-        console.log('PataFix selected business:', staff?.business_id);
 
         if(!staff){
           await supabaseClient.auth.signOut();
@@ -2993,7 +2982,6 @@ async function submitApplication(){
     const zeroBalActive=(activeLoans||[]).filter(l=>Number(l.outstanding_balance||0)<=0.01);
     if(zeroBalActive.length){
       await Promise.all(zeroBalActive.map(l=>sb('loans').update({status:'completed',arrears_amount:0,overdue_days:0}).eq('id',l.id)));
-      console.log(`[AutoHeal] Marked ${zeroBalActive.length} zero-balance loan(s) as completed for client ${selectedClientId}`);
     }
     if(trueActive.length>0){
       toast('This client already has an active loan. They must clear it first.','error');
@@ -6837,8 +6825,6 @@ async function handleExcelImport(ev){
     rows=aoa.slice(headerIdx+1).filter(r=>r.some(c=>c!==''&&c!==null&&c!==undefined)).map(r=>{
       const obj={}; headers.forEach((h,j)=>{ if(h) obj[h]=r[j]!==undefined?r[j]:''; }); return obj;
     });
-    console.log('[Excel Import] Parsed',rows.length,'data rows from IMPORT_TEMPLATE (header at row',headerIdx+1,')');
-    if(rows.length>0){ console.log('[Excel Import] Sample row dates — application_date:',rows[0].application_date,'| disbursement_date:',rows[0].disbursement_date,'| payment_date:',rows[0].payment_date); }
   }catch(e){
     if(progBox)progBox.style.display='none';
     if(statusEl)statusEl.textContent='';
