@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-25-backdate-manual-v7';
+const APP_VERSION = 'patafix-2026-07-26-upfront-processing-v8';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1092,6 +1092,9 @@ function patafixFeeLabel(product){
   const fee=product.feeType==='flat' ? fmtMoney(product.feeValue) : `${product.feeValue}% of principal`;
   const feeName=product.name==='INUA BIZ'?'Processing fee':'Application fee';
   return `${feeName}: ${fee}`;
+}
+function patafixFeeName(product){
+  return product?.name==='INUA BIZ'?'Processing fee':'Application fee';
 }
 function processingFeeFor(amount, productName=''){
   const product=getPataFixProduct(amount, productName);
@@ -3274,8 +3277,8 @@ async function openDisburseModal(appId){
   // Registration fee only applies to newly registered clients on their first loan.
   const{data:prevLoans}=await sb('loans').select('id').eq('client_id',app.client_id).eq('business_id',currentUser?.business_id).limit(2);
   const regFee=registrationFeeForClient(app.loan_clients, prevLoans, product?.name);
-  // Net disbursement is principal less processing fee and first-loan registration fee.
-  const netDisbursement=Math.max(0,amt-procFee-regFee);
+  // Processing/application fee is collected upfront; registration fee still applies only to new clients on the first loan.
+  const netDisbursement=Math.max(0,amt-regFee);
   const firstRep=new Date();firstRep.setDate(firstRep.getDate()+((product?.paymentEveryWeeks||1)*7));
   const clientName=app.loan_clients?.full_name||'Unknown Client';
   const clientPhone=app.loan_clients?.phone||'';
@@ -3288,17 +3291,17 @@ async function openDisburseModal(appId){
     <div class="form-row"><div class="form-group"><label>Approved Loan Amount</label><input class="input" type="number" id="dAmt" value="${amt}"></div><div class="form-group"><label>Disbursement Method</label><select class="select" id="dMethod"><option value="cash">Cash</option><option value="mpesa" selected>M-Pesa</option><option value="bank_transfer">Bank Transfer</option></select></div></div>
     <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="dRef"></div><div class="form-group"><label>Disbursement Date</label><input class="input" type="date" id="dDate" value="${today()}"></div></div>
     <div class="form-group"><label>First Repayment Date</label><input class="input" type="date" id="dFirstRep" value="${localISODate(firstRep)}"></div>
-    <div class="form-group"><label>Current Remaining Balance (optional)</label><input class="input" type="number" id="dOpeningBalance" placeholder="${c.totalPayable.toFixed(2)}"><div style="font-size:11px;color:var(--text-secondary);margin-top:3px">For an existing/backdated loan, enter what the client still owes now. Leave blank for a fresh loan.</div></div>
+    <div class="form-group"><label>Current Remaining Balance (optional)</label><input class="input" type="number" id="dOpeningBalance" placeholder="${calc.totalPayable.toFixed(2)}"><div style="font-size:11px;color:var(--text-secondary);margin-top:3px">For an existing/backdated loan, enter what the client still owes now. Leave blank for a fresh loan.</div></div>
     <div class="card" style="margin-top:12px;font-size:13px">
       <p style="display:flex;justify-content:space-between"><span>Gross Amount</span><strong>${fmtMoney(amt)}</strong></p>
-      <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>${patafixFeeLabel(product)} - deducted from disbursed amount</span><strong>${fmtMoney(procFee)}</strong></p>
+      <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>${patafixFeeLabel(product)} - paid upfront before loan release</span><strong>${fmtMoney(procFee)}</strong></p>
       ${regFee>0
         ?`<p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Registration Fee <span style="font-size:10px">(new client, one-time) - deducted from disbursed amount</span></span><strong>${fmtMoney(regFee)}</strong></p>`
         :`<p style="font-size:11px;color:var(--accent-green)">No registration fee - applies only to newly registered clients on their first loan</p>`}
       <hr style="border:none;border-top:1px solid var(--border);margin:6px 0">
       <p style="display:flex;justify-content:space-between"><span>${calc.installmentLabel}</span><strong>${fmtMoney(calc.weekly)}</strong></p>
       <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Net Disbursement</strong></span><strong style="color:var(--accent-green)">${fmtMoney(netDisbursement)}</strong></p>
-      <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">Fees totaling ${fmtMoney(procFee+regFee)} are deducted from the approved loan amount before funds are released.</p>
+      <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">${patafixFeeName(product)} is paid upfront before release. Only the first-loan registration fee, when applicable, reduces the released amount.</p>
     </div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnConfirmDisburse" onclick="confirmDisburse('${appId}','${app.client_id}','${app.applied_term_weeks}')">Confirm & Disburse</button></div>
   `,true);
@@ -3325,7 +3328,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
     const{data:feeClient}=await sb('loan_clients').select('full_name,notes').eq('id',clientId).eq('business_id',currentUser?.business_id).single();
     const isReturningClient=(prevLoans&&prevLoans.length>0);
     const regFee=registrationFeeForClient(feeClient, prevLoans, product?.name);
-    const netDisbursement=Math.max(0,amt-procFee-regFee);
+    const netDisbursement=Math.max(0,amt-regFee);
     const disbDate=$('#dDate').value;const firstRep=$('#dFirstRep').value;
     const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(c.installments-1)*c.intervalWeeks*7);
 
@@ -3346,7 +3349,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
     } else if(isReturningClient && prevLoans[0]?.loan_officer_id){
       disbOfficerId = prevLoans[0].loan_officer_id;
     }
-    // Fees are deducted from the released amount; loan balance still follows the approved principal plus interest.
+    // Processing/application fee is paid upfront; loan balance still follows the approved principal plus interest.
     const openingBalanceRaw=$('#dOpeningBalance')?.value;
     const openingBalance=openingBalanceRaw===''?c.totalPayable:Math.max(0,Number(openingBalanceRaw)||0);
     if(openingBalance>c.totalPayable) throw new Error('Current remaining balance cannot be more than total payable.');
@@ -3385,7 +3388,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
 
     await sb('loan_applications').update({status:'disbursed'}).eq('id',appId);
 
-    // Log processing fee income from the disbursement deduction.
+    // Log processing/application fee income collected upfront before disbursement.
     try{
       const feeRcpt=(appSettings?.receipt_no_prefix||'RCP')+'-PF-'+Date.now().toString().slice(-8);
       await sb('journal_entries').insert({
@@ -3393,7 +3396,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
         business_id:currentUser?.business_id,
         date:disbDate,
         ref:feeRcpt,
-        description:`Processing fee deducted from disbursement - Loan ${loanNo}`,
+        description:`${patafixFeeName(product)} paid upfront - Loan ${loanNo}`,
         debit:'Cash',
         credit:'Processing Fee Income',
         amount:procFee,
@@ -3532,7 +3535,7 @@ async function viewLoan(id){
       <div><strong>Weekly:</strong> ${fmtMoney(loan.weekly_installment)}</div>
       <div><strong>Balance:</strong> <span style="color:var(--accent-yellow)">${fmtMoney(loan.outstanding_balance)}</span></div>
       <div><strong>Total Paid:</strong> <span style="color:var(--accent-green)">${fmtMoney(loan.total_paid)}</span></div>
-      <div><strong>Processing Fee:</strong> <span style="color:var(--accent-blue)">${fmtMoney(loan.processing_fee||0)} deducted from disbursement</span></div>
+      <div><strong>Processing Fee:</strong> <span style="color:var(--accent-blue)">${fmtMoney(loan.processing_fee||0)} paid upfront</span></div>
       <div><strong>Disbursed:</strong> ${fmtDate(loan.disbursement_date)}</div>
       <div><strong>Maturity:</strong> ${fmtDate(loan.maturity_date)}</div>
       <div><strong>Method:</strong> ${loan.disbursement_method||'-'}</div>
@@ -3740,7 +3743,7 @@ async function viewClientPayments(loanId){
     <div class="card" style="margin-bottom:12px;font-size:12px;background:rgba(217,119,6,0.07);border-color:rgba(217,119,6,0.3)">
       <span style="font-weight:700">Processing Fee: ${fmtMoney(procFee)}</span>
       &nbsp;&nbsp;
-      <span style="color:var(--accent-green);font-weight:700">Deducted from disbursement</span>
+      <span style="color:var(--accent-green);font-weight:700">Paid upfront</span>
     </div>`:''}
     <div class="table-wrap">
       <table>
@@ -3875,9 +3878,9 @@ async function renderRepayments(page=1){
         const balCell  = balRem <= 0
           ? '<span style="color:var(--accent-green);font-weight:700">Cleared ✅</span>'
           : '<strong style="color:'+balColor+'">'+fmtMoney(balRem)+'</strong>';
-        // Processing fee cell shows the fee amount deducted from disbursement.
+        // Processing fee cell shows the upfront fee amount.
         const procCell = procFee > 0
-          ? '<span style="font-size:11px">'+fmtMoney(procFee)+'<br><span style="color:var(--accent-green);font-size:10px">Deducted</span></span>'
+          ? '<span style="font-size:11px">'+fmtMoney(procFee)+'<br><span style="color:var(--accent-green);font-size:10px">Upfront</span></span>'
           : '<span style="color:var(--text-secondary);font-size:11px">—</span>';
         const rid = r.id;
         const rclient = r.loans?.loan_clients?.full_name||'-';
@@ -4341,7 +4344,7 @@ function exportRepaymentsExcel(){
       'Amount (KES)':      Number(r.amount||0),
       'Balance Remaining': balRem<=0?'Cleared':Number(balRem.toFixed(2)),
       'Processing Fee (KES)': procFee>0?Number(procFee.toFixed(2)):'',
-      'Proc Fee Status':   procFee>0?'Deducted from disbursement':'',
+      'Proc Fee Status':   procFee>0?'Paid upfront':'',
       'Method':            r.payment_method||'-',
   'Date & Time':       fmtPaymentDateTime(r.payment_date||r.created_at)
     };
@@ -6412,7 +6415,7 @@ async function renderSettings(){
       <div class="card" style="max-width:700px;margin-bottom:16px">
         <h3 style="font-size:16px;margin-bottom:16px">Defaults</h3>
         <div class="form-row"><div class="form-group"><label>Grace Period (days)</label><input class="input" type="number" id="setGrace" value="${settings.default_grace_period||7}"></div><div class="form-group"><label>Late Penalty %</label><input class="input" type="number" id="setPenalty" value="${settings.default_late_penalty_pct||5}"></div></div>
-        <div class="form-group"><label>Loan Fees</label><div class="input" style="background:rgba(59,130,246,0.06);line-height:1.5;min-height:auto">Fees are product-based and deducted from the disbursed amount. Registration fee applies only to newly registered clients on their first loan.</div><input type="hidden" id="setFee" value="0"></div>
+        <div class="form-group"><label>Loan Fees</label><div class="input" style="background:rgba(59,130,246,0.06);line-height:1.5;min-height:auto">Processing/application fees are product-based and paid upfront before loan release. Registration fee applies only to newly registered clients on their first loan.</div><input type="hidden" id="setFee" value="0"></div>
         <div class="form-group"><label>Default Disbursement Method</label><select class="select" id="setDisbMethod"><option value="cash" ${settings.disbursement_method==='cash'?'selected':''}>Cash (Manual)</option><option value="mpesa" ${(!settings.disbursement_method||settings.disbursement_method==='mpesa')?'selected':''}>M-Pesa</option><option value="bank_transfer" ${settings.disbursement_method==='bank_transfer'?'selected':''}>Bank Transfer</option></select></div>
         <div style="background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);border-radius:8px;padding:12px;margin-top:8px">
           <strong style="font-size:13px;color:var(--accent-red)">Rollover Penalty Policy</strong>
