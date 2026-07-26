@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-26-product-reg-fees-v10';
+const APP_VERSION = 'patafix-2026-07-26-registration-accounting-v11';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -6079,7 +6079,7 @@ async function renderAccounting() {
     // but the server has already done the heavy lifting above.
     const filteredLoans = filterByDate(allLoans.filter(l=>l.disbursement_date), 'disbursement_date', f);
     const filteredReps = filterByDate(allReps, 'payment_date', f);
-    const filteredClients = allClients.filter(c=>dateInSelectedRange(registrationFeeIncomeDate(c, clientFirstLoan[c.id])));
+    const filteredClients = allClients.filter(c=>registrationFeeIncomeAmount(c, clientFirstLoan[c.id])>0 && dateInSelectedRange(registrationFeeIncomeDate(c, clientFirstLoan[c.id])));
     const filteredPenalties = filterByDate(allPenalties.filter(p=>p.date_charged), 'date_charged', f);
 
     // Principal disbursed
@@ -6190,7 +6190,7 @@ async function renderAccounting() {
       
       <div class="kpi-grid">
         <div class="kpi-card" style="border-top: 4px solid var(--accent-green)"><div class="kpi-label">Net Profit (Revenue)</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(totalRevenue)}</div><div class="kpi-sub">Registration + Processing + Interest + Penalties</div></div>
-        <div class="kpi-card"><div class="kpi-label">Processing Fees</div><div class="kpi-value">${fmtMoney(processingFees)}</div><div class="kpi-sub">KES 250 below 5,000; KES 500 from 5,000</div></div>
+        <div class="kpi-card"><div class="kpi-label">Processing/Application Fees</div><div class="kpi-value">${fmtMoney(processingFees)}</div><div class="kpi-sub">Product-based upfront fees</div></div>
         <div class="kpi-card"><div class="kpi-label">Registration Fees</div><div class="kpi-value">${fmtMoney(registrationFees)}</div><div class="kpi-sub">${filteredClients.length} new client fee(s), product-based</div></div>
         <div class="kpi-card"><div class="kpi-label">Interest Collected</div><div class="kpi-value">${fmtMoney(interestCollected)}</div></div>
         <div class="kpi-card"><div class="kpi-label">Penalties Collected</div><div class="kpi-value">${fmtMoney(penaltiesCollected)}</div></div>
