@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-26-upfront-processing-v8';
+const APP_VERSION = 'patafix-2026-07-26-upfront-fees-v9';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1681,7 +1681,7 @@ function calcReducing(principal,weeklyRate,weeks){
 function calcLoan(principal,rate,type,weeks){return type==='reducing_balance'?calcReducing(principal,rate,weeks):calcFlat(principal,rate,weeks)}
 
 
-// Registration fee is applied once and deducted from the first loan disbursement.
+// Registration fee is applied once for new clients and paid upfront before first disbursement.
 const REGISTRATION_FEE = 0;
 // ═══ PROCESSING FEE (flat KES 500 per loan disbursement) ═══
 const PATAFIX_MONTHLY_INTEREST_RATE = 20;
@@ -1695,6 +1695,10 @@ function parseRegFeeFromNotes(notes){
 }
 function hasPendingRegFee(notes){ return /\[REG_FEE_PENDING:[^\]]+\]/.test(String(notes||'')); }
 function stripRegFeeTag(notes){ return String(notes||'').replace(/\s*\[REG_FEE:[^\]]+\]\s*/g,'').trim(); }
+function stripPendingRegFeeTag(notes){ return String(notes||'').replace(/\s*\[REG_FEE_PENDING:[^\]]+\]\s*/g,'').trim(); }
+function markRegistrationFeePaidNotes(notes, amount, dateISO){
+  return `${stripRegFeeTag(stripPendingRegFeeTag(notes))} ${regFeeTag(amount, dateISO)}`.trim();
+}
 function registrationFeeForClient(client, previousLoans, productName=''){
   const tag = parseRegFeeFromNotes(client?.notes);
   const pending = hasPendingRegFee(client?.notes);
@@ -2306,7 +2310,7 @@ async function openAddClientModal(){
     <div class="form-group"><label>Notes</label><textarea class="textarea" id="cNotes"></textarea></div>
     ${officerDropdown}
     <div style="padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;margin-bottom:12px;font-size:13px;display:flex;justify-content:space-between;align-items:center">
-      <span>A one-time product-based <strong>Registration Fee</strong> is applied to new clients and deducted from their first loan disbursement.</span>
+      <span>A one-time product-based <strong>Registration Fee</strong> is paid upfront by new clients before first disbursement.</span>
       <strong style="color:var(--accent-green)">KES 200-400</strong>
     </div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnSaveClient" onclick="saveClient()">Save Client</button></div>
@@ -2350,7 +2354,7 @@ async function saveClient(){
       if(window._clientOffMap) window._clientOffMap[data.id] = assignedOfficerId;
     }
     await audit('client_created','loan_clients',data.id,null,rec);
-    toast('Client added. Product registration fee will be deducted from the first loan disbursement.','success');closeModal();renderClients();
+    toast('Client added. Product registration fee is paid upfront before the first loan is disbursed.','success');closeModal();renderClients();
   }catch(e){
     if(btn){ btn.disabled=false; btn.textContent='Save Client'; }
     toast(e.message,'error');
@@ -2392,7 +2396,7 @@ async function viewClient(id){
         <div><strong>Daily Income:</strong> ${fmtMoney(c.monthly_income)}</div>
         <div><strong>Next of Kin:</strong> ${c.next_of_kin_name||'-'} (${c.next_of_kin_relation||'-'}) ${c.next_of_kin_phone||''}</div>
         <div style="grid-column:1/-1;padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;display:flex;justify-content:space-between;align-items:center">
-          <span><strong style="color:var(--accent-green)">Registration Fee Pending</strong> <span style="color:var(--text-secondary);font-size:12px">product-based fee deducted from first loan disbursement</span></span>
+          <span><strong style="color:var(--accent-green)">Registration Fee Pending</strong> <span style="color:var(--text-secondary);font-size:12px">product-based fee paid upfront before first disbursement</span></span>
           <strong style="color:var(--accent-green)">KES 200-400</strong>
         </div>
       </div>
@@ -3277,8 +3281,8 @@ async function openDisburseModal(appId){
   // Registration fee only applies to newly registered clients on their first loan.
   const{data:prevLoans}=await sb('loans').select('id').eq('client_id',app.client_id).eq('business_id',currentUser?.business_id).limit(2);
   const regFee=registrationFeeForClient(app.loan_clients, prevLoans, product?.name);
-  // Processing/application fee is collected upfront; registration fee still applies only to new clients on the first loan.
-  const netDisbursement=Math.max(0,amt-regFee);
+  // Upfront fees are collected before release and do not reduce the released principal.
+  const netDisbursement=amt;
   const firstRep=new Date();firstRep.setDate(firstRep.getDate()+((product?.paymentEveryWeeks||1)*7));
   const clientName=app.loan_clients?.full_name||'Unknown Client';
   const clientPhone=app.loan_clients?.phone||'';
@@ -3296,13 +3300,18 @@ async function openDisburseModal(appId){
       <p style="display:flex;justify-content:space-between"><span>Gross Amount</span><strong>${fmtMoney(amt)}</strong></p>
       <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>${patafixFeeLabel(product)} - paid upfront before loan release</span><strong>${fmtMoney(procFee)}</strong></p>
       ${regFee>0
-        ?`<p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Registration Fee <span style="font-size:10px">(new client, one-time) - deducted from disbursed amount</span></span><strong>${fmtMoney(regFee)}</strong></p>`
+        ?`<p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Registration Fee <span style="font-size:10px">(new client, one-time) - paid upfront</span></span><strong>${fmtMoney(regFee)}</strong></p>`
         :`<p style="font-size:11px;color:var(--accent-green)">No registration fee - applies only to newly registered clients on their first loan</p>`}
       <hr style="border:none;border-top:1px solid var(--border);margin:6px 0">
       <p style="display:flex;justify-content:space-between"><span>${calc.installmentLabel}</span><strong>${fmtMoney(calc.weekly)}</strong></p>
-      <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Net Disbursement</strong></span><strong style="color:var(--accent-green)">${fmtMoney(netDisbursement)}</strong></p>
-      <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">${patafixFeeName(product)} is paid upfront before release. Only the first-loan registration fee, when applicable, reduces the released amount.</p>
+      <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Amount to Release</strong></span><strong style="color:var(--accent-green)">${fmtMoney(netDisbursement)}</strong></p>
+      <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">Upfront fees required before disbursement: ${fmtMoney(procFee+regFee)}. The released loan amount remains the approved principal.</p>
     </div>
+    <div class="form-group" style="margin-top:12px">
+      <label><input type="checkbox" id="dFeesPaid"> Confirm client has paid all upfront fees (${fmtMoney(procFee+regFee)})</label>
+      <div style="font-size:11px;color:var(--text-secondary);margin-top:3px">Do not disburse unless the application/processing fee and any new-client registration fee have been received.</div>
+    </div>
+    <div class="form-group"><label>Upfront Fee Receipt / Reference</label><input class="input" id="dFeeRef" placeholder="M-Pesa code, cash receipt, or note"></div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnConfirmDisburse" onclick="confirmDisburse('${appId}','${app.client_id}','${app.applied_term_weeks}')">Confirm & Disburse</button></div>
   `,true);
 }
@@ -3328,8 +3337,9 @@ async function confirmDisburse(appId,clientId,termWeeks){
     const{data:feeClient}=await sb('loan_clients').select('full_name,notes').eq('id',clientId).eq('business_id',currentUser?.business_id).single();
     const isReturningClient=(prevLoans&&prevLoans.length>0);
     const regFee=registrationFeeForClient(feeClient, prevLoans, product?.name);
-    const netDisbursement=Math.max(0,amt-regFee);
+    const netDisbursement=amt;
     const disbDate=$('#dDate').value;const firstRep=$('#dFirstRep').value;
+    if(!$('#dFeesPaid')?.checked) throw new Error('Confirm upfront fees are paid before disbursing this loan.');
     const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(c.installments-1)*c.intervalWeeks*7);
 
     const loanNo = generateUniqueNo('LN');
@@ -3367,8 +3377,12 @@ async function confirmDisburse(appId,clientId,termWeeks){
     }
     if(lErr)throw lErr;
 
+    const feeRef=($('#dFeeRef')?.value||'').trim();
     if(regFee>0){
       await recordRegistrationFeeIncome(clientId, feeClient?.full_name || 'Client', disbDate, regFee);
+      try{
+        await sb('loan_clients').update({notes:markRegistrationFeePaidNotes(feeClient?.notes, regFee, disbDate)}).eq('id',clientId).eq('business_id',currentUser?.business_id);
+      }catch(noteErr){ console.warn('[Disburse] Registration fee note update failed:',noteErr?.message); }
     }
 
     let alreadyPaidForSchedules=openingPaid;
@@ -3396,7 +3410,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
         business_id:currentUser?.business_id,
         date:disbDate,
         ref:feeRcpt,
-        description:`${patafixFeeName(product)} paid upfront - Loan ${loanNo}`,
+        description:`${patafixFeeName(product)} paid upfront${feeRef?' ('+feeRef+')':''} - Loan ${loanNo}`,
         debit:'Cash',
         credit:'Processing Fee Income',
         amount:procFee,
@@ -6415,7 +6429,7 @@ async function renderSettings(){
       <div class="card" style="max-width:700px;margin-bottom:16px">
         <h3 style="font-size:16px;margin-bottom:16px">Defaults</h3>
         <div class="form-row"><div class="form-group"><label>Grace Period (days)</label><input class="input" type="number" id="setGrace" value="${settings.default_grace_period||7}"></div><div class="form-group"><label>Late Penalty %</label><input class="input" type="number" id="setPenalty" value="${settings.default_late_penalty_pct||5}"></div></div>
-        <div class="form-group"><label>Loan Fees</label><div class="input" style="background:rgba(59,130,246,0.06);line-height:1.5;min-height:auto">Processing/application fees are product-based and paid upfront before loan release. Registration fee applies only to newly registered clients on their first loan.</div><input type="hidden" id="setFee" value="0"></div>
+        <div class="form-group"><label>Loan Fees</label><div class="input" style="background:rgba(59,130,246,0.06);line-height:1.5;min-height:auto">All loans require upfront application/processing fee payment before release. New clients also pay the one-time registration fee upfront before their first disbursement.</div><input type="hidden" id="setFee" value="0"></div>
         <div class="form-group"><label>Default Disbursement Method</label><select class="select" id="setDisbMethod"><option value="cash" ${settings.disbursement_method==='cash'?'selected':''}>Cash (Manual)</option><option value="mpesa" ${(!settings.disbursement_method||settings.disbursement_method==='mpesa')?'selected':''}>M-Pesa</option><option value="bank_transfer" ${settings.disbursement_method==='bank_transfer'?'selected':''}>Bank Transfer</option></select></div>
         <div style="background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);border-radius:8px;padding:12px;margin-top:8px">
           <strong style="font-size:13px;color:var(--accent-red)">Rollover Penalty Policy</strong>
