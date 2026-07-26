@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-26-upfront-fees-v9';
+const APP_VERSION = 'patafix-2026-07-26-product-reg-fees-v10';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1096,6 +1096,21 @@ function patafixFeeLabel(product){
 function patafixFeeName(product){
   return product?.name==='INUA BIZ'?'Processing fee':'Application fee';
 }
+function patafixRegistrationFeeForAmount(amount, productName=''){
+  return Number(getPataFixProduct(amount, productName)?.registrationFee || 0);
+}
+function registrationFeeIncomeAmount(client, firstLoan=null){
+  const tag=parseRegFeeFromNotes(client?.notes);
+  if(tag) return Number(tag.amount||0);
+  if(hasPendingRegFee(client?.notes) && firstLoan) return patafixRegistrationFeeForAmount(firstLoan.principal_amount);
+  return 0;
+}
+function registrationFeeIncomeDate(client, firstLoan=null){
+  const tag=parseRegFeeFromNotes(client?.notes);
+  if(tag?.date) return tag.date;
+  if(firstLoan?.disbursement_date) return String(firstLoan.disbursement_date).slice(0,10);
+  return client?.created_at ? String(client.created_at).slice(0,10) : '';
+}
 function processingFeeFor(amount, productName=''){
   const product=getPataFixProduct(amount, productName);
   if(!product) return 0;
@@ -1724,8 +1739,7 @@ async function recordRegistrationFeeIncome(clientId, clientName, dateISO, amount
   }catch(_){ /* table may not exist; tagged note in client.notes is the fallback source of truth */ }
 }
 async function getRegistrationFeeIncome(clients){
-  // Returns total registration-fee income, deriving from clients list (one fee per client).
-  return (clients||[]).length * REGISTRATION_FEE;
+  return (clients||[]).reduce((sum, client)=>sum+registrationFeeIncomeAmount(client), 0);
 }
 
 // ═══ DASHBOARD ═══
@@ -5122,7 +5136,7 @@ async function loadReportData(id){
     const[{data:reps},{data:clients},{data:activeLoans}]=await Promise.all([
       sb('loan_repayments').select('*,loans(principal_amount,total_interest,total_payable,loan_no)').eq('business_id',biz),
       sb('loan_clients').select('id,full_name,created_at,notes').eq('business_id',biz),
-      sb('loans').select('id,principal_amount,total_interest,total_payable,loan_no').eq('business_id',biz).eq('status','active')
+      sb('loans').select('id,client_id,principal_amount,total_interest,total_payable,loan_no,disbursement_date').eq('business_id',biz).order('disbursement_date',{ascending:true})
     ]);
     // For repayments missing interest_portion, derive it from the loan's interest ratio
     const calcInterestPortion=(r)=>{
@@ -5138,15 +5152,16 @@ async function loadReportData(id){
     const totalInterest=(reps||[]).reduce((s,r)=>s+calcInterestPortion(r),0);
     const totalPenalties=(reps||[]).reduce((s,r)=>s+Number(r.penalty_portion||0),0);
     // Registration fees — only count clients who actually paid (have notes tag or created before import)
-    const regClients=(clients||[]).filter(c=>!(c.notes||'').includes('Imported')||(c.notes||'').includes('reg_fee_paid'));
-    const totalReg=regClients.length*REGISTRATION_FEE;
+    const firstLoanByClient={};
+    (activeLoans||[]).forEach(l=>{ if(l.client_id && !firstLoanByClient[l.client_id]) firstLoanByClient[l.client_id]=l; });
+    const totalReg=(clients||[]).reduce((s,c)=>s+registrationFeeIncomeAmount(c, firstLoanByClient[c.id]),0);
     const totalProc=(cachedData.loans||[]).reduce((s,l)=>s+Number(l.processing_fee||0),0);
     const rows=[];
     (reps||[]).forEach(r=>{
       const iPortion=calcInterestPortion(r);
       rows.push({'Source':'Repayment','Receipt':r.receipt_no,'Date':r.payment_date,'Interest (KES)':Number(iPortion.toFixed(2)),'Penalty (KES)':Number(r.penalty_portion||0),'Total (KES)':Number(r.amount||0),'Client':r.loans?.loan_no||'-'});
     });
-    (clients||[]).forEach(c=>{const tag=parseRegFeeFromNotes(c.notes);const amt=tag?.amount??REGISTRATION_FEE;const date=tag?.date||(c.created_at?String(c.created_at).slice(0,10):'');rows.push({'Source':'Registration Fee','Receipt':'REG-'+String(c.id).slice(0,8),'Date':date,'Interest (KES)':0,'Penalty (KES)':0,'Total (KES)':Number(amt||0),'Client':c.full_name});});
+    (clients||[]).forEach(c=>{const firstLoan=firstLoanByClient[c.id];const amt=registrationFeeIncomeAmount(c, firstLoan);if(amt<=0)return;const date=registrationFeeIncomeDate(c, firstLoan);rows.push({'Source':'Registration Fee','Receipt':'REG-'+String(c.id).slice(0,8),'Date':date,'Interest (KES)':0,'Penalty (KES)':0,'Total (KES)':Number(amt||0),'Client':c.full_name});});
     return{title:'Income Report',summary:[
       {label:'Interest Collected',value:fmtMoney(totalInterest)},{label:'Penalties Collected',value:fmtMoney(totalPenalties)},
       {label:'Registration Fees',value:fmtMoney(totalReg)},{label:'Processing Fees',value:fmtMoney(totalProc)},
@@ -6034,9 +6049,9 @@ async function renderAccounting() {
     const[loansR,repR,cliR,penR,allLoansMapR]=await Promise.all([
       sb('loans').select('id,client_id,loan_no,principal_amount,disbursed_amount,total_interest,total_payable,processing_fee,disbursement_date,status,loan_officer_id').eq('business_id',biz).gte('disbursement_date',qStart).lte('disbursement_date',qEndFull).order('disbursement_date', {ascending: false}).limit(100000),
       sb('loan_repayments').select('id,loan_id,amount,interest_portion,principal_portion,penalty_portion,payment_date,payment_method').eq('business_id',biz).gte('payment_date',qStart).lte('payment_date',qEndFull).order('payment_date', {ascending: false}).limit(100000),
-      sb('loan_clients').select('id,created_at,notes').eq('business_id',biz).gte('created_at',qStart).lte('created_at',qEndFull).order('created_at', {ascending: false}).limit(100000),
+      sb('loan_clients').select('id,created_at,notes').eq('business_id',biz).order('created_at', {ascending: false}).limit(100000),
       sb('loan_penalties').select('id,loan_id,penalty_amount,date_charged,is_waived').eq('business_id',biz).eq('is_waived',false).gte('date_charged',qStart).lte('date_charged',qEndFull).order('date_charged', {ascending: false}).limit(100000),
-      sb('loans').select('id,client_id,total_interest,total_payable,loan_officer_id').eq('business_id',biz).order('disbursement_date', {ascending: false}).limit(100000)
+      sb('loans').select('id,client_id,principal_amount,total_interest,total_payable,disbursement_date,loan_officer_id').eq('business_id',biz).order('disbursement_date', {ascending: true}).limit(100000)
     ]);
     if(loansR.error) throw new Error('Loans fetch error: '+loansR.error.message);
     if(repR.error) throw new Error('Repayments fetch error: '+repR.error.message);
@@ -6051,12 +6066,20 @@ async function renderAccounting() {
     // Build loan lookup map for fast interest ratio calculation
     const loanMap = {};
     allLoansForMapping.forEach(l=>{ loanMap[l.id]=l; });
+    const clientFirstLoan = {};
+    allLoansForMapping.forEach(l=>{
+      if(l.client_id && !clientFirstLoan[l.client_id]) clientFirstLoan[l.client_id]=l;
+    });
+    const dateInSelectedRange = (dateISO) => {
+      const d=String(dateISO||'').slice(0,10);
+      return !!d && d>=qStart && d<=qEnd;
+    };
 
     // JS-side filterByDate runs as a safety net for any edge-case drift
     // but the server has already done the heavy lifting above.
     const filteredLoans = filterByDate(allLoans.filter(l=>l.disbursement_date), 'disbursement_date', f);
     const filteredReps = filterByDate(allReps, 'payment_date', f);
-    const filteredClients = filterByDate(allClients.filter(c=>c.created_at), 'created_at', f);
+    const filteredClients = allClients.filter(c=>dateInSelectedRange(registrationFeeIncomeDate(c, clientFirstLoan[c.id])));
     const filteredPenalties = filterByDate(allPenalties.filter(p=>p.date_charged), 'date_charged', f);
 
     // Principal disbursed
@@ -6064,10 +6087,7 @@ async function renderAccounting() {
     // Processing fees
     const processingFees = filteredLoans.reduce((s,l)=>s+Number(l.processing_fee||0),0);
     // Registration fees — safely handle null notes
-    const registrationFees = filteredClients.reduce((s,c)=>{
-      try{ return s+Number((parseRegFeeFromNotes(c.notes)?.amount)||REGISTRATION_FEE); }
-      catch(e){ return s+REGISTRATION_FEE; }
-    },0);
+    const registrationFees = filteredClients.reduce((s,c)=>s+registrationFeeIncomeAmount(c, clientFirstLoan[c.id]),0);
 
     // ── CASH-BASIS ACCOUNTING (fixed) ────────────────────────────────────────
     // Primary: read interest_portion / penalty_portion stored at payment time.
@@ -6121,7 +6141,7 @@ async function renderAccounting() {
     filteredClients.forEach(c => {
       const offId = clientToOfficer[c.id] || 'unassigned';
       if(!officerStats[offId]) officerStats[offId] = { name: 'Unknown', reg: 0, proc: 0, interest: 0, total: 0 };
-      const regAmt = Number(parseRegFeeFromNotes(c.notes)?.amount || REGISTRATION_FEE);
+      const regAmt = registrationFeeIncomeAmount(c, clientFirstLoan[c.id]);
       officerStats[offId].reg += regAmt;
       officerStats[offId].total += regAmt;
     });
@@ -6171,7 +6191,7 @@ async function renderAccounting() {
       <div class="kpi-grid">
         <div class="kpi-card" style="border-top: 4px solid var(--accent-green)"><div class="kpi-label">Net Profit (Revenue)</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(totalRevenue)}</div><div class="kpi-sub">Registration + Processing + Interest + Penalties</div></div>
         <div class="kpi-card"><div class="kpi-label">Processing Fees</div><div class="kpi-value">${fmtMoney(processingFees)}</div><div class="kpi-sub">KES 250 below 5,000; KES 500 from 5,000</div></div>
-        <div class="kpi-card"><div class="kpi-label">Registration Fees</div><div class="kpi-value">${fmtMoney(registrationFees)}</div><div class="kpi-sub">${filteredClients.length} new client(s) × KES ${REGISTRATION_FEE}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Registration Fees</div><div class="kpi-value">${fmtMoney(registrationFees)}</div><div class="kpi-sub">${filteredClients.length} new client fee(s), product-based</div></div>
         <div class="kpi-card"><div class="kpi-label">Interest Collected</div><div class="kpi-value">${fmtMoney(interestCollected)}</div></div>
         <div class="kpi-card"><div class="kpi-label">Penalties Collected</div><div class="kpi-value">${fmtMoney(penaltiesCollected)}</div></div>
       </div>

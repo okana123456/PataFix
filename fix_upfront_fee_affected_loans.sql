@@ -36,4 +36,53 @@ select
   coalesce(sum(deducted_difference), 0) as total_amount_restored
 from patafix_upfront_fee_fix_preview;
 
+create temp table patafix_registration_fee_fix_preview as
+with first_loans as (
+  select distinct on (client_id)
+    client_id,
+    loan_no,
+    principal_amount,
+    coalesce(disbursement_date::date, created_at::date, current_date) as registration_date,
+    case
+      when principal_amount between 5000 and 10000 then 200
+      when principal_amount between 11000 and 15000 then 300
+      when principal_amount between 16000 and 40000 then 400
+      else 0
+    end as registration_fee
+  from loans
+  where client_id is not null
+    and coalesce(principal_amount, 0) > 0
+  order by client_id, disbursement_date asc nulls last, created_at asc nulls last
+)
+select
+  c.id as client_id,
+  c.full_name,
+  f.loan_no,
+  f.principal_amount,
+  f.registration_fee,
+  f.registration_date,
+  c.notes as old_notes
+from loan_clients c
+join first_loans f on f.client_id = c.id
+where f.registration_fee > 0
+  and coalesce(c.notes, '') !~ '\[REG_FEE:';
+
+select *
+from patafix_registration_fee_fix_preview
+order by full_name;
+
+update loan_clients c
+set notes = trim(
+  regexp_replace(coalesce(c.notes, ''), '\s*\[REG_FEE_PENDING:[^\]]+\]\s*', ' ', 'g')
+  || ' '
+  || '[REG_FEE:' || p.registration_fee || ':' || p.registration_date || ']'
+)
+from patafix_registration_fee_fix_preview p
+where c.id = p.client_id;
+
+select
+  count(*) as clients_marked_registration_paid,
+  coalesce(sum(registration_fee), 0) as total_registration_fees_marked
+from patafix_registration_fee_fix_preview;
+
 commit;
