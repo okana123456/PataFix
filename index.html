@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-26-registration-accounting-v11';
+const APP_VERSION = 'patafix-2026-07-27-charges-excess-account-v12';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1523,6 +1523,7 @@ function buildSidebar() {
     { id: 'officer_performance', icon: '★', label: 'Officer Performance', roles: ['admin', 'branch_manager', 'loan_officer'] },
     { id: 'officer_dashboard', icon: '◉', label: 'My Dashboard', roles: ['loan_officer'] },
     { id: 'accounting', icon: '%', label: 'Accounting', roles: ['admin', 'branch_manager'] },
+    { id: 'charges_excess', icon: '+', label: 'Charges & Excess', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'suspense', icon: '?', label: 'Suspense Account', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'staff', icon: 'S', label: 'Staff', roles: ['admin'] },
     { id: 'calculator', icon: '#', label: 'Calculator', roles: ['admin', 'branch_manager', 'loan_officer'] },
@@ -1660,7 +1661,7 @@ function navigateTo(section){
   const renderers={
     dashboard:renderDashboard,clients:renderClients,products:renderProducts,
     applications:renderApplications,disbursement:renderDisbursement,loans:renderLoans,
-    repayments:renderRepayments,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,suspense:renderSuspense,
+    repayments:renderRepayments,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,charges_excess:renderChargesExcessAccount,suspense:renderSuspense,
     accounting:renderAccounting,staff:renderStaff,calculator:renderCalculator,
     settings:renderSettings,auditlog:renderAuditLog
   };
@@ -3970,33 +3971,21 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
     const mpTp = Number(loan.total_payable||0);
     const mpTi = Number(loan.total_interest||0);
     const mpInterestRatio = (mpTp > 0 && mpTi > 0) ? (mpTi / mpTp) : 0;
-    const mpPreviouslyPaid = Number(loan.total_paid||0);
+    const mpAmountApplied=Number(Math.min(amount, Math.max(0, Number(loan.outstanding_balance||0))).toFixed(2));
+    const mpExcessAmount=Number(Math.max(0, amount-mpAmountApplied).toFixed(2));
+    let mpPenaltyPortion = 0;
+    const mpInterestPortion = Number((mpAmountApplied * mpInterestRatio).toFixed(2));
+    const mpPrincipalPortion = Number((mpAmountApplied - mpInterestPortion).toFixed(2));
 
-    // Calculate penalty_portion: any amount paid beyond total_payable is penalty revenue
-    let mpPenaltyPortion = 0, mpInterestPortion, mpPrincipalPortion;
-    if(mpTp > 0 && mpPreviouslyPaid >= mpTp){
-      mpPenaltyPortion = amount;
-      mpInterestPortion = 0;
-      mpPrincipalPortion = 0;
-    } else if(mpTp > 0 && mpPreviouslyPaid + amount > mpTp){
-      mpPenaltyPortion = Number(((mpPreviouslyPaid + amount) - mpTp).toFixed(2));
-      const mpCorePortion = amount - mpPenaltyPortion;
-      mpInterestPortion = Number((mpCorePortion * mpInterestRatio).toFixed(2));
-      mpPrincipalPortion = Number((mpCorePortion - mpInterestPortion).toFixed(2));
-    } else {
-      mpInterestPortion = Number((amount * mpInterestRatio).toFixed(2));
-      mpPrincipalPortion = Number((amount - mpInterestPortion).toFixed(2));
-    }
-
-    const rec={loan_id:loan.id,receipt_no:receiptNo,amount,payment_method:'mpesa',payment_reference:transId,payment_date:localDateTime(),principal_portion:mpPrincipalPortion,interest_portion:mpInterestPortion,penalty_portion:mpPenaltyPortion,mpesa_confirmed:true,collected_by:currentUser?.id,business_id:currentUser?.business_id,notes:'M-Pesa C2B confirmed by cashier'};
+    const rec={loan_id:loan.id,receipt_no:receiptNo,amount:mpAmountApplied,payment_method:'mpesa',payment_reference:transId,payment_date:localDateTime(),principal_portion:mpPrincipalPortion,interest_portion:mpInterestPortion,penalty_portion:mpPenaltyPortion,mpesa_confirmed:true,collected_by:currentUser?.id,business_id:currentUser?.business_id,notes:`M-Pesa C2B confirmed by cashier${mpExcessAmount>0?` | Excess repayment deposited to Charges & Excess Account: ${fmtMoney(mpExcessAmount)}`:''}`};
     const{error}=await sb('loan_repayments').insert(rec);
     if(error)throw error;
     
-    const newPaid=Number(loan.total_paid)+amount;
-    const newBalance=Number(loan.outstanding_balance)-amount;
+    const newPaid=Number(loan.total_paid)+mpAmountApplied;
+    const newBalance=Number(loan.outstanding_balance)-mpAmountApplied;
     // Cascade into schedules
     const{data:mpesaScheds}=await sb('loan_schedules').select('*').eq('loan_id',loan.id).in('status',['pending','overdue','partial']).order('due_date',{ascending:true}).order('installment_no',{ascending:true});
-    let mpesaRem=amount;
+    let mpesaRem=mpAmountApplied;
     const mpesaUpdates=[];
     for(const s of (mpesaScheds||[])){
       if(mpesaRem<=0)break;
@@ -4008,7 +3997,7 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
     if(mpesaUpdates.length)await Promise.allSettled(mpesaUpdates);
 
     // ── Enforce minimum 1-week interest on early full payoff ──────────────────
-    const mpMinInt = await enforceMinimumWeekInterest(loan, amount);
+    const mpMinInt = await enforceMinimumWeekInterest(loan, mpAmountApplied);
     // Re-read loan balances in case the helper adjusted them
     const { data: loanAfterMpMinInt } = mpMinInt.adjusted
       ? await sb('loans').select('*').eq('id', loan.id).single()
@@ -4016,13 +4005,26 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
     const mpLoanRef = loanAfterMpMinInt || loan;
     // ─────────────────────────────────────────────────────────────────────────
 
-    const mpNewPaid    = Number(mpLoanRef.total_paid||0) + amount;
-    const mpNewBalance = Math.max(0, Number(mpLoanRef.outstanding_balance) - amount);
+    const mpNewPaid    = Number(mpLoanRef.total_paid||0) + mpAmountApplied;
+    const mpNewBalance = Math.max(0, Number(mpLoanRef.outstanding_balance) - mpAmountApplied);
     await sb('loans').update({
       total_paid: mpNewPaid,
       outstanding_balance: mpNewBalance,
       status: mpNewBalance <= 0 ? 'completed' : mpLoanRef.status
     }).eq('id', loan.id);
+    if(mpExcessAmount>0){
+      await sb('journal_entries').insert({
+        id:crypto.randomUUID(),
+        business_id:currentUser?.business_id,
+        date:today(),
+        ref:receiptNo+'-EXCESS',
+        description:`Excess repayment deposit - Loan ${loan.loan_no} | M-Pesa Ref: ${transId||'-'}`,
+        debit:'M-Pesa',
+        credit:'Charges & Excess Account',
+        amount:mpExcessAmount,
+        synced:false
+      }).catch(e=>console.warn('M-Pesa excess journal failed:',e.message));
+    }
     await sb('mpesa_callback_queue').update({confirmed:true,loan_id:loan.id}).eq('id',queueId);
     await audit('mpesa_payment_confirmed','loan_repayments',null,null,rec);
     const mpToastMsg = mpMinInt.adjusted
@@ -4205,6 +4207,10 @@ async function savePayment(){
   try{
     const{data:loan}=await sb('loans').select('*').eq('id',loanId).single();
     if(!loan)throw new Error('Loan not found');
+    const loanBalanceBefore=Number(loan.outstanding_balance||0);
+    const amountApplied=Number(Math.min(amount, Math.max(0, loanBalanceBefore)).toFixed(2));
+    const excessAmount=Number(Math.max(0, amount-amountApplied).toFixed(2));
+    if(amountApplied<=0 && excessAmount<=0) throw new Error('This loan has no balance to receive payment.');
     const _method = $('#payMethod').value;
     if(_method==='mpesa_c2b'){
       // Daraja C2B — payment will be auto-reconciled by webhook. This manual entry is supplementary.
@@ -4220,8 +4226,8 @@ async function savePayment(){
     const interestRatio = (tp > 0 && ti > 0) ? (ti / tp) : 0;
 
     // Read explicit penalty amount entered by the cashier
-    const explicitPenalty = Number($('#payPenaltyAmt').value) || 0;
-    const corePayment = Math.max(0, amount - explicitPenalty);
+    const explicitPenalty = Math.min(Number($('#payPenaltyAmt').value) || 0, amountApplied);
+    const corePayment = Math.max(0, amountApplied - explicitPenalty);
 
     const penaltyPortion = explicitPenalty;
     const interestPortion = Number((corePayment * interestRatio).toFixed(2));
@@ -4229,7 +4235,8 @@ async function savePayment(){
 
     const paymentDate=$('#payDate')?.value||today();
     const paymentDateTime=dateInputToLocalDateTime(paymentDate);
-    const rec={loan_id:loanId,receipt_no:receiptNo,amount,payment_method:$('#payMethod').value,payment_reference:$('#payRef').value,payment_date:paymentDateTime,principal_portion:principalPortion,interest_portion:interestPortion,penalty_portion:penaltyPortion,collected_by:currentUser?.id,notes:$('#payNotes').value,business_id:currentUser?.business_id,created_at:paymentDateTime};
+    const paymentNotes=[$('#payNotes').value, excessAmount>0?`Excess repayment deposited to Charges & Excess Account: ${fmtMoney(excessAmount)}`:''].filter(Boolean).join(' | ');
+    const rec={loan_id:loanId,receipt_no:receiptNo,amount:amountApplied,payment_method:$('#payMethod').value,payment_reference:$('#payRef').value,payment_date:paymentDateTime,principal_portion:principalPortion,interest_portion:interestPortion,penalty_portion:penaltyPortion,collected_by:currentUser?.id,notes:paymentNotes,business_id:currentUser?.business_id,created_at:paymentDateTime};
     const{error}=await sb('loan_repayments').insert(rec);
     if(error)throw error;
 
@@ -4239,7 +4246,7 @@ async function savePayment(){
       .in('status',['pending','overdue','partial'])
       .order('due_date',{ascending:true})
       .order('installment_no',{ascending:true});
-    let remaining=amount;
+    let remaining=amountApplied;
     const schedUpdates=[];
     for(const s of (allScheds||[])){
       if(remaining<=0)break;
@@ -4300,8 +4307,8 @@ async function savePayment(){
         newArrears=pastDueUnpaid.reduce((s,s2)=>s+(Number(s2.total_due||0)-Number(s2.total_paid||0)),0);
       }
     }
-    const newPaid=Number(loanRef.total_paid)+amount;
-    const newBalance=Math.max(0,Number(loanRef.outstanding_balance)-amount);
+    const newPaid=Number(loanRef.total_paid)+amountApplied;
+    const newBalance=Math.max(0,Number(loanRef.outstanding_balance)-amountApplied);
     await sb('loans').update({
       total_paid:newPaid,
       outstanding_balance:newBalance,
@@ -4313,7 +4320,7 @@ async function savePayment(){
     await audit('payment_recorded','loan_repayments',null,null,rec);
     const toastMsg = minIntResult.adjusted
       ? `Payment ${receiptNo} recorded! Remaining interest balance: KES ${fmtMoney(minIntResult.shortfall)}`
-      : `Payment ${receiptNo} recorded! ${fmtMoney(amount)}`;
+      : `Payment ${receiptNo} recorded! ${fmtMoney(amountApplied)}${excessAmount>0?` applied, ${fmtMoney(excessAmount)} deposited to Charges & Excess Account`:''}`;
     toast(toastMsg,'success');closeModal();
     // Always clear cachedData so dashboard, accounting and arrears reflect the payment immediately
     cachedData.loans=null;cachedData.schedules=null;cachedData.repayments=null;
@@ -5499,6 +5506,79 @@ async function renderOfficerDashboard(){
   }
 }
 
+async function renderChargesExcessAccount(){
+  const main=$('#mainContent');
+  main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
+  try{
+    const {data:entries,error}=await sb('journal_entries')
+      .select('*')
+      .eq('business_id',currentUser.business_id)
+      .order('date',{ascending:false})
+      .order('created_at',{ascending:false});
+    if(error) throw error;
+    const rows=(entries||[]).filter(e=>{
+      const credit=String(e.credit||'').toLowerCase();
+      const desc=String(e.description||'').toLowerCase();
+      return credit.includes('processing fee income')
+        || credit.includes('registration fee income')
+        || credit.includes('charges & excess account')
+        || desc.includes('paid upfront')
+        || desc.includes('excess repayment');
+    });
+    const upfrontRows=rows.filter(e=>{
+      const credit=String(e.credit||'').toLowerCase();
+      return credit.includes('processing fee income') || credit.includes('registration fee income');
+    });
+    const excessRows=rows.filter(e=>{
+      const credit=String(e.credit||'').toLowerCase();
+      const desc=String(e.description||'').toLowerCase();
+      return credit.includes('charges & excess account') || desc.includes('excess repayment');
+    });
+    const upfrontTotal=upfrontRows.reduce((s,e)=>s+Number(e.amount||0),0);
+    const excessTotal=excessRows.reduce((s,e)=>s+Number(e.amount||0),0);
+    const total=upfrontTotal+excessTotal;
+    main.innerHTML=`
+      <div class="page-header">
+        <div>
+          <h1>Charges & Excess Account</h1>
+          <p style="color:var(--text-secondary);font-size:12px;margin-top:4px">Tracks upfront loan charges and repayment amounts paid above the current loan balance.</p>
+        </div>
+      </div>
+      <div class="kpi-grid" style="margin-bottom:16px">
+        <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Total Account Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(total)}</div><div class="kpi-sub">Charges + excess repayments</div></div>
+        <div class="kpi-card"><div class="kpi-label">Upfront Charges</div><div class="kpi-value">${fmtMoney(upfrontTotal)}</div><div class="kpi-sub">Registration + processing/application fees</div></div>
+        <div class="kpi-card"><div class="kpi-label">Excess Repayments</div><div class="kpi-value">${fmtMoney(excessTotal)}</div><div class="kpi-sub">Amounts above loan balance</div></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Date</th><th>Type</th><th>Reference</th><th>Description</th><th>Amount</th></tr></thead>
+          <tbody>
+            ${rows.length?rows.map(e=>{
+              const credit=String(e.credit||'').toLowerCase();
+              const desc=String(e.description||'').toLowerCase();
+              const type=credit.includes('charges & excess account')||desc.includes('excess repayment')
+                ? '<span class="badge badge-yellow">Excess Repayment</span>'
+                : credit.includes('registration fee income')
+                  ? '<span class="badge badge-blue">Registration Fee</span>'
+                  : '<span class="badge badge-green">Processing/Application Fee</span>';
+              return `<tr>
+                <td>${fmtDate(e.date||e.created_at)}</td>
+                <td>${type}</td>
+                <td><strong>${escapeHtml(e.ref||'-')}</strong></td>
+                <td>${escapeHtml(e.description||'-')}</td>
+                <td><strong style="color:var(--accent-green)">${fmtMoney(e.amount||0)}</strong></td>
+              </tr>`;
+            }).join(''):'<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess deposits recorded yet</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }catch(e){
+    main.innerHTML=`<div class="empty-state"><p>Error: ${e.message}</p></div>`;
+    toast(e.message,'error');
+  }
+}
+
 // ═══ SUSPENSE ACCOUNT ═══
 // Payments that arrive via M-Pesa C2B but cannot be matched to a loan fall here.
 // A cashier can then manually match them to the correct loan account.
@@ -5694,30 +5774,34 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
   try{
     const{data:loan}=await sb('loans').select('*').eq('id',loanId).single();
     if(!loan)throw new Error('Loan not found');
+    const loanBalanceBefore=Number(loan.outstanding_balance||0);
+    const amountApplied=Number(Math.min(amount, Math.max(0, loanBalanceBefore)).toFixed(2));
+    const excessAmount=Number(Math.max(0, amount-amountApplied).toFixed(2));
+    if(amountApplied<=0 && excessAmount<=0) throw new Error('This loan has no balance to receive payment.');
 
     // Record the repayment
     const receiptNo=generateUniqueNo('RCP');
     const tp=Number(loan.total_payable||0);
     const ti=Number(loan.total_interest||0);
     const interestRatio=(tp>0&&ti>0)?(ti/tp):0;
-    const interestPortion=Number((amount*interestRatio).toFixed(2));
-    const principalPortion=Number((amount-interestPortion).toFixed(2));
+    const interestPortion=Number((amountApplied*interestRatio).toFixed(2));
+    const principalPortion=Number((amountApplied-interestPortion).toFixed(2));
     const method=document.getElementById('suspMatchMethod')?.value||'mpesa';
     const paymentDate=new Date().toISOString();
 
     const { data: repayment, error: repaymentErr } = await sb('loan_repayments').insert({
-      loan_id:loanId,receipt_no:receiptNo,amount,payment_method:method,
+      loan_id:loanId,receipt_no:receiptNo,amount:amountApplied,payment_method:method,
       payment_reference:ref,payment_date:paymentDate,
       principal_portion:principalPortion,interest_portion:interestPortion,penalty_portion:0,
       mpesa_confirmed:true,collected_by:currentUser.id,
-      business_id:currentUser.business_id,notes:'Matched from suspense account'
+      business_id:currentUser.business_id,notes:`Matched from suspense account${excessAmount>0?` | Excess repayment deposited to Charges & Excess Account: ${fmtMoney(excessAmount)}`:''}`
     }).select('id').single();
     if(repaymentErr) throw repaymentErr;
 
     // Cascade into schedules
     const{data:scheds}=await sb('loan_schedules').select('*').eq('loan_id',loanId)
       .in('status',['pending','overdue','partial']).order('due_date',{ascending:true}).order('installment_no',{ascending:true});
-    let rem=amount;
+    let rem=amountApplied;
     const upds=[];
     const todayStr=today();
     for(const s of (scheds||[])){
@@ -5730,7 +5814,7 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
     }
     if(upds.length)await Promise.allSettled(upds);
 
-    const minIntResult = await enforceMinimumWeekInterest(loan, amount);
+    const minIntResult = await enforceMinimumWeekInterest(loan, amountApplied);
     const { data: loanAfterMinInt } = minIntResult.adjusted
       ? await sb('loans').select('*').eq('id', loanId).single()
       : { data: loan };
@@ -5753,8 +5837,8 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
       newArrears=pastDueUnpaid.reduce((s,s2)=>s+(Number(s2.total_due||0)-Number(s2.total_paid||0)),0);
     }
 
-    const newPaid=Number(loanRef.total_paid||0)+amount;
-    const newBal=Math.max(0,Number(loanRef.outstanding_balance||0)-amount);
+    const newPaid=Number(loanRef.total_paid||0)+amountApplied;
+    const newBal=Math.max(0,Number(loanRef.outstanding_balance||0)-amountApplied);
     await sb('loans').update({
       total_paid:newPaid,
       outstanding_balance:newBal,
@@ -5762,6 +5846,20 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
       overdue_days:newBal<=0?0:newOverdueDays,
       arrears_amount:newBal<=0?0:Number(Math.max(0,newArrears).toFixed(2))
     }).eq('id',loanId);
+
+    if(excessAmount>0){
+      await sb('journal_entries').insert({
+        id:crypto.randomUUID(),
+        business_id:currentUser?.business_id,
+        date:paymentDate,
+        ref:receiptNo+'-EXCESS',
+        description:`Excess repayment deposit - Loan ${loan.loan_no} | Ref: ${ref||'-'}`,
+        debit:'Cash',
+        credit:'Charges & Excess Account',
+        amount:excessAmount,
+        synced:false
+      }).catch(e=>console.warn('Excess account journal failed:',e.message));
+    }
 
     // Mark suspense entry as matched
     if(entryType==='mpesa'){
@@ -5791,14 +5889,14 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
       description:`Suspense match — ${loan.loan_no} | Ref: ${ref}`,
       debit:'Loan Repayments',
       credit:'Suspense Account',
-      amount:amount,
+      amount:amountApplied,
       synced:false
     }).catch(e=>console.warn('Journal entry failed:',e.message));
 
-    await audit('suspense_matched','loan_repayments',loanId,null,{ref,amount,loan_no:loan.loan_no});
+    await audit('suspense_matched','loan_repayments',loanId,null,{ref,amount,amount_applied:amountApplied,excess_amount:excessAmount,loan_no:loan.loan_no});
     const msg = minIntResult.adjusted
-      ? `Payment KES ${fmtMoney(amount)} matched to ${loan.loan_no}. Minimum interest balance remains KES ${fmtMoney(minIntResult.shortfall)}.`
-      : `Payment KES ${fmtMoney(amount)} matched to ${loan.loan_no}!`;
+      ? `Payment KES ${fmtMoney(amountApplied)} matched to ${loan.loan_no}. Minimum interest balance remains KES ${fmtMoney(minIntResult.shortfall)}.`
+      : `Payment KES ${fmtMoney(amountApplied)} matched to ${loan.loan_no}!${excessAmount>0?` Extra KES ${fmtMoney(excessAmount)} deposited to Charges & Excess Account.`:''}`;
     toast(msg,minIntResult.adjusted?'warning':'success');
     closeModal();
     cachedData.loans=null;cachedData.schedules=null;cachedData.repayments=null;
