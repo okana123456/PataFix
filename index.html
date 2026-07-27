@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-27-charge-client-search-v14';
+const APP_VERSION = 'patafix-2026-07-27-charges-drawdown-v15';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -4317,6 +4317,20 @@ async function savePayment(){
       arrears_amount:newBalance<=0?0:Number(Math.max(0,newArrears).toFixed(2))
     }).eq('id',loanId);
 
+    if(excessAmount>0){
+      await sb('journal_entries').insert({
+        id:crypto.randomUUID(),
+        business_id:currentUser?.business_id,
+        date:paymentDate,
+        ref:receiptNo+'-EXCESS',
+        description:`Excess repayment deposit - Loan ${loan.loan_no} | Ref: ${$('#payRef').value||'-'}`,
+        debit:$('#payMethod').value==='mpesa'?'M-Pesa':'Cash',
+        credit:'Charges & Excess Account',
+        amount:excessAmount,
+        synced:false
+      }).catch(e=>console.warn('Manual excess journal failed:',e.message));
+    }
+
     await audit('payment_recorded','loan_repayments',null,null,rec);
     const toastMsg = minIntResult.adjusted
       ? `Payment ${receiptNo} recorded! Remaining interest balance: KES ${fmtMoney(minIntResult.shortfall)}`
@@ -5510,12 +5524,23 @@ async function renderChargesExcessAccount(){
   const main=$('#mainContent');
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
   try{
-    const {data:entries,error}=await sb('journal_entries')
-      .select('*')
-      .eq('business_id',currentUser.business_id)
-      .order('date',{ascending:false})
-      .order('created_at',{ascending:false});
-    if(error) throw error;
+    const [entriesR,loansR]=await Promise.all([
+      sb('journal_entries')
+        .select('*')
+        .eq('business_id',currentUser.business_id)
+        .order('date',{ascending:true})
+        .order('created_at',{ascending:true}),
+      sb('loans')
+        .select('loan_no,loan_clients(full_name,phone,id_number)')
+        .eq('business_id',currentUser.business_id)
+        .limit(100000)
+    ]);
+    if(entriesR.error) throw entriesR.error;
+    const entries=entriesR.data||[];
+    const loanClientByNo={};
+    (loansR.data||[]).forEach(l=>{
+      if(l.loan_no) loanClientByNo[String(l.loan_no).toLowerCase()] = l.loan_clients || {};
+    });
     const rows=(entries||[]).filter(e=>{
       const credit=String(e.credit||'').toLowerCase();
       const desc=String(e.description||'').toLowerCase();
@@ -5524,6 +5549,31 @@ async function renderChargesExcessAccount(){
         || credit.includes('charges & excess account')
         || desc.includes('paid upfront')
         || desc.includes('excess repayment');
+    });
+    let running=0;
+    const statementRows=rows.map(e=>{
+      running+=Number(e.amount||0);
+      const credit=String(e.credit||'').toLowerCase();
+      const desc=String(e.description||'');
+      const descLower=desc.toLowerCase();
+      const loanNoMatch=desc.match(/loan\s+([^|\s]+)/i);
+      const loanClient=loanNoMatch?loanClientByNo[String(loanNoMatch[1]||'').toLowerCase()]||null:null;
+      const paidByMatch=desc.match(/paid by ([^|]+)/i);
+      const clientName=loanClient?.full_name || (paidByMatch?paidByMatch[1].trim():'Unknown Client');
+      const clientPhone=loanClient?.phone || '';
+      const refText=e.ref||((desc.match(/(?:m-pesa ref|ref):\s*([^|]+)/i)||[])[1])||'-';
+      const type=credit.includes('charges & excess account')||descLower.includes('excess repayment')
+        ? 'Excess Repayment'
+        : credit.includes('registration fee income')
+          ? 'Registration Fee'
+          : 'Processing/Application Fee';
+      return {...e,_clientName:clientName,_clientPhone:clientPhone,_refText:refText,_type:type,_balance:Number(running.toFixed(2))};
+    });
+    const displayRows=[...statementRows].sort((a,b)=>{
+      const ad=String(a.date||a.created_at||'');
+      const bd=String(b.date||b.created_at||'');
+      if(ad!==bd) return bd.localeCompare(ad);
+      return String(b.created_at||'').localeCompare(String(a.created_at||''));
     });
     const upfrontRows=rows.filter(e=>{
       const credit=String(e.credit||'').toLowerCase();
@@ -5541,7 +5591,7 @@ async function renderChargesExcessAccount(){
       <div class="page-header">
         <div>
           <h1>Charges & Excess Account</h1>
-          <p style="color:var(--text-secondary);font-size:12px;margin-top:4px">Tracks upfront loan charges and repayment amounts paid above the current loan balance.</p>
+          <p style="color:var(--text-secondary);font-size:12px;margin-top:4px">Drawdown-style statement for all client charge payments and excess repayments.</p>
         </div>
         <button class="btn btn-primary btn-sm" onclick="openClientChargePaymentModal()">+ Record Charge Payment</button>
       </div>
@@ -5550,26 +5600,30 @@ async function renderChargesExcessAccount(){
         <div class="kpi-card"><div class="kpi-label">Upfront Charges</div><div class="kpi-value">${fmtMoney(upfrontTotal)}</div><div class="kpi-sub">Registration + processing/application fees</div></div>
         <div class="kpi-card"><div class="kpi-label">Excess Repayments</div><div class="kpi-value">${fmtMoney(excessTotal)}</div><div class="kpi-sub">Amounts above loan balance</div></div>
       </div>
+      <div class="search-bar" style="margin-bottom:12px">
+        <input class="input" id="chargesExcessSearch" placeholder="Search client, phone, M-Pesa code, receipt, loan no or type..." oninput="filterChargesExcessStatement(this.value)">
+      </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Date</th><th>Type</th><th>Reference</th><th>Description</th><th>Amount</th></tr></thead>
+          <thead><tr><th>Date</th><th>Client</th><th>Type</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Account Balance</th><th>Description</th></tr></thead>
           <tbody>
-            ${rows.length?rows.map(e=>{
-              const credit=String(e.credit||'').toLowerCase();
-              const desc=String(e.description||'').toLowerCase();
-              const type=credit.includes('charges & excess account')||desc.includes('excess repayment')
+            ${displayRows.length?displayRows.map(e=>{
+              const typeBadge=e._type==='Excess Repayment'
                 ? '<span class="badge badge-yellow">Excess Repayment</span>'
-                : credit.includes('registration fee income')
+                : e._type==='Registration Fee'
                   ? '<span class="badge badge-blue">Registration Fee</span>'
                   : '<span class="badge badge-green">Processing/Application Fee</span>';
+              const search=[e._clientName,e._clientPhone,e._refText,e._type,e.description,e.ref].join(' ').toLowerCase();
               return `<tr>
                 <td>${fmtDate(e.date||e.created_at)}</td>
-                <td>${type}</td>
-                <td><strong>${escapeHtml(e.ref||'-')}</strong></td>
-                <td>${escapeHtml(e.description||'-')}</td>
+                <td><strong>${escapeHtml(e._clientName)}</strong>${e._clientPhone?'<br><span style="font-size:11px;color:var(--text-secondary)">'+escapeHtml(e._clientPhone)+'</span>':''}</td>
+                <td>${typeBadge}</td>
+                <td><strong>${escapeHtml(e._refText||'-')}</strong></td>
                 <td><strong style="color:var(--accent-green)">${fmtMoney(e.amount||0)}</strong></td>
-              </tr>`;
-            }).join(''):'<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess deposits recorded yet</td></tr>'}
+                <td><strong>${fmtMoney(e._balance||0)}</strong></td>
+                <td>${escapeHtml(e.description||'-')}</td>
+              </tr>`.replace('<tr>','<tr class="charges-excess-row" data-search="'+escapeHtml(search)+'">');
+            }).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess deposits recorded yet</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -5578,6 +5632,13 @@ async function renderChargesExcessAccount(){
     main.innerHTML=`<div class="empty-state"><p>Error: ${e.message}</p></div>`;
     toast(e.message,'error');
   }
+}
+
+function filterChargesExcessStatement(q){
+  const term=String(q||'').toLowerCase().trim();
+  document.querySelectorAll('.charges-excess-row').forEach(row=>{
+    row.style.display=!term || String(row.dataset.search||'').includes(term) ? '' : 'none';
+  });
 }
 
 async function openClientChargePaymentModal(){
