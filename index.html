@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-27-automatic-charge-wallet-v17';
+const APP_VERSION = 'patafix-2026-07-27-client-profile-charges-v18';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -2413,6 +2413,13 @@ async function viewClient(id){
     const{data:c}=await sb('loan_clients').select('*').eq('id',id).single();
     const{data:cLoans}=await sb('loans').select('*').eq('client_id',id);
     if(!c)return toast('Client not found','error');
+    let clientChargeProfileHtml='';
+    try{
+      const chargeData=window._chargesExcessData||await loadChargesExcessAccountData();
+      clientChargeProfileHtml=renderClientProfileChargesAccount(c.id,chargeData);
+    }catch(_){
+      clientChargeProfileHtml='<div class="card" style="margin-top:16px"><h3 style="margin:0 0 8px;font-size:14px">Charges Account</h3><p style="font-size:12px;color:var(--text-secondary)">Charges account will appear here after the wallet setup SQL has been run.</p></div>';
+    }
     const photoInputId = `clientPhotoInput_${String(c.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
     const assetInputId = `clientAssetInput_${String(c.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
     const assetPhotos = clientAssetPaths(c);
@@ -2488,6 +2495,7 @@ async function viewClient(id){
           </td>
         </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:20px">No loans</td></tr>'}
       </tbody></table></div>
+      ${clientChargeProfileHtml}
       <div class="modal-actions">
         ${hasRole('admin','branch_manager')?`<button class="btn btn-outline" onclick="editClient('${c.id}')">✏️ Edit Client</button>`:''}
         <button class="btn btn-outline" onclick="closeModal()">Close</button>
@@ -5658,6 +5666,53 @@ async function loadChargesExcessAccountData(){
     row._balance=clientBalances[key];
   });
   return {rows,loans,clients,clientById,clientBalances};
+}
+
+function renderClientProfileChargesAccount(clientId,data){
+  const rows=(data?.rows||[]).filter(r=>r._clientId===clientId);
+  const displayRows=[...rows].sort((a,b)=>String(b.date||b.created_at||'').localeCompare(String(a.date||a.created_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||'')));
+  const availableBalance=rows.reduce((s,r)=>s+Number(r._net||0),0);
+  const chargesUsed=rows.reduce((s,r)=>s+Number(r._amountUsed||0),0);
+  const deposits=rows.reduce((s,r)=>s+Number(r._amountIn||0),0);
+  return `
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div>
+          <h3 style="margin:0;font-size:14px">Charges Account</h3>
+          <p style="font-size:12px;color:var(--text-secondary);margin-top:3px">This is this client's own charge and excess account only.</p>
+        </div>
+        <button class="btn btn-outline btn-sm" onclick="closeModal();navigateTo('charges_excess');setTimeout(()=>openChargesClientAccount('${clientId}','charges'),250)">Open Full Account</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+        <div class="kpi-card" style="border-top:3px solid var(--accent-green)">
+          <div class="kpi-label">Available Balance</div>
+          <div class="kpi-value" style="font-size:14px;color:var(--accent-green)">${fmtMoney(availableBalance)}</div>
+        </div>
+        <div class="kpi-card" style="border-top:3px solid var(--accent-blue)">
+          <div class="kpi-label">Total Paid In</div>
+          <div class="kpi-value" style="font-size:14px;color:var(--accent-blue)">${fmtMoney(deposits)}</div>
+        </div>
+        <div class="kpi-card" style="border-top:3px solid var(--accent-yellow)">
+          <div class="kpi-label">Used as Charges</div>
+          <div class="kpi-value" style="font-size:14px;color:var(--accent-yellow)">${fmtMoney(chargesUsed)}</div>
+        </div>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Date</th><th>Description / Type</th><th>Loan</th><th>M-Pesa / Ref</th><th>Paid In</th><th>Used</th><th>Balance</th></tr></thead>
+        <tbody>
+          ${displayRows.map(r=>`<tr>
+            <td>${fmtDate(r.date||r.created_at)}</td>
+            <td>${chargesExcessTypeBadge(r._type)}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(r.description||'-')}</span></td>
+            <td>${escapeHtml(r._loanNo||'-')}</td>
+            <td><strong>${escapeHtml(r._refText||'-')}</strong></td>
+            <td><strong style="color:var(--accent-green)">${r._amountIn?fmtMoney(r._amountIn):'-'}</strong></td>
+            <td><strong style="color:${r._amountUsed?'var(--accent-red)':'var(--text-secondary)'}">${r._amountUsed?fmtMoney(r._amountUsed):'-'}</strong></td>
+            <td><strong>${fmtMoney(r._balance||0)}</strong></td>
+          </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess transactions for this client</td></tr>'}
+        </tbody>
+      </table></div>
+    </div>
+  `;
 }
 
 function chargesExcessTypeBadge(type){
