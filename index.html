@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-27-charge-payments-officer-splits-v13';
+const APP_VERSION = 'patafix-2026-07-27-charge-client-search-v14';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -5595,9 +5595,11 @@ async function openClientChargePaymentModal(){
       <div class="form-group">
         <label>Client *</label>
         <input class="input" id="chargeClientSearch" placeholder="Search client name, phone or ID..." oninput="filterChargeClients(this.value)" style="margin-bottom:8px">
-        <select class="select" id="chargeClientId" size="6" style="height:150px">
-          ${(clients||[]).map(chargeClientOption).join('')}
-        </select>
+        <input type="hidden" id="chargeClientId">
+        <div id="chargeClientList" style="height:170px;overflow:auto;border:1px solid var(--border);border-radius:8px;background:var(--bg-card)">
+          ${renderChargeClientRows(clients||[])}
+        </div>
+        <div id="chargeClientSelected" style="margin-top:6px;font-size:12px;color:var(--text-secondary)">No client selected</div>
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -5623,13 +5625,41 @@ async function openClientChargePaymentModal(){
   }catch(e){toast(e.message,'error');}
 }
 
-function chargeClientOption(c){
-  return `<option value="${c.id}">${escapeHtml(c.full_name||'Unknown')} - ${escapeHtml(c.phone||'-')}${c.id_number?' - ID '+escapeHtml(c.id_number):''}</option>`;
+function renderChargeClientRows(clients){
+  if(!clients.length){
+    return '<div style="padding:14px;color:var(--text-secondary);font-size:13px;text-align:center">No clients found</div>';
+  }
+  return clients.map(chargeClientRow).join('');
+}
+
+function chargeClientRow(c){
+  const name=escapeHtml(c.full_name||'Unknown Client');
+  const phone=escapeHtml(c.phone||'-');
+  const idNo=escapeHtml(c.id_number||'-');
+  return `<button type="button" class="charge-client-row" data-client-id="${escapeHtml(c.id)}" onclick='selectChargeClient(${JSON.stringify(c.id)})' style="width:100%;display:flex;justify-content:space-between;gap:12px;align-items:center;text-align:left;padding:10px 12px;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--text-primary);cursor:pointer">
+    <span><strong>${name}</strong><br><span style="font-size:12px;color:var(--text-secondary)">Phone: ${phone} &nbsp; ID: ${idNo}</span></span>
+    <span class="badge badge-blue">Select</span>
+  </button>`;
+}
+
+function selectChargeClient(clientId){
+  const input=document.getElementById('chargeClientId');
+  const selected=document.getElementById('chargeClientSelected');
+  if(input)input.value=clientId;
+  document.querySelectorAll('.charge-client-row').forEach(row=>{
+    const active=row.dataset.clientId===clientId;
+    row.style.background=active?'rgba(139,92,246,0.12)':'transparent';
+    row.style.borderLeft=active?'4px solid var(--accent-purple)':'0';
+  });
+  const client=(window._chargeClients||[]).find(c=>c.id===clientId);
+  if(selected)selected.innerHTML=client?`Selected: <strong>${escapeHtml(client.full_name||'Unknown Client')}</strong>`:'No client selected';
 }
 
 function filterChargeClients(q){
-  const sel=document.getElementById('chargeClientId');
-  if(!sel)return;
+  const list=document.getElementById('chargeClientList');
+  const input=document.getElementById('chargeClientId');
+  const selected=document.getElementById('chargeClientSelected');
+  if(!list)return;
   const term=(q||'').toLowerCase();
   const clients=window._chargeClients||[];
   const filtered=term.length<2?clients:clients.filter(c=>{
@@ -5637,7 +5667,9 @@ function filterChargeClients(q){
       || String(c.phone||'').toLowerCase().includes(term)
       || String(c.id_number||'').toLowerCase().includes(term);
   });
-  sel.innerHTML=filtered.map(chargeClientOption).join('');
+  if(input)input.value='';
+  if(selected)selected.textContent='No client selected';
+  list.innerHTML=renderChargeClientRows(filtered);
 }
 
 async function saveClientChargePayment(){
