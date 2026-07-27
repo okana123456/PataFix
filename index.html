@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-27-client-charge-accounts-v16';
+const APP_VERSION = 'patafix-2026-07-27-automatic-charge-wallet-v17';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1723,6 +1723,38 @@ function registrationFeeForClient(client, previousLoans, productName=''){
   const productFee = Number(product?.registrationFee || tag?.amount || 0);
   return (tag || pending) && !hasPreviousLoan ? productFee : 0;
 }
+async function getClientChargeWalletBalance(clientId){
+  const{data,error}=await sb.rpc('patafix_client_charge_balance',{p_client_id:clientId});
+  if(error)throw new Error(`Charges wallet is not ready: ${error.message}`);
+  return Number(data||0);
+}
+async function depositClientChargeWallet({clientId,amount,transactionType='deposit',chargeType='other',date=today(),reference='',paymentMethod='',description='',sourceKey=''}){
+  const{data,error}=await sb.rpc('patafix_deposit_client_charge',{
+    p_client_id:clientId,
+    p_amount:Number(amount||0),
+    p_transaction_type:transactionType,
+    p_charge_type:chargeType,
+    p_transaction_date:String(date||today()).slice(0,10),
+    p_reference:reference||null,
+    p_payment_method:paymentMethod||null,
+    p_description:description||null,
+    p_source_key:sourceKey||null
+  });
+  if(error)throw new Error(`Could not update the client's Charges Account: ${error.message}`);
+  return data||{};
+}
+async function consumeClientChargeWallet({clientId,loanId,processingAmount,registrationAmount,date,reference}){
+  const{data,error}=await sb.rpc('patafix_consume_client_charges',{
+    p_client_id:clientId,
+    p_loan_id:loanId,
+    p_processing_amount:Number(processingAmount||0),
+    p_registration_amount:Number(registrationAmount||0),
+    p_transaction_date:String(date||today()).slice(0,10),
+    p_reference:reference||null
+  });
+  if(error)throw new Error(`Could not deduct the upfront fees: ${error.message}`);
+  return data||{};
+}
 async function recordRegistrationFeeIncome(clientId, clientName, dateISO, amount=REGISTRATION_FEE){
   // Best-effort: try to insert into a generic income table. Silently ignore if it doesn't exist.
   try{
@@ -1732,7 +1764,7 @@ async function recordRegistrationFeeIncome(clientId, clientName, dateISO, amount
       date:dateISO,
       ref:'REG-'+clientId.slice(0,8).toUpperCase(),
       description:`Registration fee — ${clientName} | Client ID: ${clientId}`,
-      debit:'Cash',
+      debit:'Charges & Excess Account',
       credit:'Registration Fee Income',
       amount:Number(amount||0),
       synced:false
@@ -3296,6 +3328,15 @@ async function openDisburseModal(appId){
   // Registration fee only applies to newly registered clients on their first loan.
   const{data:prevLoans}=await sb('loans').select('id').eq('client_id',app.client_id).eq('business_id',currentUser?.business_id).limit(2);
   const regFee=registrationFeeForClient(app.loan_clients, prevLoans, product?.name);
+  let walletBalance=0;
+  try{
+    walletBalance=await getClientChargeWalletBalance(app.client_id);
+  }catch(e){
+    toast(e.message+' Run enable_client_charge_wallet.sql in Supabase first.','error');
+    return;
+  }
+  const requiredFees=Number((procFee+regFee).toFixed(2));
+  const feeShortfall=Number(Math.max(0,requiredFees-walletBalance).toFixed(2));
   // Upfront fees are collected before release and do not reduce the released principal.
   const netDisbursement=amt;
   const firstRep=new Date();firstRep.setDate(firstRep.getDate()+((product?.paymentEveryWeeks||1)*7));
@@ -3322,12 +3363,14 @@ async function openDisburseModal(appId){
       <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Amount to Release</strong></span><strong style="color:var(--accent-green)">${fmtMoney(netDisbursement)}</strong></p>
       <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">Upfront fees required before disbursement: ${fmtMoney(procFee+regFee)}. The released loan amount remains the approved principal.</p>
     </div>
-    <div class="form-group" style="margin-top:12px">
-      <label><input type="checkbox" id="dFeesPaid"> Confirm client has paid all upfront fees (${fmtMoney(procFee+regFee)})</label>
-      <div style="font-size:11px;color:var(--text-secondary);margin-top:3px">Do not disburse unless the application/processing fee and any new-client registration fee have been received.</div>
+    <div class="card" style="margin-top:12px;border-color:${feeShortfall>0?'var(--accent-red)':'var(--accent-green)'};background:${feeShortfall>0?'rgba(220,38,38,0.06)':'rgba(5,150,105,0.06)'}">
+      <p style="display:flex;justify-content:space-between"><span>Client Charges Account Balance</span><strong style="color:${feeShortfall>0?'var(--accent-red)':'var(--accent-green)'}">${fmtMoney(walletBalance)}</strong></p>
+      ${feeShortfall>0
+        ?`<p style="font-size:12px;color:var(--accent-red);margin-top:5px">The client needs ${fmtMoney(feeShortfall)} more before this loan can be disbursed.</p><button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="closeModal();navigateTo('charges_excess');setTimeout(()=>openClientChargePaymentModal('${app.client_id}'),250)">Record Charge Payment</button>`
+        :`<p style="font-size:12px;color:var(--accent-green);margin-top:5px">Sufficient balance. ${fmtMoney(requiredFees)} will be deducted automatically during disbursement.</p>`}
     </div>
-    <div class="form-group"><label>Upfront Fee Receipt / Reference</label><input class="input" id="dFeeRef" placeholder="M-Pesa code, cash receipt, or note"></div>
-    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnConfirmDisburse" onclick="confirmDisburse('${appId}','${app.client_id}','${app.applied_term_weeks}')">Confirm & Disburse</button></div>
+    <div class="form-group"><label>Fee Deduction Reference / Note</label><input class="input" id="dFeeRef" placeholder="Optional note for this deduction"></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnConfirmDisburse" onclick="confirmDisburse('${appId}','${app.client_id}','${app.applied_term_weeks}')" ${feeShortfall>0?'disabled':''}>${feeShortfall>0?'Insufficient Charges Balance':'Confirm & Disburse'}</button></div>
   `,true);
 }
 
@@ -3354,7 +3397,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
     const regFee=registrationFeeForClient(feeClient, prevLoans, product?.name);
     const netDisbursement=amt;
     const disbDate=$('#dDate').value;const firstRep=$('#dFirstRep').value;
-    if(!$('#dFeesPaid')?.checked) throw new Error('Confirm upfront fees are paid before disbursing this loan.');
+    const feeRef=($('#dFeeRef')?.value||'').trim();
     const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(c.installments-1)*c.intervalWeeks*7);
 
     const loanNo = generateUniqueNo('LN');
@@ -3392,7 +3435,25 @@ async function confirmDisburse(appId,clientId,termWeeks){
     }
     if(lErr)throw lErr;
 
-    const feeRef=($('#dFeeRef')?.value||'').trim();
+    let walletUse;
+    try{
+      walletUse=await consumeClientChargeWallet({
+        clientId,
+        loanId:loan.id,
+        processingAmount:procFee,
+        registrationAmount:regFee,
+        date:disbDate,
+        reference:feeRef||loanNo
+      });
+    }catch(walletErr){
+      await sb('loans').delete().eq('id',loan.id).eq('business_id',currentUser?.business_id);
+      throw walletErr;
+    }
+    if(!walletUse?.ok){
+      await sb('loans').delete().eq('id',loan.id).eq('business_id',currentUser?.business_id);
+      throw new Error(`Disbursement blocked. The client needs ${fmtMoney(walletUse?.shortfall||0)} more in the Charges Account.`);
+    }
+
     if(regFee>0){
       await recordRegistrationFeeIncome(clientId, feeClient?.full_name || 'Client', disbDate, regFee);
       try{
@@ -3417,7 +3478,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
 
     await sb('loan_applications').update({status:'disbursed'}).eq('id',appId);
 
-    // Log processing/application fee income collected upfront before disbursement.
+    // Recognize processing/application fee income after the wallet deduction.
     try{
       const feeRcpt=(appSettings?.receipt_no_prefix||'RCP')+'-PF-'+Date.now().toString().slice(-8);
       await sb('journal_entries').insert({
@@ -3425,8 +3486,8 @@ async function confirmDisburse(appId,clientId,termWeeks){
         business_id:currentUser?.business_id,
         date:disbDate,
         ref:feeRcpt,
-        description:`${patafixFeeName(product)} paid upfront${feeRef?' ('+feeRef+')':''} - Loan ${loanNo} | Client ID: ${clientId}`,
-        debit:'Cash',
+        description:`${patafixFeeName(product)} deducted from Charges Account${feeRef?' ('+feeRef+')':''} - Loan ${loanNo} | Client ID: ${clientId}`,
+        debit:'Charges & Excess Account',
         credit:'Processing Fee Income',
         amount:procFee,
         synced:false
@@ -4013,6 +4074,11 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
       status: mpNewBalance <= 0 ? 'completed' : mpLoanRef.status
     }).eq('id', loan.id);
     if(mpExcessAmount>0){
+      await depositClientChargeWallet({
+        clientId:loan.client_id,amount:mpExcessAmount,transactionType:'excess_deposit',chargeType:'excess',
+        date:today(),reference:transId||receiptNo,paymentMethod:'mpesa',
+        description:`Excess repayment from loan ${loan.loan_no}`,sourceKey:`excess:${receiptNo}`
+      }).catch(e=>{console.error('M-Pesa excess wallet deposit failed:',e.message);toast(e.message,'warning');});
       await sb('journal_entries').insert({
         id:crypto.randomUUID(),
         business_id:currentUser?.business_id,
@@ -4318,6 +4384,11 @@ async function savePayment(){
     }).eq('id',loanId);
 
     if(excessAmount>0){
+      await depositClientChargeWallet({
+        clientId:loan.client_id,amount:excessAmount,transactionType:'excess_deposit',chargeType:'excess',
+        date:paymentDate,reference:$('#payRef').value||receiptNo,paymentMethod:$('#payMethod').value||'cash',
+        description:`Excess repayment from loan ${loan.loan_no}`,sourceKey:`excess:${receiptNo}`
+      }).catch(e=>{console.error('Manual excess wallet deposit failed:',e.message);toast(e.message,'warning');});
       await sb('journal_entries').insert({
         id:crypto.randomUUID(),
         business_id:currentUser?.business_id,
@@ -5520,16 +5591,6 @@ async function renderOfficerDashboard(){
   }
 }
 
-function isChargesExcessEntry(entry){
-  const credit=String(entry?.credit||'').toLowerCase();
-  const desc=String(entry?.description||'').toLowerCase();
-  return credit.includes('processing fee income')
-    || credit.includes('registration fee income')
-    || credit.includes('charges & excess account')
-    || desc.includes('paid upfront')
-    || desc.includes('excess repayment');
-}
-
 async function fetchAllBusinessRows(table,selectClause){
   const pageSize=1000;
   const rows=[];
@@ -5547,59 +5608,46 @@ async function fetchAllBusinessRows(table,selectClause){
 }
 
 async function loadChargesExcessAccountData(){
-  const [entries,loans,clients]=await Promise.all([
-    fetchAllBusinessRows('journal_entries','*'),
+  const [transactions,loans,clients]=await Promise.all([
+    fetchAllBusinessRows('client_charge_transactions','*'),
     fetchAllBusinessRows('loans','*,loan_clients(id,full_name,phone,id_number)'),
     fetchAllBusinessRows('loan_clients','id,full_name,phone,id_number,email,address,created_at,photo_path')
   ]);
   const clientById={};
-  const loanByNo={};
+  const loanById={};
   clients.forEach(c=>{clientById[c.id]=c;});
-  loans.forEach(l=>{if(l.loan_no)loanByNo[String(l.loan_no).toLowerCase()]=l;});
-  const clientsByLongestName=[...clients].filter(c=>c.full_name).sort((a,b)=>String(b.full_name).length-String(a.full_name).length);
+  loans.forEach(l=>{loanById[l.id]=l;});
 
-  const rows=entries.filter(isChargesExcessEntry).sort((a,b)=>{
-    const byDate=String(a.date||a.created_at||'').localeCompare(String(b.date||b.created_at||''));
+  const rows=transactions.sort((a,b)=>{
+    const byDate=String(a.transaction_date||a.created_at||'').localeCompare(String(b.transaction_date||b.created_at||''));
     return byDate||String(a.created_at||'').localeCompare(String(b.created_at||''));
-  }).map(e=>{
-    const desc=String(e.description||'');
-    const descLower=desc.toLowerCase();
-    const credit=String(e.credit||'').toLowerCase();
-    const clientIdMatch=desc.match(/client id:\s*([0-9a-f-]{36})/i);
-    const loanNoMatch=desc.match(/loan\s+([a-z0-9-]+)/i);
-    const loan=loanNoMatch?loanByNo[String(loanNoMatch[1]||'').toLowerCase()]||null:null;
-    let client=clientIdMatch?clientById[clientIdMatch[1]]||null:null;
-    if(!client&&loan?.loan_clients)client=loan.loan_clients;
-    if(!client){
-      const paidByMatch=desc.match(/paid by ([^|]+)/i);
-      if(paidByMatch){
-        const paidBy=paidByMatch[1].trim().toLowerCase();
-        client=clientsByLongestName.find(c=>String(c.full_name||'').toLowerCase()===paidBy)||null;
-      }
-    }
-    if(!client)client=clientsByLongestName.find(c=>descLower.includes(String(c.full_name||'').toLowerCase()))||null;
-
-    const isExcess=descLower.includes('excess repayment');
+  }).map(tx=>{
+    const loan=tx.loan_id?loanById[tx.loan_id]||null:null;
+    const client=clientById[tx.client_id]||loan?.loan_clients||null;
+    const isCredit=['deposit','excess_deposit','adjustment_credit'].includes(tx.transaction_type);
+    const isExcess=tx.transaction_type==='excess_deposit'||tx.charge_type==='excess';
+    const isRegistration=tx.charge_type==='registration';
+    const isDebit=['fee_debit','adjustment_debit'].includes(tx.transaction_type);
     const type=isExcess
       ? 'Excess Repayment'
-      : credit.includes('registration fee income')
-        ? 'Registration Fee'
-        : credit.includes('processing fee income')
-          ? 'Processing/Application Fee'
-          : 'Other Charge';
-    const amount=Number(e.amount||0);
-    const refText=e.ref||((desc.match(/(?:m-pesa ref|ref):\s*([^|]+)/i)||[])[1])||'-';
+      : isRegistration
+        ? (isDebit?'Registration Fee Used':'Registration Fee Deposit')
+        : tx.charge_type==='processing'
+          ? (isDebit?'Processing/Application Fee Used':'Processing/Application Fee Deposit')
+          : (isDebit?'Other Charge Used':'Other Deposit');
+    const amount=Number(tx.amount||0);
     return {
-      ...e,
+      ...tx,
+      date:tx.transaction_date,
       _clientId:client?.id||'',
       _clientName:client?.full_name||'Unknown Client',
       _clientPhone:client?.phone||'',
-      _loanNo:loan?.loan_no||(loanNoMatch?.[1]||''),
-      _refText:refText,
+      _loanNo:loan?.loan_no||'',
+      _refText:tx.reference||'-',
       _type:type,
-      _amountIn:amount,
-      _amountUsed:isExcess?0:amount,
-      _net:isExcess?amount:0
+      _amountIn:isCredit?amount:0,
+      _amountUsed:isDebit?amount:0,
+      _net:isCredit?amount:-amount
     };
   });
 
@@ -5609,14 +5657,14 @@ async function loadChargesExcessAccountData(){
     clientBalances[key]=Number(((clientBalances[key]||0)+row._net).toFixed(2));
     row._balance=clientBalances[key];
   });
-  return {rows,loans,clients,clientById};
+  return {rows,loans,clients,clientById,clientBalances};
 }
 
 function chargesExcessTypeBadge(type){
   if(type==='Excess Repayment')return '<span class="badge badge-yellow">Excess Repayment</span>';
-  if(type==='Registration Fee')return '<span class="badge badge-blue">Registration Fee</span>';
-  if(type==='Other Charge')return '<span class="badge badge-gray">Other Charge</span>';
-  return '<span class="badge badge-green">Processing/Application Fee</span>';
+  if(type.includes('Registration'))return `<span class="badge badge-blue">${escapeHtml(type)}</span>`;
+  if(type.includes('Other'))return `<span class="badge badge-gray">${escapeHtml(type)}</span>`;
+  return `<span class="badge badge-green">${escapeHtml(type)}</span>`;
 }
 
 async function renderChargesExcessAccount(){
@@ -5627,8 +5675,8 @@ async function renderChargesExcessAccount(){
     window._chargesExcessData=data;
     const displayRows=[...data.rows].sort((a,b)=>String(b.date||b.created_at||'').localeCompare(String(a.date||a.created_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||'')));
     const chargesTotal=data.rows.reduce((s,e)=>s+Number(e._amountUsed||0),0);
-    const excessTotal=data.rows.filter(e=>e._type==='Excess Repayment').reduce((s,e)=>s+Number(e._amountIn||0),0);
-    const clientsWithBalance=new Set(data.rows.filter(e=>e._net>0&&e._clientId).map(e=>e._clientId)).size;
+    const availableTotal=Object.values(data.clientBalances||{}).reduce((s,b)=>s+Math.max(0,Number(b||0)),0);
+    const clientsWithBalance=Object.entries(data.clientBalances||{}).filter(([id,b])=>!id.startsWith('unknown:')&&Number(b)>0.009).length;
     main.innerHTML=`
       <div class="page-header">
         <div>
@@ -5638,9 +5686,9 @@ async function renderChargesExcessAccount(){
         <button class="btn btn-primary btn-sm" onclick="openClientChargePaymentModal()">+ Record Charge Payment</button>
       </div>
       <div class="kpi-grid" style="margin-bottom:16px">
-        <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Available Excess Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(excessTotal)}</div><div class="kpi-sub">Unused excess repayments held for clients</div></div>
+        <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Available Client Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(availableTotal)}</div><div class="kpi-sub">Unused charge deposits and excess repayments</div></div>
         <div class="kpi-card"><div class="kpi-label">Charges Paid & Used</div><div class="kpi-value">${fmtMoney(chargesTotal)}</div><div class="kpi-sub">Registration + processing/application fees</div></div>
-        <div class="kpi-card"><div class="kpi-label">Clients with Excess</div><div class="kpi-value">${clientsWithBalance}</div><div class="kpi-sub">Clients with an available balance</div></div>
+        <div class="kpi-card"><div class="kpi-label">Clients with Balance</div><div class="kpi-value">${clientsWithBalance}</div><div class="kpi-sub">Clients with money available for future fees</div></div>
       </div>
       <div class="search-bar" style="margin-bottom:12px">
         <input class="input" id="chargesExcessSearch" placeholder="Search client, phone, M-Pesa code, receipt, loan no or type..." oninput="filterChargesExcessStatement(this.value)">
@@ -5685,7 +5733,7 @@ async function openChargesClientAccount(clientId,activeTab='charges'){
     const rows=data.rows.filter(r=>r._clientId===clientId);
     const loans=data.loans.filter(l=>l.client_id===clientId).sort((a,b)=>String(b.disbursement_date||b.created_at||'').localeCompare(String(a.disbursement_date||a.created_at||'')));
     const displayRows=[...rows].sort((a,b)=>String(b.date||b.created_at||'').localeCompare(String(a.date||a.created_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||'')));
-    const excessTotal=rows.reduce((s,r)=>s+Number(r._net||0),0);
+    const availableBalance=rows.reduce((s,r)=>s+Number(r._net||0),0);
     const chargesTotal=rows.reduce((s,r)=>s+Number(r._amountUsed||0),0);
     const totalBorrowed=loans.reduce((s,l)=>s+Number(l.principal_amount||0),0);
     const totalPaid=loans.reduce((s,l)=>s+Number(l.total_paid||0),0);
@@ -5706,7 +5754,7 @@ async function openChargesClientAccount(clientId,activeTab='charges'){
       </div>
       <div id="clientChargesAccountPanel" style="display:${activeTab==='charges'?'block':'none'}">
         <div class="kpi-grid" style="margin-bottom:16px">
-          <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Available Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(excessTotal)}</div><div class="kpi-sub">Excess available on this client account</div></div>
+          <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Available Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(availableBalance)}</div><div class="kpi-sub">Charge deposits and excess available for future fees</div></div>
           <div class="kpi-card"><div class="kpi-label">Charges Paid & Used</div><div class="kpi-value">${fmtMoney(chargesTotal)}</div><div class="kpi-sub">Fees consumed during processing/disbursement</div></div>
           <div class="kpi-card"><div class="kpi-label">Transactions</div><div class="kpi-value">${rows.length}</div><div class="kpi-sub">Charge and excess entries</div></div>
         </div>
@@ -5764,13 +5812,9 @@ function filterChargesExcessStatement(q){
 
 async function openClientChargePaymentModal(preselectedClientId=''){
   try{
-    const{data:clients,error}=await sb('loan_clients')
-      .select('id,full_name,phone,id_number')
-      .eq('business_id',currentUser.business_id)
-      .order('full_name',{ascending:true})
-      .limit(1000);
-    if(error) throw error;
-    window._chargeClients=clients||[];
+    const clients=await fetchAllBusinessRows('loan_clients','id,full_name,phone,id_number');
+    clients.sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||'')));
+    window._chargeClients=clients;
     window._chargePaymentReturnClient=preselectedClientId||'';
     openModal(`
       <h2>Record Client Charge Payment</h2>
@@ -5780,7 +5824,7 @@ async function openClientChargePaymentModal(preselectedClientId=''){
         <input class="input" id="chargeClientSearch" placeholder="Search client name, phone or ID..." oninput="filterChargeClients(this.value)" style="margin-bottom:8px">
         <input type="hidden" id="chargeClientId">
         <div id="chargeClientList" style="height:170px;overflow:auto;border:1px solid var(--border);border-radius:8px;background:var(--bg-card)">
-          ${renderChargeClientRows(clients||[])}
+          ${renderChargeClientRows(clients)}
         </div>
         <div id="chargeClientSelected" style="margin-top:6px;font-size:12px;color:var(--text-secondary)">No client selected</div>
       </div>
@@ -5797,8 +5841,9 @@ async function openClientChargePaymentModal(preselectedClientId=''){
       </div>
       <div class="form-row">
         <div class="form-group"><label>Date Paid *</label><input class="input" type="date" id="chargeDate" value="${today()}"></div>
-        <div class="form-group"><label>Reference / Receipt</label><input class="input" id="chargeRef" placeholder="Receipt, M-Pesa ref, cash ref"></div>
+        <div class="form-group"><label>Payment Method *</label><select class="select" id="chargeMethod"><option value="mpesa">M-Pesa</option><option value="cash">Cash</option><option value="bank">Bank</option></select></div>
       </div>
+      <div class="form-group"><label>M-Pesa Code / Reference *</label><input class="input" id="chargeRef" placeholder="M-Pesa code, receipt or bank reference"></div>
       <div class="form-group"><label>Notes</label><textarea class="textarea" id="chargeNotes" placeholder="Optional notes"></textarea></div>
       <div class="modal-actions">
         <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -5861,27 +5906,34 @@ async function saveClientChargePayment(){
   const type=document.getElementById('chargeType')?.value||'processing';
   const amount=Number(document.getElementById('chargeAmount')?.value||0);
   const date=document.getElementById('chargeDate')?.value||today();
-  const ref=(document.getElementById('chargeRef')?.value||'').trim()||('CHG-'+Date.now().toString().slice(-8));
+  const method=document.getElementById('chargeMethod')?.value||'mpesa';
+  const ref=(document.getElementById('chargeRef')?.value||'').trim();
   const notes=(document.getElementById('chargeNotes')?.value||'').trim();
   if(!clientId)return toast('Select the client','warning');
   if(!amount||amount<=0)return toast('Enter a valid amount','warning');
+  if(!ref)return toast('Enter the M-Pesa code or payment reference','warning');
   const client=(window._chargeClients||[]).find(c=>c.id===clientId);
   const typeLabel=type==='registration'?'Registration Fee':type==='other'?'Other Charge':'Processing/Application Fee';
-  const credit=type==='registration'?'Registration Fee Income':type==='other'?'Charges & Excess Account':'Processing Fee Income';
   try{
-    await sb('journal_entries').insert({
-      id:crypto.randomUUID(),
+    const sourceKey='charge-deposit:'+crypto.randomUUID();
+    await depositClientChargeWallet({
+      clientId,amount,transactionType:'deposit',chargeType:type,date,reference:ref,
+      paymentMethod:method,description:`${typeLabel} payment deposited${notes?' | '+notes:''}`,sourceKey
+    });
+    const journalId=crypto.randomUUID();
+    const{error:journalError}=await sb('journal_entries').insert({
+      id:journalId,
       business_id:currentUser.business_id,
       date,
       ref,
-      description:`${typeLabel} paid by ${client?.full_name||'client'} | Client ID: ${clientId}${notes?' | '+notes:''}`,
-      debit:'Cash',
-      credit,
+      description:`${typeLabel} wallet deposit by ${client?.full_name||'client'} | Client ID: ${clientId}${notes?' | '+notes:''}`,
+      debit:method==='mpesa'?'M-Pesa':method==='bank'?'Bank':'Cash',
+      credit:'Charges & Excess Account',
       amount,
       synced:false
     });
-    await audit('client_charge_payment_recorded','journal_entries',clientId,null,{type,amount,ref,client:client?.full_name||''});
-    toast('Client charge payment recorded','success');
+    await audit('client_charge_payment_recorded','client_charge_transactions',clientId,null,{type,amount,ref,method,client:client?.full_name||''});
+    toast(journalError?'Charge deposited, but its accounting journal entry needs attention.':'Client charge payment deposited','success');
     closeModal();
     window._chargesExcessData=null;
     if(window._chargePaymentReturnClient)openChargesClientAccount(window._chargePaymentReturnClient,'charges');
@@ -6158,6 +6210,11 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
     }).eq('id',loanId);
 
     if(excessAmount>0){
+      await depositClientChargeWallet({
+        clientId:loan.client_id,amount:excessAmount,transactionType:'excess_deposit',chargeType:'excess',
+        date:paymentDate,reference:ref||receiptNo,paymentMethod:method,
+        description:`Excess suspense payment from loan ${loan.loan_no}`,sourceKey:`excess:${receiptNo}`
+      }).catch(e=>{console.error('Suspense excess wallet deposit failed:',e.message);toast(e.message,'warning');});
       await sb('journal_entries').insert({
         id:crypto.randomUUID(),
         business_id:currentUser?.business_id,
