@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-27-charges-drawdown-v15';
+const APP_VERSION = 'patafix-2026-07-27-client-charge-accounts-v16';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1731,7 +1731,7 @@ async function recordRegistrationFeeIncome(clientId, clientName, dateISO, amount
       business_id:currentUser?.business_id,
       date:dateISO,
       ref:'REG-'+clientId.slice(0,8).toUpperCase(),
-      description:`Registration fee — ${clientName}`,
+      description:`Registration fee — ${clientName} | Client ID: ${clientId}`,
       debit:'Cash',
       credit:'Registration Fee Income',
       amount:Number(amount||0),
@@ -3425,7 +3425,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
         business_id:currentUser?.business_id,
         date:disbDate,
         ref:feeRcpt,
-        description:`${patafixFeeName(product)} paid upfront${feeRef?' ('+feeRef+')':''} - Loan ${loanNo}`,
+        description:`${patafixFeeName(product)} paid upfront${feeRef?' ('+feeRef+')':''} - Loan ${loanNo} | Client ID: ${clientId}`,
         debit:'Cash',
         credit:'Processing Fee Income',
         amount:procFee,
@@ -5520,118 +5520,239 @@ async function renderOfficerDashboard(){
   }
 }
 
+function isChargesExcessEntry(entry){
+  const credit=String(entry?.credit||'').toLowerCase();
+  const desc=String(entry?.description||'').toLowerCase();
+  return credit.includes('processing fee income')
+    || credit.includes('registration fee income')
+    || credit.includes('charges & excess account')
+    || desc.includes('paid upfront')
+    || desc.includes('excess repayment');
+}
+
+async function fetchAllBusinessRows(table,selectClause){
+  const pageSize=1000;
+  const rows=[];
+  for(let from=0;;from+=pageSize){
+    const{data,error}=await sb(table)
+      .select(selectClause)
+      .eq('business_id',currentUser.business_id)
+      .order('created_at',{ascending:true})
+      .range(from,from+pageSize-1);
+    if(error)throw error;
+    rows.push(...(data||[]));
+    if(!data||data.length<pageSize)break;
+  }
+  return rows;
+}
+
+async function loadChargesExcessAccountData(){
+  const [entries,loans,clients]=await Promise.all([
+    fetchAllBusinessRows('journal_entries','*'),
+    fetchAllBusinessRows('loans','*,loan_clients(id,full_name,phone,id_number)'),
+    fetchAllBusinessRows('loan_clients','id,full_name,phone,id_number,email,address,created_at,photo_path')
+  ]);
+  const clientById={};
+  const loanByNo={};
+  clients.forEach(c=>{clientById[c.id]=c;});
+  loans.forEach(l=>{if(l.loan_no)loanByNo[String(l.loan_no).toLowerCase()]=l;});
+  const clientsByLongestName=[...clients].filter(c=>c.full_name).sort((a,b)=>String(b.full_name).length-String(a.full_name).length);
+
+  const rows=entries.filter(isChargesExcessEntry).sort((a,b)=>{
+    const byDate=String(a.date||a.created_at||'').localeCompare(String(b.date||b.created_at||''));
+    return byDate||String(a.created_at||'').localeCompare(String(b.created_at||''));
+  }).map(e=>{
+    const desc=String(e.description||'');
+    const descLower=desc.toLowerCase();
+    const credit=String(e.credit||'').toLowerCase();
+    const clientIdMatch=desc.match(/client id:\s*([0-9a-f-]{36})/i);
+    const loanNoMatch=desc.match(/loan\s+([a-z0-9-]+)/i);
+    const loan=loanNoMatch?loanByNo[String(loanNoMatch[1]||'').toLowerCase()]||null:null;
+    let client=clientIdMatch?clientById[clientIdMatch[1]]||null:null;
+    if(!client&&loan?.loan_clients)client=loan.loan_clients;
+    if(!client){
+      const paidByMatch=desc.match(/paid by ([^|]+)/i);
+      if(paidByMatch){
+        const paidBy=paidByMatch[1].trim().toLowerCase();
+        client=clientsByLongestName.find(c=>String(c.full_name||'').toLowerCase()===paidBy)||null;
+      }
+    }
+    if(!client)client=clientsByLongestName.find(c=>descLower.includes(String(c.full_name||'').toLowerCase()))||null;
+
+    const isExcess=descLower.includes('excess repayment');
+    const type=isExcess
+      ? 'Excess Repayment'
+      : credit.includes('registration fee income')
+        ? 'Registration Fee'
+        : credit.includes('processing fee income')
+          ? 'Processing/Application Fee'
+          : 'Other Charge';
+    const amount=Number(e.amount||0);
+    const refText=e.ref||((desc.match(/(?:m-pesa ref|ref):\s*([^|]+)/i)||[])[1])||'-';
+    return {
+      ...e,
+      _clientId:client?.id||'',
+      _clientName:client?.full_name||'Unknown Client',
+      _clientPhone:client?.phone||'',
+      _loanNo:loan?.loan_no||(loanNoMatch?.[1]||''),
+      _refText:refText,
+      _type:type,
+      _amountIn:amount,
+      _amountUsed:isExcess?0:amount,
+      _net:isExcess?amount:0
+    };
+  });
+
+  const clientBalances={};
+  rows.forEach(row=>{
+    const key=row._clientId||`unknown:${row._clientName}`;
+    clientBalances[key]=Number(((clientBalances[key]||0)+row._net).toFixed(2));
+    row._balance=clientBalances[key];
+  });
+  return {rows,loans,clients,clientById};
+}
+
+function chargesExcessTypeBadge(type){
+  if(type==='Excess Repayment')return '<span class="badge badge-yellow">Excess Repayment</span>';
+  if(type==='Registration Fee')return '<span class="badge badge-blue">Registration Fee</span>';
+  if(type==='Other Charge')return '<span class="badge badge-gray">Other Charge</span>';
+  return '<span class="badge badge-green">Processing/Application Fee</span>';
+}
+
 async function renderChargesExcessAccount(){
   const main=$('#mainContent');
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
   try{
-    const [entriesR,loansR]=await Promise.all([
-      sb('journal_entries')
-        .select('*')
-        .eq('business_id',currentUser.business_id)
-        .order('date',{ascending:true})
-        .order('created_at',{ascending:true}),
-      sb('loans')
-        .select('loan_no,loan_clients(full_name,phone,id_number)')
-        .eq('business_id',currentUser.business_id)
-        .limit(100000)
-    ]);
-    if(entriesR.error) throw entriesR.error;
-    const entries=entriesR.data||[];
-    const loanClientByNo={};
-    (loansR.data||[]).forEach(l=>{
-      if(l.loan_no) loanClientByNo[String(l.loan_no).toLowerCase()] = l.loan_clients || {};
-    });
-    const rows=(entries||[]).filter(e=>{
-      const credit=String(e.credit||'').toLowerCase();
-      const desc=String(e.description||'').toLowerCase();
-      return credit.includes('processing fee income')
-        || credit.includes('registration fee income')
-        || credit.includes('charges & excess account')
-        || desc.includes('paid upfront')
-        || desc.includes('excess repayment');
-    });
-    let running=0;
-    const statementRows=rows.map(e=>{
-      running+=Number(e.amount||0);
-      const credit=String(e.credit||'').toLowerCase();
-      const desc=String(e.description||'');
-      const descLower=desc.toLowerCase();
-      const loanNoMatch=desc.match(/loan\s+([^|\s]+)/i);
-      const loanClient=loanNoMatch?loanClientByNo[String(loanNoMatch[1]||'').toLowerCase()]||null:null;
-      const paidByMatch=desc.match(/paid by ([^|]+)/i);
-      const clientName=loanClient?.full_name || (paidByMatch?paidByMatch[1].trim():'Unknown Client');
-      const clientPhone=loanClient?.phone || '';
-      const refText=e.ref||((desc.match(/(?:m-pesa ref|ref):\s*([^|]+)/i)||[])[1])||'-';
-      const type=credit.includes('charges & excess account')||descLower.includes('excess repayment')
-        ? 'Excess Repayment'
-        : credit.includes('registration fee income')
-          ? 'Registration Fee'
-          : 'Processing/Application Fee';
-      return {...e,_clientName:clientName,_clientPhone:clientPhone,_refText:refText,_type:type,_balance:Number(running.toFixed(2))};
-    });
-    const displayRows=[...statementRows].sort((a,b)=>{
-      const ad=String(a.date||a.created_at||'');
-      const bd=String(b.date||b.created_at||'');
-      if(ad!==bd) return bd.localeCompare(ad);
-      return String(b.created_at||'').localeCompare(String(a.created_at||''));
-    });
-    const upfrontRows=rows.filter(e=>{
-      const credit=String(e.credit||'').toLowerCase();
-      return credit.includes('processing fee income') || credit.includes('registration fee income');
-    });
-    const excessRows=rows.filter(e=>{
-      const credit=String(e.credit||'').toLowerCase();
-      const desc=String(e.description||'').toLowerCase();
-      return credit.includes('charges & excess account') || desc.includes('excess repayment');
-    });
-    const upfrontTotal=upfrontRows.reduce((s,e)=>s+Number(e.amount||0),0);
-    const excessTotal=excessRows.reduce((s,e)=>s+Number(e.amount||0),0);
-    const total=upfrontTotal+excessTotal;
+    const data=await loadChargesExcessAccountData();
+    window._chargesExcessData=data;
+    const displayRows=[...data.rows].sort((a,b)=>String(b.date||b.created_at||'').localeCompare(String(a.date||a.created_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||'')));
+    const chargesTotal=data.rows.reduce((s,e)=>s+Number(e._amountUsed||0),0);
+    const excessTotal=data.rows.filter(e=>e._type==='Excess Repayment').reduce((s,e)=>s+Number(e._amountIn||0),0);
+    const clientsWithBalance=new Set(data.rows.filter(e=>e._net>0&&e._clientId).map(e=>e._clientId)).size;
     main.innerHTML=`
       <div class="page-header">
         <div>
           <h1>Charges & Excess Account</h1>
-          <p style="color:var(--text-secondary);font-size:12px;margin-top:4px">Drawdown-style statement for all client charge payments and excess repayments.</p>
+          <p style="color:var(--text-secondary);font-size:12px;margin-top:4px">Click a client to open their charges statement and loan history.</p>
         </div>
         <button class="btn btn-primary btn-sm" onclick="openClientChargePaymentModal()">+ Record Charge Payment</button>
       </div>
       <div class="kpi-grid" style="margin-bottom:16px">
-        <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Total Account Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(total)}</div><div class="kpi-sub">Charges + excess repayments</div></div>
-        <div class="kpi-card"><div class="kpi-label">Upfront Charges</div><div class="kpi-value">${fmtMoney(upfrontTotal)}</div><div class="kpi-sub">Registration + processing/application fees</div></div>
-        <div class="kpi-card"><div class="kpi-label">Excess Repayments</div><div class="kpi-value">${fmtMoney(excessTotal)}</div><div class="kpi-sub">Amounts above loan balance</div></div>
+        <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Available Excess Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(excessTotal)}</div><div class="kpi-sub">Unused excess repayments held for clients</div></div>
+        <div class="kpi-card"><div class="kpi-label">Charges Paid & Used</div><div class="kpi-value">${fmtMoney(chargesTotal)}</div><div class="kpi-sub">Registration + processing/application fees</div></div>
+        <div class="kpi-card"><div class="kpi-label">Clients with Excess</div><div class="kpi-value">${clientsWithBalance}</div><div class="kpi-sub">Clients with an available balance</div></div>
       </div>
       <div class="search-bar" style="margin-bottom:12px">
         <input class="input" id="chargesExcessSearch" placeholder="Search client, phone, M-Pesa code, receipt, loan no or type..." oninput="filterChargesExcessStatement(this.value)">
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Date</th><th>Client</th><th>Type</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Account Balance</th><th>Description</th></tr></thead>
+          <thead><tr><th>Date</th><th>Client</th><th>Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used as Charge</th><th>Client Balance</th></tr></thead>
           <tbody>
             ${displayRows.length?displayRows.map(e=>{
-              const typeBadge=e._type==='Excess Repayment'
-                ? '<span class="badge badge-yellow">Excess Repayment</span>'
-                : e._type==='Registration Fee'
-                  ? '<span class="badge badge-blue">Registration Fee</span>'
-                  : '<span class="badge badge-green">Processing/Application Fee</span>';
-              const search=[e._clientName,e._clientPhone,e._refText,e._type,e.description,e.ref].join(' ').toLowerCase();
-              return `<tr>
+              const search=[e._clientName,e._clientPhone,e._refText,e._loanNo,e._type,e.description,e.ref].join(' ').toLowerCase();
+              const clientCell=e._clientId
+                ? `<button type="button" onclick="openChargesClientAccount('${e._clientId}','charges')" style="border:0;background:transparent;padding:0;color:var(--accent-blue);text-align:left;cursor:pointer"><strong>${escapeHtml(e._clientName)}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(e._clientPhone||'View account')}</span></button>`
+                : `<strong>${escapeHtml(e._clientName)}</strong>`;
+              return `<tr class="charges-excess-row" data-search="${escapeHtml(search)}">
                 <td>${fmtDate(e.date||e.created_at)}</td>
-                <td><strong>${escapeHtml(e._clientName)}</strong>${e._clientPhone?'<br><span style="font-size:11px;color:var(--text-secondary)">'+escapeHtml(e._clientPhone)+'</span>':''}</td>
-                <td>${typeBadge}</td>
+                <td>${clientCell}</td>
+                <td>${chargesExcessTypeBadge(e._type)}</td>
+                <td>${escapeHtml(e._loanNo||'-')}</td>
                 <td><strong>${escapeHtml(e._refText||'-')}</strong></td>
-                <td><strong style="color:var(--accent-green)">${fmtMoney(e.amount||0)}</strong></td>
+                <td><strong style="color:var(--accent-green)">${fmtMoney(e._amountIn||0)}</strong></td>
+                <td>${e._amountUsed?`<strong style="color:var(--accent-red)">${fmtMoney(e._amountUsed)}</strong>`:'-'}</td>
                 <td><strong>${fmtMoney(e._balance||0)}</strong></td>
-                <td>${escapeHtml(e.description||'-')}</td>
-              </tr>`.replace('<tr>','<tr class="charges-excess-row" data-search="'+escapeHtml(search)+'">');
-            }).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess deposits recorded yet</td></tr>'}
+              </tr>`;
+            }).join(''):'<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess deposits recorded yet</td></tr>'}
           </tbody>
         </table>
       </div>
     `;
   }catch(e){
-    main.innerHTML=`<div class="empty-state"><p>Error: ${e.message}</p></div>`;
+    main.innerHTML=`<div class="empty-state"><p>Error: ${escapeHtml(e.message)}</p></div>`;
     toast(e.message,'error');
   }
+}
+
+async function openChargesClientAccount(clientId,activeTab='charges'){
+  const main=$('#mainContent');
+  main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
+  try{
+    const data=window._chargesExcessData||await loadChargesExcessAccountData();
+    const client=data.clientById[clientId];
+    if(!client)throw new Error('Client account not found');
+    const rows=data.rows.filter(r=>r._clientId===clientId);
+    const loans=data.loans.filter(l=>l.client_id===clientId).sort((a,b)=>String(b.disbursement_date||b.created_at||'').localeCompare(String(a.disbursement_date||a.created_at||'')));
+    const displayRows=[...rows].sort((a,b)=>String(b.date||b.created_at||'').localeCompare(String(a.date||a.created_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||'')));
+    const excessTotal=rows.reduce((s,r)=>s+Number(r._net||0),0);
+    const chargesTotal=rows.reduce((s,r)=>s+Number(r._amountUsed||0),0);
+    const totalBorrowed=loans.reduce((s,l)=>s+Number(l.principal_amount||0),0);
+    const totalPaid=loans.reduce((s,l)=>s+Number(l.total_paid||0),0);
+    const totalOutstanding=loans.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
+    window._chargesClientTab=activeTab;
+    main.innerHTML=`
+      <div class="page-header">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0">
+          <button class="btn btn-outline btn-sm" onclick="renderChargesExcessAccount()">Back</button>
+          ${clientAvatarHtml(client)}
+          <div style="min-width:0"><h1 style="overflow-wrap:anywhere">${escapeHtml(client.full_name||'Client')}</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:3px">${escapeHtml(client.phone||'-')} | ID: ${escapeHtml(client.id_number||'-')}</p></div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openClientChargePaymentModal('${clientId}')">+ Record Charge Payment</button>
+      </div>
+      <div class="tabs" style="margin-top:8px">
+        <div class="tab ${activeTab==='charges'?'active':''}" data-client-account-tab="charges" onclick="showChargesClientAccountTab('charges')">Charges Account</div>
+        <div class="tab ${activeTab==='loans'?'active':''}" data-client-account-tab="loans" onclick="showChargesClientAccountTab('loans')">Loans (${loans.length})</div>
+      </div>
+      <div id="clientChargesAccountPanel" style="display:${activeTab==='charges'?'block':'none'}">
+        <div class="kpi-grid" style="margin-bottom:16px">
+          <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Available Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(excessTotal)}</div><div class="kpi-sub">Excess available on this client account</div></div>
+          <div class="kpi-card"><div class="kpi-label">Charges Paid & Used</div><div class="kpi-value">${fmtMoney(chargesTotal)}</div><div class="kpi-sub">Fees consumed during processing/disbursement</div></div>
+          <div class="kpi-card"><div class="kpi-label">Transactions</div><div class="kpi-value">${rows.length}</div><div class="kpi-sub">Charge and excess entries</div></div>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Date</th><th>Description / Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used as Charge</th><th>Balance</th></tr></thead>
+          <tbody>${displayRows.map(r=>`<tr>
+            <td>${fmtDate(r.date||r.created_at)}</td>
+            <td>${chargesExcessTypeBadge(r._type)}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(r.description||'-')}</span></td>
+            <td>${escapeHtml(r._loanNo||'-')}</td>
+            <td><strong>${escapeHtml(r._refText||'-')}</strong></td>
+            <td><strong style="color:var(--accent-green)">${fmtMoney(r._amountIn||0)}</strong></td>
+            <td>${r._amountUsed?`<strong style="color:var(--accent-red)">${fmtMoney(r._amountUsed)}</strong>`:'-'}</td>
+            <td><strong>${fmtMoney(r._balance||0)}</strong></td>
+          </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:20px">No charge or excess transactions for this client</td></tr>'}</tbody>
+        </table></div>
+      </div>
+      <div id="clientLoansAccountPanel" style="display:${activeTab==='loans'?'block':'none'}">
+        <div class="kpi-grid" style="margin-bottom:16px">
+          <div class="kpi-card"><div class="kpi-label">Total Borrowed</div><div class="kpi-value">${fmtMoney(totalBorrowed)}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Total Paid</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(totalPaid)}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Outstanding</div><div class="kpi-value" style="color:var(--accent-yellow)">${fmtMoney(totalOutstanding)}</div></div>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Disbursed</th><th>Loan #</th><th>Principal</th><th>Total Payable</th><th>Total Paid</th><th>Balance</th><th>Arrears</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody>${loans.map(l=>`<tr>
+            <td>${fmtDate(l.disbursement_date||l.created_at)}</td><td><strong>${escapeHtml(l.loan_no||'-')}</strong></td>
+            <td>${fmtMoney(l.principal_amount||0)}</td><td>${fmtMoney(l.total_payable||0)}</td><td style="color:var(--accent-green)">${fmtMoney(l.total_paid||0)}</td>
+            <td><strong style="color:${Number(l.outstanding_balance||0)>0?'var(--accent-yellow)':'var(--accent-green)'}">${fmtMoney(l.outstanding_balance||0)}</strong></td>
+            <td style="color:${Number(l.arrears_amount||0)>0?'var(--accent-red)':'var(--text-secondary)'}">${fmtMoney(l.arrears_amount||0)}</td>
+            <td>${statusBadge(l.status)}</td><td><button class="btn btn-outline btn-sm" onclick="viewLoan('${l.id}')">View</button></td>
+          </tr>`).join('')||'<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:20px">No loans for this client</td></tr>'}</tbody>
+        </table></div>
+      </div>
+    `;
+  }catch(e){
+    main.innerHTML=`<div class="empty-state"><p>Error: ${escapeHtml(e.message)}</p></div>`;
+    toast(e.message,'error');
+  }
+}
+
+function showChargesClientAccountTab(tab){
+  const charges=document.getElementById('clientChargesAccountPanel');
+  const loans=document.getElementById('clientLoansAccountPanel');
+  if(charges)charges.style.display=tab==='charges'?'block':'none';
+  if(loans)loans.style.display=tab==='loans'?'block':'none';
+  document.querySelectorAll('[data-client-account-tab]').forEach(el=>el.classList.toggle('active',el.dataset.clientAccountTab===tab));
 }
 
 function filterChargesExcessStatement(q){
@@ -5641,7 +5762,7 @@ function filterChargesExcessStatement(q){
   });
 }
 
-async function openClientChargePaymentModal(){
+async function openClientChargePaymentModal(preselectedClientId=''){
   try{
     const{data:clients,error}=await sb('loan_clients')
       .select('id,full_name,phone,id_number')
@@ -5650,6 +5771,7 @@ async function openClientChargePaymentModal(){
       .limit(1000);
     if(error) throw error;
     window._chargeClients=clients||[];
+    window._chargePaymentReturnClient=preselectedClientId||'';
     openModal(`
       <h2>Record Client Charge Payment</h2>
       <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Use this for charges paid by a client outside the loan repayment screen.</p>
@@ -5683,6 +5805,7 @@ async function openClientChargePaymentModal(){
         <button class="btn btn-primary" onclick="saveClientChargePayment()">Save Charge Payment</button>
       </div>
     `);
+    if(preselectedClientId)selectChargeClient(preselectedClientId);
   }catch(e){toast(e.message,'error');}
 }
 
@@ -5751,7 +5874,7 @@ async function saveClientChargePayment(){
       business_id:currentUser.business_id,
       date,
       ref,
-      description:`${typeLabel} paid by ${client?.full_name||'client'}${notes?' | '+notes:''}`,
+      description:`${typeLabel} paid by ${client?.full_name||'client'} | Client ID: ${clientId}${notes?' | '+notes:''}`,
       debit:'Cash',
       credit,
       amount,
@@ -5760,7 +5883,9 @@ async function saveClientChargePayment(){
     await audit('client_charge_payment_recorded','journal_entries',clientId,null,{type,amount,ref,client:client?.full_name||''});
     toast('Client charge payment recorded','success');
     closeModal();
-    renderChargesExcessAccount();
+    window._chargesExcessData=null;
+    if(window._chargePaymentReturnClient)openChargesClientAccount(window._chargePaymentReturnClient,'charges');
+    else renderChargesExcessAccount();
   }catch(e){toast(e.message,'error');}
 }
 
