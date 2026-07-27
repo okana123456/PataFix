@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-27-charges-excess-account-v12';
+const APP_VERSION = 'patafix-2026-07-27-charge-payments-officer-splits-v13';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -5543,6 +5543,7 @@ async function renderChargesExcessAccount(){
           <h1>Charges & Excess Account</h1>
           <p style="color:var(--text-secondary);font-size:12px;margin-top:4px">Tracks upfront loan charges and repayment amounts paid above the current loan balance.</p>
         </div>
+        <button class="btn btn-primary btn-sm" onclick="openClientChargePaymentModal()">+ Record Charge Payment</button>
       </div>
       <div class="kpi-grid" style="margin-bottom:16px">
         <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Total Account Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(total)}</div><div class="kpi-sub">Charges + excess repayments</div></div>
@@ -5577,6 +5578,97 @@ async function renderChargesExcessAccount(){
     main.innerHTML=`<div class="empty-state"><p>Error: ${e.message}</p></div>`;
     toast(e.message,'error');
   }
+}
+
+async function openClientChargePaymentModal(){
+  try{
+    const{data:clients,error}=await sb('loan_clients')
+      .select('id,full_name,phone,id_number')
+      .eq('business_id',currentUser.business_id)
+      .order('full_name',{ascending:true})
+      .limit(1000);
+    if(error) throw error;
+    window._chargeClients=clients||[];
+    openModal(`
+      <h2>Record Client Charge Payment</h2>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Use this for charges paid by a client outside the loan repayment screen.</p>
+      <div class="form-group">
+        <label>Client *</label>
+        <input class="input" id="chargeClientSearch" placeholder="Search client name, phone or ID..." oninput="filterChargeClients(this.value)" style="margin-bottom:8px">
+        <select class="select" id="chargeClientId" size="6" style="height:150px">
+          ${(clients||[]).map(chargeClientOption).join('')}
+        </select>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Charge Type *</label>
+          <select class="select" id="chargeType">
+            <option value="processing">Processing/Application Fee</option>
+            <option value="registration">Registration Fee</option>
+            <option value="other">Other Charge</option>
+          </select>
+        </div>
+        <div class="form-group"><label>Amount (KES) *</label><input class="input" type="number" id="chargeAmount" placeholder="e.g. 500"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Date Paid *</label><input class="input" type="date" id="chargeDate" value="${today()}"></div>
+        <div class="form-group"><label>Reference / Receipt</label><input class="input" id="chargeRef" placeholder="Receipt, M-Pesa ref, cash ref"></div>
+      </div>
+      <div class="form-group"><label>Notes</label><textarea class="textarea" id="chargeNotes" placeholder="Optional notes"></textarea></div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveClientChargePayment()">Save Charge Payment</button>
+      </div>
+    `);
+  }catch(e){toast(e.message,'error');}
+}
+
+function chargeClientOption(c){
+  return `<option value="${c.id}">${escapeHtml(c.full_name||'Unknown')} - ${escapeHtml(c.phone||'-')}${c.id_number?' - ID '+escapeHtml(c.id_number):''}</option>`;
+}
+
+function filterChargeClients(q){
+  const sel=document.getElementById('chargeClientId');
+  if(!sel)return;
+  const term=(q||'').toLowerCase();
+  const clients=window._chargeClients||[];
+  const filtered=term.length<2?clients:clients.filter(c=>{
+    return String(c.full_name||'').toLowerCase().includes(term)
+      || String(c.phone||'').toLowerCase().includes(term)
+      || String(c.id_number||'').toLowerCase().includes(term);
+  });
+  sel.innerHTML=filtered.map(chargeClientOption).join('');
+}
+
+async function saveClientChargePayment(){
+  const clientId=document.getElementById('chargeClientId')?.value;
+  const type=document.getElementById('chargeType')?.value||'processing';
+  const amount=Number(document.getElementById('chargeAmount')?.value||0);
+  const date=document.getElementById('chargeDate')?.value||today();
+  const ref=(document.getElementById('chargeRef')?.value||'').trim()||('CHG-'+Date.now().toString().slice(-8));
+  const notes=(document.getElementById('chargeNotes')?.value||'').trim();
+  if(!clientId)return toast('Select the client','warning');
+  if(!amount||amount<=0)return toast('Enter a valid amount','warning');
+  const client=(window._chargeClients||[]).find(c=>c.id===clientId);
+  const typeLabel=type==='registration'?'Registration Fee':type==='other'?'Other Charge':'Processing/Application Fee';
+  const credit=type==='registration'?'Registration Fee Income':type==='other'?'Charges & Excess Account':'Processing Fee Income';
+  try{
+    await sb('journal_entries').insert({
+      id:crypto.randomUUID(),
+      business_id:currentUser.business_id,
+      date,
+      ref,
+      description:`${typeLabel} paid by ${client?.full_name||'client'}${notes?' | '+notes:''}`,
+      debit:'Cash',
+      credit,
+      amount,
+      synced:false
+    });
+    await audit('client_charge_payment_recorded','journal_entries',clientId,null,{type,amount,ref,client:client?.full_name||''});
+    toast('Client charge payment recorded','success');
+    closeModal();
+    renderChargesExcessAccount();
+  }catch(e){toast(e.message,'error');}
 }
 
 // ═══ SUSPENSE ACCOUNT ═══
@@ -5907,6 +5999,18 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
   }
 }
 
+function splitLoanBalanceAmount(loan, amount){
+  const amt=Number(amount||0);
+  const principal=Number(loan?.principal_amount||0);
+  const interest=Number(loan?.total_interest||0);
+  const total=Number(loan?.total_payable||0) || principal + interest || principal || 1;
+  const principalRatio=principal>0?principal/total:1;
+  const interestRatio=interest>0?interest/total:Math.max(0,1-principalRatio);
+  return {
+    principal:Number((amt*principalRatio).toFixed(2)),
+    interest:Number((amt*interestRatio).toFixed(2))
+  };
+}
 
 function downloadOfficerPerformanceReport(){
   const rows = window._perfRows || [];
@@ -5915,6 +6019,10 @@ function downloadOfficerPerformanceReport(){
   const data = rows.map(({o,oActive,oLoansMonth,outstanding,overdueLoans,collected})=>{
     const clientsInArr = new Set(overdueLoans.map(l=>l.client_id)).size;
     const totalArrAmt  = overdueLoans.reduce((s,l)=>s+Number(l.arrears_amount||0),0);
+    const principalArrears = overdueLoans.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.arrears_amount).principal,0);
+    const interestArrears = overdueLoans.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.arrears_amount).interest,0);
+    const principalOutstanding = oActive.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0);
+    const interestOutstanding = oActive.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0);
     const bq  = oActive.length>0 ? ((oActive.length-clientsInArr)/oActive.length*100) : 100;
     const par = outstanding>0 ? (totalArrAmt/outstanding*100) : 0;
     const disbMonth = oLoansMonth.reduce((s,l)=>s+Number(l.principal_amount||0),0);
@@ -5926,6 +6034,10 @@ function downloadOfficerPerformanceReport(){
       'BQ %':              Number(bq.toFixed(2)),
       'OLB (KES)':         Number(outstanding.toFixed(2)),
       'Arrears (KES)':     Number(totalArrAmt.toFixed(2)),
+      'Principal Arrears (KES)': Number(principalArrears.toFixed(2)),
+      'Interest Arrears (KES)': Number(interestArrears.toFixed(2)),
+      'Principal Outstanding (KES)': Number(principalOutstanding.toFixed(2)),
+      'Interest Outstanding (KES)': Number(interestOutstanding.toFixed(2)),
       'PAR %':             Number(par.toFixed(2)),
       'Collections Month (KES)': Number(collected.toFixed(2)),
       'Disbursed Month (KES)':   Number(disbMonth.toFixed(2))
@@ -5941,6 +6053,10 @@ function downloadOfficerPerformanceReport(){
     'BQ %':              '',
     'OLB (KES)':         Number(rows.reduce((s,r)=>s+r.outstanding,0).toFixed(2)),
     'Arrears (KES)':     Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+Number(l.arrears_amount||0),0),0).toFixed(2)),
+    'Principal Arrears (KES)': Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.arrears_amount).principal,0),0).toFixed(2)),
+    'Interest Arrears (KES)': Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.arrears_amount).interest,0),0).toFixed(2)),
+    'Principal Outstanding (KES)': Number(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0),0).toFixed(2)),
+    'Interest Outstanding (KES)': Number(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0),0).toFixed(2)),
     'PAR %':             '',
     'Collections Month (KES)': Number(rows.reduce((s,r)=>s+r.collected,0).toFixed(2)),
     'Disbursed Month (KES)':   Number(rows.reduce((s,r)=>s+r.oLoansMonth.reduce((x,l)=>x+Number(l.principal_amount||0),0),0).toFixed(2))
@@ -5951,7 +6067,8 @@ function downloadOfficerPerformanceReport(){
   // Column widths
   ws['!cols'] = [
     {wch:22},{wch:10},{wch:14},{wch:18},{wch:8},
-    {wch:14},{wch:14},{wch:8},{wch:20},{wch:20}
+    {wch:14},{wch:14},{wch:22},{wch:22},{wch:26},{wch:25},
+    {wch:8},{wch:20},{wch:20}
   ];
 
   // Header row styling hint (works in Excel)
@@ -6033,13 +6150,18 @@ async function renderOfficerPerformance(){
         <table>
           <thead><tr>
             <th>Officer</th><th>Branch</th><th>Active Clients</th><th>ACC Arrears</th>
-            <th>BQ %</th><th>OLB (KES)</th><th>Arrears (KES)</th><th>PAR %</th>
+            <th>BQ %</th><th>OLB (KES)</th><th>Arrears (KES)</th>
+            <th>Principal Arrears</th><th>Interest Arrears</th><th>Principal Outstanding</th><th>Interest Outstanding</th><th>PAR %</th>
             <th>Collections (Month)</th><th>Disbursed (Month)</th>
           </tr></thead>
           <tbody>
             ${rows.map(({o,oLoans,oActive,oClientIds,portfolio,outstanding,overdueLoans,collected,oLoansMonth})=>{
               const clientsInArr=new Set(overdueLoans.map(l=>l.client_id)).size;
               const totalArrAmt=overdueLoans.reduce((s,l)=>s+Number(l.arrears_amount||0),0);
+              const principalArrears=overdueLoans.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.arrears_amount).principal,0);
+              const interestArrears=overdueLoans.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.arrears_amount).interest,0);
+              const principalOutstanding=oActive.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0);
+              const interestOutstanding=oActive.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0);
               const bq=oActive.length>0?((oActive.length-clientsInArr)/oActive.length*100):100;
               const par=outstanding>0?(totalArrAmt/outstanding*100):0;
               const disbMonth=oLoansMonth.reduce((s,l)=>s+Number(l.principal_amount||0),0);
@@ -6053,11 +6175,15 @@ async function renderOfficerPerformance(){
                 '<td><strong style="color:'+bqColor+'">'+bq.toFixed(1)+'%</strong></td>' +
                 '<td>'+fmtMoney(outstanding)+'</td>' +
                 '<td style="color:var(--accent-red)">'+fmtMoney(totalArrAmt)+'</td>' +
+                '<td style="color:var(--accent-red)">'+fmtMoney(principalArrears)+'</td>' +
+                '<td style="color:var(--accent-red)">'+fmtMoney(interestArrears)+'</td>' +
+                '<td>'+fmtMoney(principalOutstanding)+'</td>' +
+                '<td>'+fmtMoney(interestOutstanding)+'</td>' +
                 '<td><strong style="color:'+parColor+'">'+par.toFixed(1)+'%</strong></td>' +
                 '<td><strong style="color:var(--accent-green)">'+fmtMoney(collected)+'</strong></td>' +
                 '<td>'+fmtMoney(disbMonth)+'</td>' +
               '</tr>';
-            }).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--text-secondary)">No officer data found</td></tr>'}
+            }).join('')||'<tr><td colspan="14" style="text-align:center;color:var(--text-secondary)">No officer data found</td></tr>'}
           </tbody>
           <tfoot>
             <tr style="font-weight:700;background:rgba(255,255,255,0.04)">
@@ -6068,6 +6194,10 @@ async function renderOfficerPerformance(){
               <td></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.outstanding,0))}</strong></td>
               <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+Number(l.arrears_amount||0),0),0))}</strong></td>
+              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.arrears_amount).principal,0),0))}</strong></td>
+              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.arrears_amount).interest,0),0))}</strong></td>
+              <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0),0))}</strong></td>
+              <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0),0))}</strong></td>
               <td></td>
               <td><strong style="color:var(--accent-green)">${fmtMoney(rows.reduce((s,r)=>s+r.collected,0))}</strong></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oLoansMonth.reduce((x,l)=>x+Number(l.principal_amount||0),0),0))}</strong></td>
