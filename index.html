@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-27-client-profile-charges-v18';
+const APP_VERSION = 'patafix-2026-07-29-charge-rpc-fix-v19';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1724,12 +1724,12 @@ function registrationFeeForClient(client, previousLoans, productName=''){
   return (tag || pending) && !hasPreviousLoan ? productFee : 0;
 }
 async function getClientChargeWalletBalance(clientId){
-  const{data,error}=await sb.rpc('patafix_client_charge_balance',{p_client_id:clientId});
+  const{data,error}=await supabaseClient.rpc('patafix_client_charge_balance',{p_client_id:clientId});
   if(error)throw new Error(`Charges wallet is not ready: ${error.message}`);
   return Number(data||0);
 }
 async function depositClientChargeWallet({clientId,amount,transactionType='deposit',chargeType='other',date=today(),reference='',paymentMethod='',description='',sourceKey=''}){
-  const{data,error}=await sb.rpc('patafix_deposit_client_charge',{
+  const{data,error}=await supabaseClient.rpc('patafix_deposit_client_charge',{
     p_client_id:clientId,
     p_amount:Number(amount||0),
     p_transaction_type:transactionType,
@@ -1744,7 +1744,7 @@ async function depositClientChargeWallet({clientId,amount,transactionType='depos
   return data||{};
 }
 async function consumeClientChargeWallet({clientId,loanId,processingAmount,registrationAmount,date,reference}){
-  const{data,error}=await sb.rpc('patafix_consume_client_charges',{
+  const{data,error}=await supabaseClient.rpc('patafix_consume_client_charges',{
     p_client_id:clientId,
     p_loan_id:loanId,
     p_processing_amount:Number(processingAmount||0),
