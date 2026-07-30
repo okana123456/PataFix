@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-29-charge-rpc-fix-v19';
+const APP_VERSION = 'patafix-2026-07-30-loan-date-controls-v20';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -584,6 +584,17 @@ const fmtLongDate = (d=new Date()) => {
   return dt ? dt.toLocaleDateString('en-KE',{day:'2-digit',month:'long',year:'numeric'}) : '-';
 };
 const today = () => localISODate();
+function isFutureDateValue(value){
+  const d=String(value||'').slice(0,10);
+  return !!d && d > today();
+}
+function validateNotFutureDate(value,label){
+  if(isFutureDateValue(value)){
+    toast(`${label} cannot be in the future.`, 'warning');
+    return false;
+  }
+  return true;
+}
 const genId = () => crypto.randomUUID();
 
 function generateUniqueNo(prefix) {
@@ -2826,9 +2837,9 @@ async function renderApplications(page=1){
     if(isOnlyOfficer) cachedData.applications = cachedData.applications.filter(a => a.loan_officer_id === currentUser.id);
     const p=paginate(cachedData.applications,page);
     main.innerHTML=`
-      <div class="page-header"><h1>Loan Applications</h1><button class="btn btn-primary" onclick="openNewApplication()">+ New Application</button></div>
+      <div class="page-header"><h1>Loan Applications</h1><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" id="btnBulkApproveApps" onclick="openBulkApproveApplicationsModal()" style="display:none">Approve Selected (<span id="bulkApproveAppsCount">0</span>)</button><button class="btn btn-primary" onclick="openNewApplication()">+ New Application</button></div></div>
       <div class="search-bar"><input class="input" placeholder="Search application or client..." oninput="filterApps(this.value)"><select class="select" onchange="filterAppStatus(this.value)"><option value="">All Status</option><option value="draft">Draft</option><option value="submitted">Submitted</option><option value="under_review">Under Review</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="disbursed">Disbursed</option></select></div>
-      <div class="table-wrap"><table><thead><tr><th>App #</th><th>Client Name</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
+      <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager')?'<input type="checkbox" id="bulkApproveAllApps" onchange="toggleBulkApproveApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
       <tbody id="appsBody">${renderAppRows(p.items)}</tbody></table></div>
       ${paginationHtml(p,'renderApplications')}
     `;
@@ -2842,6 +2853,7 @@ function renderAppRows(apps){
     const appStatus=String(a.status||'').toLowerCase();
     const canApprove=appStatus==='submitted'&&hasRole('admin','branch_manager');
     return `<tr>
+    <td>${canApprove?`<input type="checkbox" class="app-approve-chk" value="${a.id}" onchange="updateBulkApproveApplicationsBtn()">`:''}</td>
     <td><strong>${a.application_no||'DRAFT'}</strong></td>
     <td><strong>${a.loan_clients?.full_name||'—'}</strong></td>
     <td>${a.loan_clients?.phone||'-'}</td>
@@ -2896,8 +2908,23 @@ function toggleRowActionMenu(id,event){
   }
 }
 
-function filterApps(q){q=(q||'').toLowerCase();const f=(cachedData.applications||[]).filter(a=>(a.application_no||'').toLowerCase().includes(q)||(a.loan_clients?.full_name||'').toLowerCase().includes(q)||(a.loan_clients?.phone||'').toLowerCase().includes(q)||(a.loan_clients?.id_number||'').toLowerCase().includes(q));$('#appsBody').innerHTML=renderAppRows(f)}
-function filterAppStatus(v){const f=v?(cachedData.applications||[]).filter(a=>a.status===v):(cachedData.applications||[]);$('#appsBody').innerHTML=renderAppRows(f)}
+function filterApps(q){q=(q||'').toLowerCase();const f=(cachedData.applications||[]).filter(a=>(a.application_no||'').toLowerCase().includes(q)||(a.loan_clients?.full_name||'').toLowerCase().includes(q)||(a.loan_clients?.phone||'').toLowerCase().includes(q)||(a.loan_clients?.id_number||'').toLowerCase().includes(q));$('#appsBody').innerHTML=renderAppRows(f);updateBulkApproveApplicationsBtn();}
+function filterAppStatus(v){const f=v?(cachedData.applications||[]).filter(a=>a.status===v):(cachedData.applications||[]);$('#appsBody').innerHTML=renderAppRows(f);updateBulkApproveApplicationsBtn();}
+
+function updateBulkApproveApplicationsBtn(){
+  const checked=[...document.querySelectorAll('.app-approve-chk:checked')];
+  const btn=document.getElementById('btnBulkApproveApps');
+  const cnt=document.getElementById('bulkApproveAppsCount');
+  if(cnt)cnt.textContent=checked.length;
+  if(btn)btn.style.display=checked.length?'inline-flex':'none';
+  const all=document.getElementById('bulkApproveAllApps');
+  const visible=[...document.querySelectorAll('.app-approve-chk')];
+  if(all)all.checked=visible.length>0&&checked.length===visible.length;
+}
+function toggleBulkApproveApplications(checked){
+  document.querySelectorAll('.app-approve-chk').forEach(ch=>{ch.checked=checked;});
+  updateBulkApproveApplicationsBtn();
+}
 
 async function openNewApplication(){
   const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number').eq('business_id', currentUser.business_id).order('full_name');
@@ -2930,7 +2957,7 @@ async function openNewApplication(){
       <div class="form-group"><label>PataFix Product *</label><select class="select" id="appProduct" onchange="appCalcUpdate()"><option value="">Select product</option>${productOptions}</select></div>
       <div class="form-group"><label>Loan Amount *</label><input class="input" type="number" id="appAmount" oninput="appCalcUpdate()" placeholder="Enter amount"></div>
       <div id="appTierInfo" class="card" style="margin:8px 0;font-size:13px;display:none"></div>
-      <div class="form-row"><div class="form-group"><label>Term (weeks) *</label><input class="input" type="number" id="appTerm" oninput="appCalcUpdate()" placeholder="Number of weeks"></div><div class="form-group"><label>Application Date</label><input class="input" type="date" id="appDate" value="${today()}"></div></div>
+      <div class="form-row"><div class="form-group"><label>Term (weeks) *</label><input class="input" type="number" id="appTerm" oninput="appCalcUpdate()" placeholder="Number of weeks"></div><div class="form-group"><label>Application Date</label><input class="input" type="date" id="appDate" value="${today()}" max="${today()}"></div></div>
       <div class="form-group"><label>Purpose</label><textarea class="textarea" id="appPurpose"></textarea></div>
       <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin:10px 0 12px;font-size:12px;color:var(--text-secondary)"><strong>Loan Guarantor Details</strong></div>
       <div class="form-row"><div class="form-group"><label>Guarantor Full Name</label><input class="input" id="appGuarantorName"></div><div class="form-group"><label>Guarantor Phone</label><input class="input" id="appGuarantorPhone"></div></div>
@@ -3089,6 +3116,10 @@ async function submitApplication(){
       }
     }
     const appDate=$('#appDate')?.value||today();
+    if(!validateNotFutureDate(appDate,'Application date')){
+      if(btn){ btn.disabled=false; btn.textContent='Submit Application'; }
+      return;
+    }
     const rec={application_no:appNo,client_id:selectedClientId,product_id:productId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRel')?.value||'').trim(),status:'submitted',application_date:appDate,created_at:dateInputToLocalDateTime(appDate),loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType};
     
     // Try with product_id first; if Supabase rejects (column may not exist), retry without
@@ -3224,15 +3255,53 @@ async function deleteApplication(id){
 }
 
 async function approveApp(id){
-  if(!await confirm_('Approve this application?'))return;
+  openApproveApplicationsModal([id]);
+}
+
+function selectedBulkApproveApplicationIds(){
+  return [...document.querySelectorAll('.app-approve-chk:checked')].map(ch=>ch.value).filter(Boolean);
+}
+
+function openBulkApproveApplicationsModal(){
+  const ids=selectedBulkApproveApplicationIds();
+  if(!ids.length)return toast('Select at least one submitted application','warning');
+  openApproveApplicationsModal(ids);
+}
+
+function openApproveApplicationsModal(ids){
+  ids=(ids||[]).filter(Boolean);
+  if(!ids.length)return toast('No applications selected','warning');
+  openModal(`
+    <h2>${ids.length>1?'Approve Applications':'Approve Application'}</h2>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">${ids.length>1?`${ids.length} submitted applications will be approved.`:'Choose the approval date for this application.'}</p>
+    <div class="form-group"><label>Approval Date *</label><input class="input" type="date" id="approvalDateInput" value="${today()}" max="${today()}"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-success" id="btnConfirmApproveApps" onclick="confirmApproveApplications('${ids.join(',')}')">Approve</button>
+    </div>
+  `);
+}
+
+async function confirmApproveApplications(idsCsv){
+  const ids=String(idsCsv||'').split(',').filter(Boolean);
+  const approvalDate=$('#approvalDateInput')?.value||today();
+  if(!approvalDate)return toast('Select approval date','warning');
+  if(!validateNotFutureDate(approvalDate,'Approval date'))return;
+  const btn=document.getElementById('btnConfirmApproveApps');
+  if(btn){btn.disabled=true;btn.textContent='Approving...';}
   try{
-    await sb('loan_applications').update({status:'approved',approved_by:currentUser?.id,approved_at:new Date().toISOString()}).eq('id',id);
-    await audit('application_approved','loan_applications',id,null,null);
-    toast('Application approved! Opening disbursement…','success');
+    const approvedAt=dateInputToLocalDateTime(approvalDate);
+    const{error}=await sb('loan_applications').update({status:'approved',approved_by:currentUser?.id,approved_at:approvedAt,reviewed_by:currentUser?.id,reviewed_at:approvedAt,updated_at:new Date().toISOString()}).eq('business_id',currentUser.business_id).in('id',ids).eq('status','submitted');
+    if(error)throw error;
+    await Promise.all(ids.map(id=>audit('application_approved','loan_applications',id,null,{approval_date:approvalDate,bulk:ids.length>1})));
+    toast(ids.length>1?`${ids.length} applications approved`:'Application approved! Opening disbursement...','success');
     closeModal();
-    // Seamless: jump straight into the disbursement modal so admin can complete the flow
-    setTimeout(()=>openDisburseModal(id), 200);
-  }catch(e){toast(e.message,'error')}
+    renderApplications(appPage);
+    if(ids.length===1)setTimeout(()=>openDisburseModal(ids[0]), 250);
+  }catch(e){
+    toast(e.message,'error');
+    if(btn){btn.disabled=false;btn.textContent='Approve';}
+  }
 }
 
 async function rejectApp(id){
@@ -3347,7 +3416,8 @@ async function openDisburseModal(appId){
   const feeShortfall=Number(Math.max(0,requiredFees-walletBalance).toFixed(2));
   // Upfront fees are collected before release and do not reduce the released principal.
   const netDisbursement=amt;
-  const firstRep=new Date();firstRep.setDate(firstRep.getDate()+((product?.paymentEveryWeeks||1)*7));
+  const defaultDisbDate=isFutureDateValue(app.approved_at)?today():(String(app.approved_at||today()).slice(0,10)||today());
+  const firstRep=parseLocalDate(defaultDisbDate);firstRep.setDate(firstRep.getDate()+((product?.paymentEveryWeeks||1)*7));
   const clientName=app.loan_clients?.full_name||'Unknown Client';
   const clientPhone=app.loan_clients?.phone||'';
   openModal(`
@@ -3357,7 +3427,7 @@ async function openDisburseModal(appId){
       <p style="color:var(--text-secondary)">${clientPhone} &nbsp;|&nbsp; <strong>Product:</strong> ${product?.name||'-'} | <strong>Rate:</strong> ${product?.monthlyRate||0}% / month | <strong>Payments:</strong> ${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'} | <strong>Term:</strong> ${app.applied_term_weeks} weeks</p>
     </div>
     <div class="form-row"><div class="form-group"><label>Approved Loan Amount</label><input class="input" type="number" id="dAmt" value="${amt}"></div><div class="form-group"><label>Disbursement Method</label><select class="select" id="dMethod"><option value="cash">Cash</option><option value="mpesa" selected>M-Pesa</option><option value="bank_transfer">Bank Transfer</option></select></div></div>
-    <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="dRef"></div><div class="form-group"><label>Disbursement Date</label><input class="input" type="date" id="dDate" value="${today()}"></div></div>
+    <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="dRef"></div><div class="form-group"><label>Disbursement Date</label><input class="input" type="date" id="dDate" value="${defaultDisbDate}" max="${today()}" onchange="updateDisbursementFirstRepayment(${product?.paymentEveryWeeks||1})"></div></div>
     <div class="form-group"><label>First Repayment Date</label><input class="input" type="date" id="dFirstRep" value="${localISODate(firstRep)}"></div>
     <div class="form-group"><label>Current Remaining Balance (optional)</label><input class="input" type="number" id="dOpeningBalance" placeholder="${calc.totalPayable.toFixed(2)}"><div style="font-size:11px;color:var(--text-secondary);margin-top:3px">For an existing/backdated loan, enter what the client still owes now. Leave blank for a fresh loan.</div></div>
     <div class="card" style="margin-top:12px;font-size:13px">
@@ -3380,6 +3450,20 @@ async function openDisburseModal(appId){
     <div class="form-group"><label>Fee Deduction Reference / Note</label><input class="input" id="dFeeRef" placeholder="Optional note for this deduction"></div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnConfirmDisburse" onclick="confirmDisburse('${appId}','${app.client_id}','${app.applied_term_weeks}')" ${feeShortfall>0?'disabled':''}>${feeShortfall>0?'Insufficient Charges Balance':'Confirm & Disburse'}</button></div>
   `,true);
+}
+
+function updateDisbursementFirstRepayment(intervalWeeks=1){
+  const dInput=document.getElementById('dDate');
+  const firstInput=document.getElementById('dFirstRep');
+  if(!dInput||!firstInput)return;
+  if(isFutureDateValue(dInput.value)){
+    toast('Disbursement date cannot be in the future.', 'warning');
+    dInput.value=today();
+  }
+  const d=parseLocalDate(dInput.value||today());
+  if(!d)return;
+  d.setDate(d.getDate()+Number(intervalWeeks||1)*7);
+  firstInput.value=localISODate(d);
 }
 
 async function confirmDisburse(appId,clientId,termWeeks){
@@ -3405,6 +3489,9 @@ async function confirmDisburse(appId,clientId,termWeeks){
     const regFee=registrationFeeForClient(feeClient, prevLoans, product?.name);
     const netDisbursement=amt;
     const disbDate=$('#dDate').value;const firstRep=$('#dFirstRep').value;
+    if(!disbDate)throw new Error('Select disbursement date.');
+    if(isFutureDateValue(disbDate))throw new Error('Disbursement date cannot be in the future.');
+    if(firstRep && firstRep < disbDate)throw new Error('First repayment date cannot be before disbursement date.');
     const feeRef=($('#dFeeRef')?.value||'').trim();
     const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(c.installments-1)*c.intervalWeeks*7);
 
@@ -3484,7 +3571,8 @@ async function confirmDisburse(appId,clientId,termWeeks){
         toast("Loan created, but schedule generation had an issue.", 'warning');
     }
 
-    await sb('loan_applications').update({status:'disbursed'}).eq('id',appId);
+    const alignedDisbursementDateTime=dateInputToLocalDateTime(disbDate);
+    await sb('loan_applications').update({status:'disbursed',approved_at:alignedDisbursementDateTime,reviewed_at:alignedDisbursementDateTime,updated_at:new Date().toISOString()}).eq('id',appId);
 
     // Recognize processing/application fee income after the wallet deduction.
     try{
