@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-31-daraja-c2b-callbacks-v21';
+const APP_VERSION = 'patafix-2026-07-31-secure-daraja-settings-v22';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1057,7 +1057,7 @@ async function audit(action,table_name,record_id,old_value,new_value){
 async function loadSettings(){
   if(!currentUser?.business_id) return;
   try{
-    const publicSettingsFields='id,business_id,company_name,company_phone,company_email,company_address,currency,default_grace_period,default_late_penalty_pct,default_processing_fee_pct,standard_weekly_rate,micro_weekly_rate,micro_threshold,loan_no_prefix,app_no_prefix,receipt_no_prefix,disbursement_method,mpesa_shortcode,daraja_environment,mpesa_auto_confirm,created_at,updated_at';
+    const publicSettingsFields='id,business_id,company_name,company_phone,company_email,company_address,currency,default_grace_period,default_late_penalty_pct,default_processing_fee_pct,standard_weekly_rate,micro_weekly_rate,micro_threshold,loan_no_prefix,app_no_prefix,receipt_no_prefix,disbursement_method,mpesa_shortcode,daraja_environment,daraja_credentials_saved,mpesa_auto_confirm,created_at,updated_at';
     let{data:settings, error}=await sb('loan_settings').select(publicSettingsFields).eq('business_id', currentUser.business_id).maybeSingle();
     if(error) throw error;
     
@@ -7118,7 +7118,13 @@ async function renderSettings(){
         </div>
         <div class="form-group">
           <label>Daraja Credentials</label>
-          <div class="input" style="background:rgba(16,185,129,0.07);line-height:1.5;min-height:auto">Consumer credentials are protected in Supabase Edge Function Secrets and are never shown or stored in this browser.</div>
+          <div class="input" style="background:rgba(16,185,129,0.07);line-height:1.5;min-height:auto">
+            ${settings.daraja_credentials_saved?'<strong style="color:var(--accent-green)">Credentials saved securely.</strong> Leave both fields blank to keep using them.':'Enter both credentials once. They will be hidden after saving.'}
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>Consumer Key</label><input class="input" type="password" id="setConsumerKey" value="" autocomplete="new-password" placeholder="${settings.daraja_credentials_saved?'Saved - leave blank to keep':'Paste Consumer Key'}"></div>
+          <div class="form-group"><label>Consumer Secret</label><input class="input" type="password" id="setConsumerSecret" value="" autocomplete="new-password" placeholder="${settings.daraja_credentials_saved?'Saved - leave blank to keep':'Paste Consumer Secret'}"></div>
         </div>
         <div class="form-group">
           <label>C2B Validation URL (auto-registered on Save)</label>
@@ -7175,6 +7181,11 @@ async function saveSettings(){
   try{
     const shortcode = $('#setShortcode').value.trim();
     const darajaEnv = $('#setDarajaEnv').value;
+    const consumerKey = $('#setConsumerKey').value.trim();
+    const consumerSecret = $('#setConsumerSecret').value.trim();
+    if(Boolean(consumerKey) !== Boolean(consumerSecret)){
+      throw new Error('Enter both the Daraja Consumer Key and Consumer Secret, or leave both blank to keep the saved credentials.');
+    }
 
     // 1. Auto-register C2B URL with Safaricom before saving
     if(shortcode){
@@ -7187,7 +7198,11 @@ async function saveSettings(){
         const regResp = await fetch(SUPABASE_URL+'/functions/v1/register-daraja', {
           method:'POST',
           headers:{'Content-Type':'application/json','Authorization':'Bearer '+accessToken},
-          body: JSON.stringify({ shortcode, environment: darajaEnv })
+          body: JSON.stringify({
+            shortcode,
+            environment: darajaEnv,
+            ...(consumerKey && consumerSecret ? { consumer_key:consumerKey, consumer_secret:consumerSecret } : {})
+          })
         });
         const regJson = await regResp.json().catch(()=>({}));
         if(!regResp.ok || regJson.error){
@@ -7196,6 +7211,7 @@ async function saveSettings(){
           if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }
           return;
         }
+        if(consumerKey && consumerSecret) appSettings={...appSettings,daraja_credentials_saved:true};
       }catch(regErr){
         alert('Failed to register webhook with Safaricom: ' + regErr.message);
         if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }

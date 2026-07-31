@@ -77,18 +77,18 @@ serve(async (req) => {
   try {
     const authHeader = req.headers.get("Authorization") || "";
     const jwt = authHeader.replace("Bearer ", "");
-    const { shortcode, environment } = await req.json();
+    const { shortcode, environment, consumer_key, consumer_secret } = await req.json();
     const cleanShortcode = String(shortcode || "").trim();
-    const cleanKey = String(Deno.env.get("PATAFIX_DARAJA_CONSUMER_KEY") || "").trim();
-    const cleanSecret = String(Deno.env.get("PATAFIX_DARAJA_CONSUMER_SECRET") || "").trim();
+    const suppliedKey = String(consumer_key || "").trim();
+    const suppliedSecret = String(consumer_secret || "").trim();
 
     if (!cleanShortcode) {
       return json({ success: false, error: "Missing Daraja Paybill shortcode" }, 400);
     }
-    if (!cleanKey || !cleanSecret) {
+    if (Boolean(suppliedKey) !== Boolean(suppliedSecret)) {
       return json({
         success: false,
-        error: "Daraja credentials are missing. Add PATAFIX_DARAJA_CONSUMER_KEY and PATAFIX_DARAJA_CONSUMER_SECRET in Supabase Edge Function secrets.",
+        error: "Enter both the Daraja Consumer Key and Consumer Secret.",
       }, 400);
     }
 
@@ -115,12 +115,33 @@ serve(async (req) => {
 
     const { data: staff } = await supabase
       .from("loan_staff")
-      .select("id, role, is_active")
+      .select("id, business_id, role, is_active")
       .eq("auth_user_id", user.id)
       .maybeSingle();
     const roles = String(staff?.role || "").split(",").map((role) => role.trim());
     if (!staff?.is_active || !roles.includes("admin")) {
       return json({ success: false, error: "Only the business admin can register Daraja URLs." }, 403);
+    }
+
+    const { data: savedCredentials, error: credentialsError } = await supabase
+      .from("patafix_daraja_credentials")
+      .select("consumer_key, consumer_secret")
+      .eq("business_id", staff.business_id)
+      .maybeSingle();
+    if (credentialsError && credentialsError.code !== "PGRST116") {
+      return json({
+        success: false,
+        error: "The secure Daraja credential store is not ready. Run patafix-daraja-secure-credentials.sql in Supabase, then redeploy this function.",
+      }, 500);
+    }
+
+    const cleanKey = suppliedKey || String(savedCredentials?.consumer_key || Deno.env.get("PATAFIX_DARAJA_CONSUMER_KEY") || "").trim();
+    const cleanSecret = suppliedSecret || String(savedCredentials?.consumer_secret || Deno.env.get("PATAFIX_DARAJA_CONSUMER_SECRET") || "").trim();
+    if (!cleanKey || !cleanSecret) {
+      return json({
+        success: false,
+        error: "Daraja credentials are missing. Enter the Consumer Key and Consumer Secret in Settings, then save again.",
+      }, 400);
     }
 
     const url = baseUrl(environment);
@@ -175,6 +196,36 @@ serve(async (req) => {
       }, 400);
     }
 
+    if (suppliedKey && suppliedSecret) {
+      const { error: saveCredentialsError } = await supabase
+        .from("patafix_daraja_credentials")
+        .upsert({
+          business_id: staff.business_id,
+          consumer_key: suppliedKey,
+          consumer_secret: suppliedSecret,
+          updated_by: staff.id,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "business_id" });
+      if (saveCredentialsError) {
+        return json({
+          success: false,
+          error: "Safaricom accepted the URLs, but PataFix could not save the credentials securely. " + saveCredentialsError.message,
+        }, 500);
+      }
+    }
+
+    const { error: settingsError } = await supabase
+      .from("loan_settings")
+      .update({
+        mpesa_shortcode: cleanShortcode,
+        daraja_environment: String(environment || "sandbox").toLowerCase().includes("sandbox") ? "sandbox" : "production",
+        daraja_credentials_saved: Boolean(suppliedKey && suppliedSecret) || Boolean(savedCredentials?.consumer_key),
+      })
+      .eq("business_id", staff.business_id);
+    if (settingsError) {
+      return json({ success: false, error: "Daraja was registered, but its saved status could not be updated. " + settingsError.message }, 500);
+    }
+
     return json({
       success: true,
       warning: registration.alreadyRegistered ? registration.message : undefined,
@@ -182,6 +233,7 @@ serve(async (req) => {
       c2b_version: registration.version,
       validation_url: validationUrl,
       confirmation_url: confirmationUrl,
+      credentials_saved: Boolean(suppliedKey && suppliedSecret) || Boolean(savedCredentials?.consumer_key),
       v2_failure: registration.version === "v1" ? v2Failure : undefined,
     });
   } catch (error) {

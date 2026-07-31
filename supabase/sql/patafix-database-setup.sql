@@ -49,10 +49,24 @@ create table if not exists public.loan_settings (
   mpesa_passkey text,
   mpesa_shortcode text,
   daraja_environment text not null default 'production',
+  daraja_credentials_saved boolean not null default false,
   mpesa_auto_confirm boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Daraja credentials are backend-only. No anon/authenticated policies are added.
+create table if not exists public.patafix_daraja_credentials (
+  business_id text primary key,
+  consumer_key text not null,
+  consumer_secret text not null,
+  updated_by uuid,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table public.patafix_daraja_credentials enable row level security;
+revoke all on table public.patafix_daraja_credentials from anon, authenticated;
+grant all on table public.patafix_daraja_credentials to service_role;
 
 create table if not exists public.loan_clients (
   id uuid primary key default gen_random_uuid(),
