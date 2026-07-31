@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-30-loan-date-controls-v20';
+const APP_VERSION = 'patafix-2026-07-31-daraja-c2b-callbacks-v21';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1057,7 +1057,8 @@ async function audit(action,table_name,record_id,old_value,new_value){
 async function loadSettings(){
   if(!currentUser?.business_id) return;
   try{
-    let{data:settings, error}=await sb('loan_settings').select('*').eq('business_id', currentUser.business_id).maybeSingle();
+    const publicSettingsFields='id,business_id,company_name,company_phone,company_email,company_address,currency,default_grace_period,default_late_penalty_pct,default_processing_fee_pct,standard_weekly_rate,micro_weekly_rate,micro_threshold,loan_no_prefix,app_no_prefix,receipt_no_prefix,disbursement_method,mpesa_shortcode,daraja_environment,mpesa_auto_confirm,created_at,updated_at';
+    let{data:settings, error}=await sb('loan_settings').select(publicSettingsFields).eq('business_id', currentUser.business_id).maybeSingle();
     if(error) throw error;
     
     if(!settings) {
@@ -6646,12 +6647,12 @@ async function renderOfficerPerformance(){
 }
 
 // ═══ DARAJA HELPERS ═══
-function copyCallbackUrl(){
-  const inp=document.getElementById('setCallbackUrl');
+function copyCallbackUrl(inputId='setConfirmationUrl'){
+  const inp=document.getElementById(inputId);
   if(!inp) return;
   inp.select(); inp.setSelectionRange(0, 99999);
-  try { navigator.clipboard.writeText(inp.value); toast('Callback URL copied','success'); }
-  catch(e){ document.execCommand('copy'); toast('Callback URL copied','success'); }
+  try { navigator.clipboard.writeText(inp.value); toast('URL copied','success'); }
+  catch(e){ document.execCommand('copy'); toast('URL copied','success'); }
 }
 
 
@@ -7073,7 +7074,8 @@ async function renderSettings(){
   const main=$('#mainContent');
   try{
     const settings=await loadSettings();
-    const callbackUrl=SUPABASE_URL+'/functions/v1/patafix-payment-callback';
+    const validationUrl=SUPABASE_URL+'/functions/v1/patafix-c2b-validation';
+    const confirmationUrl=SUPABASE_URL+'/functions/v1/patafix-payment-callback';
     main.innerHTML=`
       <div class="page-header"><h1>Settings</h1></div>
       <div class="card" style="max-width:700px;margin-bottom:16px">
@@ -7109,20 +7111,29 @@ async function renderSettings(){
       </div>
       <div class="card" style="max-width:700px;margin-bottom:16px;border-color:var(--accent-green)">
         <h3 style="font-size:16px;margin-bottom:4px;color:var(--accent-green)">📶 M-Pesa Daraja C2B Settings</h3>
-        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:14px">Clients pay via Paybill using their <strong>National ID</strong> as the account number. Saving these credentials will automatically register your C2B confirmation URL with Safaricom.</p>
+        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:14px">Clients pay via Paybill using their <strong>National ID</strong> as the account number. Saving these credentials will automatically register the separate C2B validation and confirmation URLs with Safaricom.</p>
         <div class="form-row">
           <div class="form-group"><label>Shortcode (Paybill)</label><input class="input" id="setShortcode" value="${settings.mpesa_shortcode||''}" placeholder="e.g. 174379"></div>
           <div class="form-group"><label>Environment</label><select class="select" id="setDarajaEnv"><option value="sandbox" ${(settings.daraja_environment||'sandbox')==='sandbox'?'selected':''}>Sandbox (Testing)</option><option value="production" ${settings.daraja_environment==='production'?'selected':''}>Production (Live)</option></select></div>
         </div>
-        <div class="form-row"><div class="form-group"><label>Consumer Key</label><input class="input" id="setConsumerKey" value="${settings.mpesa_consumer_key||''}" placeholder="From Daraja portal"></div><div class="form-group"><label>Consumer Secret</label><input class="input" type="password" id="setConsumerSecret" value="${settings.mpesa_consumer_secret||''}" placeholder="From Daraja portal"></div></div>
-        <div class="form-group"><label>Passkey</label><input class="input" type="password" id="setPasskey" value="${settings.mpesa_passkey||''}" placeholder="From Daraja portal (STK push passkey)"></div>
         <div class="form-group">
-          <label>C2B Confirmation URL (auto-registered with Safaricom on Save)</label>
+          <label>Daraja Credentials</label>
+          <div class="input" style="background:rgba(16,185,129,0.07);line-height:1.5;min-height:auto">Consumer credentials are protected in Supabase Edge Function Secrets and are never shown or stored in this browser.</div>
+        </div>
+        <div class="form-group">
+          <label>C2B Validation URL (auto-registered on Save)</label>
           <div style="display:flex;gap:6px">
-            <input class="input" id="setCallbackUrl" value="${callbackUrl}" readonly style="opacity:0.7">
-            <button type="button" class="btn btn-outline btn-sm" onclick="copyCallbackUrl()">Copy</button>
+            <input class="input" id="setValidationUrl" value="${validationUrl}" readonly style="opacity:0.7">
+            <button type="button" class="btn btn-outline btn-sm" onclick="copyCallbackUrl('setValidationUrl')">Copy</button>
           </div>
-          <div style="font-size:11px;color:var(--text-secondary);margin-top:4px">This URL is sent to Safaricom automatically when you click <strong>Save Settings</strong>.</div>
+        </div>
+        <div class="form-group">
+          <label>C2B Confirmation URL (auto-registered on Save)</label>
+          <div style="display:flex;gap:6px">
+            <input class="input" id="setConfirmationUrl" value="${confirmationUrl}" readonly style="opacity:0.7">
+            <button type="button" class="btn btn-outline btn-sm" onclick="copyCallbackUrl('setConfirmationUrl')">Copy</button>
+          </div>
+          <div style="font-size:11px;color:var(--text-secondary);margin-top:4px">PataFix tries C2B v2 first and automatically falls back to v1 if needed.</div>
         </div>
         <div style="background:rgba(16,185,129,0.07);border:1px solid rgba(16,185,129,0.2);border-radius:8px;padding:10px;margin-bottom:12px;font-size:12px;line-height:1.7">
           <strong style="color:var(--accent-green)">How clients pay:</strong><br>
@@ -7163,12 +7174,10 @@ async function renderSettings(){
 async function saveSettings(){
   try{
     const shortcode = $('#setShortcode').value.trim();
-    const consumerKey = $('#setConsumerKey').value.trim();
-    const consumerSecret = $('#setConsumerSecret').value.trim();
     const darajaEnv = $('#setDarajaEnv').value;
 
     // 1. Auto-register C2B URL with Safaricom before saving
-    if(shortcode && consumerKey && consumerSecret){
+    if(shortcode){
       const saveBtn = document.querySelector('[onclick="saveSettings()"]');
       if(saveBtn){ saveBtn.disabled=true; saveBtn.textContent='Registering with Safaricom...'; }
       try{
@@ -7178,7 +7187,7 @@ async function saveSettings(){
         const regResp = await fetch(SUPABASE_URL+'/functions/v1/register-daraja', {
           method:'POST',
           headers:{'Content-Type':'application/json','Authorization':'Bearer '+accessToken},
-          body: JSON.stringify({ shortcode, consumer_key: consumerKey, consumer_secret: consumerSecret, environment: darajaEnv })
+          body: JSON.stringify({ shortcode, environment: darajaEnv })
         });
         const regJson = await regResp.json().catch(()=>({}));
         if(!regResp.ok || regJson.error){
@@ -7204,8 +7213,7 @@ async function saveSettings(){
       micro_weekly_rate:Number($('#setMicroRate').value),micro_threshold:Number($('#setThreshold').value),
       loan_no_prefix:$('#setLnPfx').value,app_no_prefix:$('#setAppPfx').value,receipt_no_prefix:$('#setRcpPfx').value,
       disbursement_method:$('#setDisbMethod').value,
-      mpesa_consumer_key:consumerKey,mpesa_consumer_secret:consumerSecret,
-      mpesa_passkey:$('#setPasskey').value,mpesa_shortcode:shortcode,
+      mpesa_shortcode:shortcode,
       daraja_environment:darajaEnv,mpesa_auto_confirm:$('#setAutoConfirm').checked,
       business_id:currentUser?.business_id||'patafix'
     };

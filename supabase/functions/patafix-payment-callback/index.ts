@@ -112,6 +112,16 @@ serve(async (req) => {
       { auth: { persistSession: false, autoRefreshToken: false } },
     );
 
+    const { data: existingCallback } = await supabase
+      .from("mpesa_callback_queue")
+      .select("id")
+      .eq("trans_id", transId)
+      .maybeSingle();
+    if (existingCallback) {
+      console.log("PataFix duplicate callback ignored", { transId });
+      return accepted();
+    }
+
     const { data: settings } = await supabase
       .from("loan_settings")
       .select("business_id, mpesa_auto_confirm")
@@ -120,7 +130,7 @@ serve(async (req) => {
 
     const businessId = settings?.business_id || null;
     console.log("PataFix callback business lookup", { transId, shortcode, businessId, autoConfirm: settings?.mpesa_auto_confirm });
-    const { data: queue } = await supabase
+    const { data: queue, error: queueError } = await supabase
       .from("mpesa_callback_queue")
       .insert({
         business_id: businessId,
@@ -128,7 +138,7 @@ serve(async (req) => {
         trans_id: transId,
         trans_time: body?.TransTime,
         trans_amount: amount,
-        business_short_code: businessId || shortcode,
+        business_short_code: shortcode,
         bill_ref_number: accountNumber,
         msisdn: payerPhone,
         first_name: payerName,
@@ -137,6 +147,13 @@ serve(async (req) => {
       })
       .select("id")
       .maybeSingle();
+    if (queueError) {
+      if (String(queueError.message || "").toLowerCase().includes("duplicate")) {
+        console.log("PataFix duplicate callback insert ignored", { transId });
+        return accepted();
+      }
+      throw queueError;
+    }
 
     if (!businessId) {
       console.log("PataFix callback stored without business match", { transId, shortcode });
