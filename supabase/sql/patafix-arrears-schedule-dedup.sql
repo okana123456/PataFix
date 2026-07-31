@@ -4,7 +4,30 @@
 
 begin;
 
-create temporary table patafix_duplicate_schedules on commit drop as
+create table if not exists public.patafix_duplicate_schedule_merge_20260731 (
+  loan_id uuid not null,
+  installment_no integer not null,
+  keep_id uuid not null,
+  due_date date not null,
+  principal_due numeric(14,2) not null,
+  interest_due numeric(14,2) not null,
+  total_due numeric(14,2) not null,
+  principal_paid numeric(14,2) not null,
+  interest_paid numeric(14,2) not null,
+  total_paid numeric(14,2) not null,
+  penalty_charged numeric(14,2) not null,
+  paid_at timestamptz,
+  duplicate_count bigint not null,
+  primary key (loan_id, installment_no)
+);
+
+alter table public.patafix_duplicate_schedule_merge_20260731 enable row level security;
+revoke all on table public.patafix_duplicate_schedule_merge_20260731 from anon, authenticated;
+grant all on table public.patafix_duplicate_schedule_merge_20260731 to service_role;
+
+delete from public.patafix_duplicate_schedule_merge_20260731;
+
+insert into public.patafix_duplicate_schedule_merge_20260731
 select
   loan_id,
   installment_no,
@@ -34,7 +57,7 @@ grant all on table public.patafix_schedule_duplicate_backup_20260731 to service_
 insert into public.patafix_schedule_duplicate_backup_20260731
 select schedule.*
 from public.loan_schedules schedule
-join patafix_duplicate_schedules duplicate
+join public.patafix_duplicate_schedule_merge_20260731 duplicate
   on duplicate.loan_id = schedule.loan_id
  and duplicate.installment_no = schedule.installment_no
 where not exists (
@@ -60,11 +83,11 @@ set due_date = duplicate.due_date,
       else 'pending'
     end,
     updated_at = now()
-from patafix_duplicate_schedules duplicate
+from public.patafix_duplicate_schedule_merge_20260731 duplicate
 where schedule.id = duplicate.keep_id;
 
 delete from public.loan_schedules schedule
-using patafix_duplicate_schedules duplicate
+using public.patafix_duplicate_schedule_merge_20260731 duplicate
 where schedule.loan_id = duplicate.loan_id
   and schedule.installment_no = duplicate.installment_no
   and schedule.id <> duplicate.keep_id;
@@ -87,6 +110,6 @@ end $$;
 select
   coalesce(sum(duplicate_count - 1), 0) as duplicate_rows_removed,
   count(*) as affected_loan_instalments
-from patafix_duplicate_schedules;
+from public.patafix_duplicate_schedule_merge_20260731;
 
 commit;
