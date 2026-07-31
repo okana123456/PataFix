@@ -30,6 +30,24 @@ async function readJson(response: Response): Promise<Record<string, any>> {
   }
 }
 
+async function getAccessToken(base: string, consumerKey: string, consumerSecret: string) {
+  const response = await fetch(`${base}/oauth/v1/generate?grant_type=client_credentials`, {
+    headers: { Authorization: `Basic ${btoa(`${consumerKey}:${consumerSecret}`)}` },
+  });
+  const data = await readJson(response);
+  return {
+    ok: response.ok && Boolean(data.access_token),
+    token: String(data.access_token || "").trim(),
+    data,
+    status: response.status,
+  };
+}
+
+function isInvalidAccessToken(result: { status: number; message: string }) {
+  const message = String(result.message || "").toLowerCase();
+  return result.status === 401 || message.includes("invalid access token");
+}
+
 async function registerUrls(
   base: string,
   version: "v1" | "v2",
@@ -145,50 +163,75 @@ serve(async (req) => {
     }
 
     const url = baseUrl(environment);
-    const tokenResponse = await fetch(`${url}/oauth/v1/generate?grant_type=client_credentials`, {
-      headers: { Authorization: `Basic ${btoa(`${cleanKey}:${cleanSecret}`)}` },
-    });
-    const tokenData = await readJson(tokenResponse);
-    if (!tokenResponse.ok || !tokenData.access_token) {
+    const sandbox = String(environment || "").toLowerCase().includes("sandbox");
+    let tokenResult = await getAccessToken(url, cleanKey, cleanSecret);
+    if (!tokenResult.ok) {
       return json({
         success: false,
-        error: tokenData.errorMessage || tokenData.error_description || "Failed to authenticate with Daraja",
-        response: tokenData,
+        error: tokenResult.data.errorMessage || tokenResult.data.error_description || "Failed to authenticate with Daraja",
+        response: tokenResult.data,
       }, 400);
     }
 
     const validationUrl = `${supabaseUrl}/functions/v1/patafix-c2b-validation`;
     const confirmationUrl = `${supabaseUrl}/functions/v1/patafix-payment-callback`;
 
+    // Safaricom sandbox is most reliable on C2B v1. Production prefers v2.
     let registration = await registerUrls(
       url,
-      "v2",
-      tokenData.access_token,
+      sandbox ? "v1" : "v2",
+      tokenResult.token,
       cleanShortcode,
       validationUrl,
       confirmationUrl,
     );
     let v2Failure = null;
-    if (!registration.ok) {
+    if (!sandbox && !registration.ok) {
       v2Failure = {
         status: registration.status,
         message: registration.message,
         response: registration.data,
       };
+      tokenResult = await getAccessToken(url, cleanKey, cleanSecret);
+      if (!tokenResult.ok) {
+        return json({
+          success: false,
+          error: "Daraja OAuth refresh failed before the C2B v1 fallback.",
+          response: tokenResult.data,
+          v2_failure: v2Failure,
+        }, 400);
+      }
       registration = await registerUrls(
         url,
         "v1",
-        tokenData.access_token,
+        tokenResult.token,
         cleanShortcode,
         validationUrl,
         confirmationUrl,
       );
     }
 
+    if (sandbox && !registration.ok && isInvalidAccessToken(registration)) {
+      tokenResult = await getAccessToken(url, cleanKey, cleanSecret);
+      if (tokenResult.ok) {
+        registration = await registerUrls(
+          url,
+          "v1",
+          tokenResult.token,
+          cleanShortcode,
+          validationUrl,
+          confirmationUrl,
+        );
+      }
+    }
+
     if (!registration.ok) {
+      const invalidToken = isInvalidAccessToken(registration);
       return json({
         success: false,
-        error: registration.message || "Daraja URL registration failed using C2B v2 and v1",
+        error: invalidToken
+          ? `Safaricom rejected the access token for C2B ${registration.version}. Confirm that the Consumer Key and Consumer Secret belong to the same ${sandbox ? "sandbox" : "production"} app and that C2B API access is enabled on that app.`
+          : registration.message || `Daraja URL registration failed using C2B ${registration.version}`,
         response: registration.data,
         v2_failure: v2Failure,
         validation_url: validationUrl,
