@@ -1,11 +1,36 @@
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, prefer",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
+
+function backendHeaders(serviceKey: string, extra: Record<string, string> = {}) {
+  return {
+    apikey: serviceKey,
+    Authorization: `Bearer ${serviceKey}`,
+    ...extra,
+  };
+}
+
+async function backendRequest(
+  supabaseUrl: string,
+  serviceKey: string,
+  path: string,
+  init: RequestInit = {},
+) {
+  const response = await fetch(`${supabaseUrl}${path}`, {
+    ...init,
+    headers: {
+      ...backendHeaders(serviceKey),
+      ...(init.headers || {}),
+    },
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    data: await readJson(response),
+  };
+}
 
 function json(body: Record<string, unknown>, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -88,11 +113,12 @@ async function registerUrls(
   };
 }
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ success: false, error: "Use POST" }, 405);
 
   try {
+    console.log("[register-daraja] Request started");
     const authHeader = req.headers.get("Authorization") || "";
     const jwt = authHeader.replace("Bearer ", "");
     const { shortcode, environment, consumer_key, consumer_secret } = await req.json();
@@ -118,35 +144,46 @@ serve(async (req) => {
         error: "PataFix Supabase secrets are missing. Add PATAFIX_PROJECT_URL and PATAFIX_SERVICE_ROLE_KEY.",
       }, 400);
     }
-    const supabase = createClient(supabaseUrl, serviceKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
+    const userResult = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${jwt}`,
+      },
     });
-
-    const { data: userData, error: userError } = await supabase.auth.getUser(jwt);
-    const user = userData?.user;
+    const userData = await readJson(userResult);
+    const user = userResult.ok ? userData : null;
     if (!user) {
       return json({
         success: false,
-        error: userError?.message || "Please sign in again.",
+        error: String(userData?.msg || userData?.message || "Please sign in again."),
       }, 401);
     }
+    console.log("[register-daraja] User verified");
 
-    const { data: staff } = await supabase
-      .from("loan_staff")
-      .select("id, business_id, role, is_active")
-      .eq("auth_user_id", user.id)
-      .maybeSingle();
+    const staffResult = await backendRequest(
+      supabaseUrl,
+      serviceKey,
+      `/rest/v1/loan_staff?select=id,business_id,role,is_active&auth_user_id=eq.${encodeURIComponent(String(user.id))}&limit=1`,
+    );
+    const staff = Array.isArray(staffResult.data) ? staffResult.data[0] : null;
+    if (!staffResult.ok) {
+      return json({
+        success: false,
+        error: `Could not verify the PataFix administrator: ${String(staffResult.data?.message || staffResult.status)}`,
+      }, 500);
+    }
     const roles = String(staff?.role || "").split(",").map((role) => role.trim());
     if (!staff?.is_active || !roles.includes("admin")) {
       return json({ success: false, error: "Only the business admin can register Daraja URLs." }, 403);
     }
 
-    const { data: savedCredentials, error: credentialsError } = await supabase
-      .from("patafix_daraja_credentials")
-      .select("consumer_key, consumer_secret")
-      .eq("business_id", staff.business_id)
-      .maybeSingle();
-    if (credentialsError && credentialsError.code !== "PGRST116") {
+    const credentialsResult = await backendRequest(
+      supabaseUrl,
+      serviceKey,
+      `/rest/v1/patafix_daraja_credentials?select=consumer_key,consumer_secret&business_id=eq.${encodeURIComponent(String(staff.business_id))}&limit=1`,
+    );
+    const savedCredentials = Array.isArray(credentialsResult.data) ? credentialsResult.data[0] : null;
+    if (!credentialsResult.ok) {
       return json({
         success: false,
         error: "The secure Daraja credential store is not ready. Run patafix-daraja-secure-credentials.sql in Supabase, then redeploy this function.",
@@ -172,11 +209,13 @@ serve(async (req) => {
         response: tokenResult.data,
       }, 400);
     }
+    console.log(`[register-daraja] OAuth accepted for ${sandbox ? "sandbox" : "production"}`);
 
     const validationUrl = `${supabaseUrl}/functions/v1/patafix-c2b-validation`;
     const confirmationUrl = `${supabaseUrl}/functions/v1/patafix-payment-callback`;
 
-    // Safaricom sandbox is most reliable on C2B v1. Production prefers v2.
+    // The PataFix production app is provisioned for C2B v2. Do not hide a v2
+    // provisioning or shortcode error behind an unrelated v1 fallback error.
     let registration = await registerUrls(
       url,
       sandbox ? "v1" : "v2",
@@ -185,31 +224,6 @@ serve(async (req) => {
       validationUrl,
       confirmationUrl,
     );
-    let v2Failure = null;
-    if (!sandbox && !registration.ok) {
-      v2Failure = {
-        status: registration.status,
-        message: registration.message,
-        response: registration.data,
-      };
-      tokenResult = await getAccessToken(url, cleanKey, cleanSecret);
-      if (!tokenResult.ok) {
-        return json({
-          success: false,
-          error: "Daraja OAuth refresh failed before the C2B v1 fallback.",
-          response: tokenResult.data,
-          v2_failure: v2Failure,
-        }, 400);
-      }
-      registration = await registerUrls(
-        url,
-        "v1",
-        tokenResult.token,
-        cleanShortcode,
-        validationUrl,
-        confirmationUrl,
-      );
-    }
 
     if (sandbox && !registration.ok && isInvalidAccessToken(registration)) {
       tokenResult = await getAccessToken(url, cleanKey, cleanSecret);
@@ -230,43 +244,61 @@ serve(async (req) => {
       return json({
         success: false,
         error: invalidToken
-          ? `Safaricom rejected the access token for C2B ${registration.version}. Confirm that the Consumer Key and Consumer Secret belong to the same ${sandbox ? "sandbox" : "production"} app and that C2B API access is enabled on that app.`
+          ? `Safaricom rejected the access token for C2B ${registration.version}. Confirm that the Consumer Key and Consumer Secret belong to the same ${sandbox ? "sandbox" : "production"} app and that C2B ${registration.version} access is approved on that app.`
           : registration.message || `Daraja URL registration failed using C2B ${registration.version}`,
         response: registration.data,
-        v2_failure: v2Failure,
+        c2b_version: registration.version,
+        daraja_environment: sandbox ? "sandbox" : "production",
         validation_url: validationUrl,
         confirmation_url: confirmationUrl,
       }, 400);
     }
+    console.log(`[register-daraja] C2B ${registration.version} URLs accepted`);
 
     if (suppliedKey && suppliedSecret) {
-      const { error: saveCredentialsError } = await supabase
-        .from("patafix_daraja_credentials")
-        .upsert({
+      const saveCredentialsResult = await backendRequest(
+        supabaseUrl,
+        serviceKey,
+        "/rest/v1/patafix_daraja_credentials?on_conflict=business_id",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Prefer: "resolution=merge-duplicates,return=minimal",
+          },
+          body: JSON.stringify({
           business_id: staff.business_id,
           consumer_key: suppliedKey,
           consumer_secret: suppliedSecret,
           updated_by: staff.id,
           updated_at: new Date().toISOString(),
-        }, { onConflict: "business_id" });
-      if (saveCredentialsError) {
+          }),
+        },
+      );
+      if (!saveCredentialsResult.ok) {
         return json({
           success: false,
-          error: "Safaricom accepted the URLs, but PataFix could not save the credentials securely. " + saveCredentialsError.message,
+          error: "Safaricom accepted the URLs, but PataFix could not save the credentials securely. " + String(saveCredentialsResult.data?.message || saveCredentialsResult.status),
         }, 500);
       }
     }
 
-    const { error: settingsError } = await supabase
-      .from("loan_settings")
-      .update({
+    const settingsResult = await backendRequest(
+      supabaseUrl,
+      serviceKey,
+      `/rest/v1/loan_settings?business_id=eq.${encodeURIComponent(String(staff.business_id))}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
+        body: JSON.stringify({
         mpesa_shortcode: cleanShortcode,
         daraja_environment: String(environment || "sandbox").toLowerCase().includes("sandbox") ? "sandbox" : "production",
         daraja_credentials_saved: Boolean(suppliedKey && suppliedSecret) || Boolean(savedCredentials?.consumer_key),
-      })
-      .eq("business_id", staff.business_id);
-    if (settingsError) {
-      return json({ success: false, error: "Daraja was registered, but its saved status could not be updated. " + settingsError.message }, 500);
+        }),
+      },
+    );
+    if (!settingsResult.ok) {
+      return json({ success: false, error: "Daraja was registered, but its saved status could not be updated. " + String(settingsResult.data?.message || settingsResult.status) }, 500);
     }
 
     return json({
@@ -277,7 +309,6 @@ serve(async (req) => {
       validation_url: validationUrl,
       confirmation_url: confirmationUrl,
       credentials_saved: Boolean(suppliedKey && suppliedSecret) || Boolean(savedCredentials?.consumer_key),
-      v2_failure: registration.version === "v1" ? v2Failure : undefined,
     });
   } catch (error) {
     return json({ success: false, error: error instanceof Error ? error.message : String(error) }, 500);

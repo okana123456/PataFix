@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-07-31-grouped-arrears-v23';
+const APP_VERSION = 'patafix-2026-08-02-daraja-c2b-v2-v24';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -7163,7 +7163,7 @@ async function renderSettings(){
             <input class="input" id="setConfirmationUrl" value="${confirmationUrl}" readonly style="opacity:0.7">
             <button type="button" class="btn btn-outline btn-sm" onclick="copyCallbackUrl('setConfirmationUrl')">Copy</button>
           </div>
-          <div style="font-size:11px;color:var(--text-secondary);margin-top:4px">PataFix tries C2B v2 first and automatically falls back to v1 if needed.</div>
+          <div style="font-size:11px;color:var(--text-secondary);margin-top:4px">PataFix uses C2B v2 for production and C2B v1 for sandbox.</div>
         </div>
         <div style="background:rgba(16,185,129,0.07);border:1px solid rgba(16,185,129,0.2);border-radius:8px;padding:10px;margin-bottom:12px;font-size:12px;line-height:1.7">
           <strong style="color:var(--accent-green)">How clients pay:</strong><br>
@@ -7230,8 +7230,11 @@ async function saveSettings(){
         });
         const regJson = await regResp.json().catch(()=>({}));
         if(!regResp.ok || regJson.error){
-          const detail = regJson.response ? `\n\nDetails: ${JSON.stringify(regJson.response).slice(0,500)}` : '';
-          alert('Failed to register webhook with Safaricom: ' + (regJson.error || regJson.message || regResp.status) + detail);
+          const apiContext = regJson.c2b_version
+            ? `\n\nAPI: C2B ${regJson.c2b_version} (${regJson.daraja_environment || darajaEnv})`
+            : '';
+          const detail = regJson.response ? `\nDetails: ${JSON.stringify(regJson.response).slice(0,500)}` : '';
+          alert('Failed to register webhook with Safaricom: ' + (regJson.error || regJson.message || regResp.status) + apiContext + detail);
           if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }
           return;
         }
