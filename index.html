@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-04-bulk-disbursement-dues-v25';
+const APP_VERSION = 'patafix-2026-08-04-payment-routing-v26';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -4321,7 +4321,7 @@ async function openPaymentModal(loanId){
     ${loanInfo}
     ${!loanId?`<div class="form-group" style="position:relative"><label>Search Loan (by loan no, client name, phone or ID)</label><input class="input" id="payLoanSearch" list="payLoanList" placeholder="Type loan no, name, phone or ID number..." oninput="searchLoanForPay(this.value)" autocomplete="off"><datalist id="payLoanList"></datalist><div id="payLoanResults" style="margin-top:6px;max-height:280px;overflow-y:auto;border-radius:8px"></div></div>`:''}
     <input type="hidden" id="payLoanId" value="${loanId||''}">
-    <div class="form-row"><div class="form-group"><label>Amount *</label><input class="input" type="number" id="payAmount"></div><div class="form-group"><label>Method</label><select class="select" id="payMethod" onchange="onPayMethodChange(this.value)"><option value="cash">Cash</option><option value="mpesa">M-Pesa (Manual)</option><option value="mpesa_c2b">📲 M-Pesa C2B (Daraja — auto)</option><option value="bank_transfer">Bank Transfer</option><option value="cheque">Cheque</option></select></div></div><div class="form-group" id="payDarajaInfoWrap" style="display:none"><div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);padding:10px;border-radius:8px;font-size:12px;line-height:1.5">Client pays via M-Pesa Paybill <strong>${(appSettings&&appSettings.mpesa_shortcode)||'—'}</strong>, account number = <strong>their National ID</strong>. Payment is matched and recorded automatically by the Daraja webhook.</div></div>
+    <div class="form-row"><div class="form-group"><label>Amount *</label><input class="input" type="number" id="payAmount"></div><div class="form-group"><label>Method</label><select class="select" id="payMethod" onchange="onPayMethodChange(this.value)"><option value="cash">Cash</option><option value="mpesa">M-Pesa (Manual)</option><option value="mpesa_c2b">📲 M-Pesa C2B (Daraja — auto)</option><option value="bank_transfer">Bank Transfer</option><option value="cheque">Cheque</option></select></div></div><div class="form-group" id="payDarajaInfoWrap" style="display:none"><div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);padding:10px;border-radius:8px;font-size:12px;line-height:1.5">Client pays via M-Pesa Paybill <strong>${(appSettings&&appSettings.mpesa_shortcode)||'—'}</strong> using their <strong>National ID</strong> as the account reference. A matched client with an active loan is credited as a repayment; without an active loan, the payment goes to Charges &amp; Excess.</div></div>
     <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="payRef"></div><div class="form-group"><label>Date</label><input class="input" type="date" id="payDate" value="${today()}"></div></div>
     <div class="form-group"><label>Amount applied to Penalty (KES)</label><input class="input" type="number" id="payPenaltyAmt" value="0"></div>
     <div class="form-group"><label>Notes</label><textarea class="textarea" id="payNotes"></textarea></div>
@@ -6254,17 +6254,20 @@ async function renderSuspense(){
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
   try{
     // Unconfirmed M-Pesa queue entries — these are unmatched payments
-    const[queueR,loansR,suspR]=await Promise.all([
+    const[queueR,loansR,suspR,clientsR]=await Promise.all([
       sb('mpesa_callback_queue').select('*').eq('confirmed',false).order('created_at',{ascending:false}),
       sb('loans').select('id,loan_no,outstanding_balance,status,client_id,loan_clients(full_name,phone,id_number)')
         .eq('business_id',currentUser.business_id).eq('status','active').gt('outstanding_balance',0),
-      sb('unmatched_payments').select('*').eq('business_id',currentUser.business_id).order('created_at',{ascending:false})
+      sb('unmatched_payments').select('*').eq('business_id',currentUser.business_id).order('created_at',{ascending:false}),
+      sb('loan_clients').select('id,full_name,phone,id_number').eq('business_id',currentUser.business_id).order('full_name',{ascending:true}).limit(1000)
     ]);
 
-    const queue=(queueR.data||[]);
-    const activeLoans=loansR.data||[];
     const manualSuspense=(suspR.data||[]);
     const pendingManualSuspense=(manualSuspense||[]).filter(r=>!r.resolved);
+    const pendingManualRefs=new Set(pendingManualSuspense.map(r=>String(r.mpesa_reference||r.invoice_id||'')).filter(Boolean));
+    const queue=(queueR.data||[]).filter(q=>!pendingManualRefs.has(String(q.trans_id||'')));
+    const activeLoans=loansR.data||[];
+    window._suspenseChargeClients=clientsR.data||[];
 
     const totalSuspense=queue.reduce((s,q)=>s+Number(q.trans_amount||0),0)
       +pendingManualSuspense.reduce((s,r)=>s+Number(r.amount||0),0);
@@ -6279,7 +6282,7 @@ async function renderSuspense(){
           <div><div style="font-size:10px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px">Unmatched Payments</div><div style="font-size:22px;font-weight:800;color:var(--accent-yellow)">${queue.length+pendingManualSuspense.length}</div></div>
           <div><div style="font-size:10px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px">Total Suspense Amount</div><div style="font-size:22px;font-weight:800;color:var(--accent-yellow)">${fmtMoney(totalSuspense)}</div></div>
         </div>
-        <p style="font-size:11px;color:var(--text-secondary);margin-top:6px">These are M-Pesa payments received that could not be automatically matched to a loan account. Match each payment to the correct client loan below.</p>
+        <p style="font-size:11px;color:var(--text-secondary);margin-top:6px">These are M-Pesa payments received that could not be automatically matched. Match repayments to a loan, or move upfront registration/processing fees to the correct client's Charges account.</p>
       </div>
 
       <h3 class="dash-h3">Unmatched M-Pesa (Daraja Queue)</h3>
@@ -6296,6 +6299,7 @@ async function renderSuspense(){
                 <td><strong style="color:var(--accent-green)">${fmtMoney(q.trans_amount)}</strong></td>
                 <td style="display:flex;gap:4px;flex-wrap:wrap">
                   <button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${q.id}','mpesa',${q.trans_amount},'${q.trans_id||''}','${q.loan_id||''}')">Match to Loan</button>
+                  <button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${q.id}','mpesa',${q.trans_amount},'${q.trans_id||''}','${q.bill_ref_number||''}','${q.first_name||''}')">Match to Charges</button>
                   <button class="btn btn-outline btn-sm" onclick="dismissMpesaPayment('${q.id}')">Dismiss</button>
                 </td>
               </tr>`).join(''):'<tr><td colspan="6"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No unmatched M-Pesa payments</div></td></tr>'}
@@ -6315,7 +6319,7 @@ async function renderSuspense(){
                 <td>${r.payer_name||'-'} · ${r.payer_phone||'-'} · Acct: ${r.account_number||'-'}</td>
                 <td><strong style="color:var(--accent-green)">${fmtMoney(r.amount)}</strong></td>
                 <td>${!r.resolved?'<span class="badge badge-yellow">Pending</span>':'<span class="badge badge-green">Matched</span>'}</td>
-                <td>${!r.resolved?`<button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}')">Match</button>`:'<span style="font-size:11px;color:var(--text-secondary)">Done</span>'}</td>
+                <td>${!r.resolved?`<div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}')">Match Loan</button><button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}','${r.account_number||''}','${r.payer_name||''}')">Match Charges</button></div>`:'<span style="font-size:11px;color:var(--text-secondary)">Done</span>'}</td>
               </tr>`).join(''):'<tr><td colspan="6"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No manual suspense entries waiting to be matched</div></td></tr>'}
           </tbody>
         </table>
@@ -6362,6 +6366,157 @@ async function saveSuspenseEntry(){
     closeModal();
     renderSuspense();
   }catch(e){toast(e.message,'error');}
+}
+
+function renderSuspenseChargeClientRows(clients){
+  if(!clients.length){
+    return '<div style="padding:14px;color:var(--text-secondary);font-size:13px;text-align:center">No clients found. Create the client first, then match this payment.</div>';
+  }
+  return clients.map(c=>{
+    const name=escapeHtml(c.full_name||'Unknown Client');
+    const phone=escapeHtml(c.phone||'-');
+    const idNo=escapeHtml(c.id_number||'-');
+    return `<button type="button" class="suspense-charge-client-row" data-client-id="${escapeHtml(c.id)}" onclick='selectSuspenseChargeClient(${JSON.stringify(c.id)})' style="width:100%;display:flex;justify-content:space-between;gap:12px;align-items:center;text-align:left;padding:10px 12px;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--text-primary);cursor:pointer">
+      <span><strong>${name}</strong><br><span style="font-size:12px;color:var(--text-secondary)">Phone: ${phone} &nbsp; ID: ${idNo}</span></span>
+      <span class="badge badge-blue">Select</span>
+    </button>`;
+  }).join('');
+}
+
+function selectSuspenseChargeClient(clientId){
+  const input=document.getElementById('suspChargeClientId');
+  const selected=document.getElementById('suspChargeClientSelected');
+  if(input)input.value=clientId;
+  document.querySelectorAll('.suspense-charge-client-row').forEach(row=>{
+    const active=row.dataset.clientId===clientId;
+    row.style.background=active?'rgba(139,92,246,0.12)':'transparent';
+    row.style.borderLeft=active?'4px solid var(--accent-purple)':'0';
+  });
+  const client=(window._suspenseChargeClients||[]).find(c=>c.id===clientId);
+  if(selected)selected.innerHTML=client?`Selected: <strong>${escapeHtml(client.full_name||'Unknown Client')}</strong>`:'No client selected';
+}
+
+function filterSuspenseChargeClients(q){
+  const list=document.getElementById('suspChargeClientList');
+  const input=document.getElementById('suspChargeClientId');
+  const selected=document.getElementById('suspChargeClientSelected');
+  if(!list)return;
+  const term=(q||'').toLowerCase();
+  const clients=window._suspenseChargeClients||[];
+  const filtered=term.length<2?clients:clients.filter(c=>{
+    return String(c.full_name||'').toLowerCase().includes(term)
+      || String(c.phone||'').toLowerCase().includes(term)
+      || String(c.id_number||'').toLowerCase().includes(term);
+  });
+  if(input)input.value='';
+  if(selected)selected.textContent='No client selected';
+  list.innerHTML=renderSuspenseChargeClientRows(filtered);
+}
+
+async function openSuspenseChargeModal(entryId, entryType, amount, ref='', account='', payer=''){
+  if(!(window._suspenseChargeClients||[]).length){
+    const{data:clients}=await sb('loan_clients')
+      .select('id,full_name,phone,id_number')
+      .eq('business_id',currentUser.business_id)
+      .order('full_name',{ascending:true})
+      .limit(1000);
+    window._suspenseChargeClients=clients||[];
+  }
+  openModal(`
+    <h2>Match Suspense Payment to Charges</h2>
+    <div class="card" style="margin-bottom:12px;background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.3)">
+      <p><strong>Ref:</strong> ${escapeHtml(ref||'-')} &nbsp;|&nbsp; <strong>Amount:</strong> ${fmtMoney(amount)}</p>
+      <p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Account: ${escapeHtml(account||'-')} ${payer?`&nbsp;|&nbsp; Payer: ${escapeHtml(payer)}`:''}</p>
+    </div>
+    <div class="form-group">
+      <label>Client *</label>
+      <input class="input" id="suspChargeClientSearch" placeholder="Search client name, phone or ID..." oninput="filterSuspenseChargeClients(this.value)" style="margin-bottom:8px">
+      <input type="hidden" id="suspChargeClientId">
+      <div id="suspChargeClientList" style="height:170px;overflow:auto;border:1px solid var(--border);border-radius:8px;background:var(--bg-card)">
+        ${renderSuspenseChargeClientRows(window._suspenseChargeClients||[])}
+      </div>
+      <div id="suspChargeClientSelected" style="margin-top:6px;font-size:12px;color:var(--text-secondary)">No client selected</div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Charge Type *</label>
+        <select class="select" id="suspChargeType">
+          <option value="other">Registration + Processing Fees</option>
+          <option value="processing">Processing/Application Fee</option>
+          <option value="registration">Registration Fee</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Payment Method</label><select class="select" id="suspChargeMethod"><option value="mpesa" selected>M-Pesa</option><option value="cash">Cash</option><option value="bank">Bank</option></select></div>
+    </div>
+    <div class="form-group"><label>Notes</label><textarea class="textarea" id="suspChargeNotes" placeholder="Optional notes, e.g. registration and processing paid together"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmSuspenseChargeMatch('${entryId}','${entryType}',${Number(amount)||0},'${ref||''}')">Move to Charges Account</button>
+    </div>
+  `);
+}
+
+async function confirmSuspenseChargeMatch(entryId, entryType, amount, ref=''){
+  const clientId=document.getElementById('suspChargeClientId')?.value;
+  if(!clientId)return toast('Select the client','warning');
+  const type=document.getElementById('suspChargeType')?.value||'other';
+  const method=document.getElementById('suspChargeMethod')?.value||'mpesa';
+  const notes=(document.getElementById('suspChargeNotes')?.value||'').trim();
+  const btn=[...document.querySelectorAll('.modal-actions .btn-primary')].find(b=>/Move to Charges/i.test(b.textContent||''));
+  if(btn){ btn.disabled=true; btn.textContent='Moving...'; }
+  try{
+    const client=(window._suspenseChargeClients||[]).find(c=>c.id===clientId);
+    const typeLabel=type==='registration'?'Registration Fee':type==='processing'?'Processing/Application Fee':'Registration + Processing Fees';
+    const sourceKey=`suspense-charge:${entryType}:${entryId}`;
+    await depositClientChargeWallet({
+      clientId,
+      amount,
+      transactionType:'deposit',
+      chargeType:type,
+      date:today(),
+      reference:ref,
+      paymentMethod:method,
+      description:`${typeLabel} moved from suspense${notes?' | '+notes:''}`,
+      sourceKey
+    });
+    await sb('journal_entries').insert({
+      id:crypto.randomUUID(),
+      business_id:currentUser.business_id,
+      date:today(),
+      ref:ref||sourceKey,
+      description:`${typeLabel} moved from suspense to Charges Account for ${client?.full_name||'client'} | Client ID: ${clientId}${notes?' | '+notes:''}`,
+      debit:'Suspense Account',
+      credit:'Charges & Excess Account',
+      amount,
+      synced:false
+    }).catch(e=>console.warn('Suspense charge journal failed:',e.message));
+
+    if(entryType==='mpesa'){
+      await sb('mpesa_callback_queue').update({confirmed:true}).eq('id',entryId);
+      if(ref){
+        await sb('unmatched_payments').update({
+          resolved:true,
+          resolved_at:new Date().toISOString(),
+          resolved_by:currentUser.id
+        }).eq('business_id',currentUser.business_id).eq('mpesa_reference',ref);
+      }
+    }else{
+      await sb('unmatched_payments').update({
+        resolved:true,
+        resolved_at:new Date().toISOString(),
+        resolved_by:currentUser.id
+      }).eq('id',entryId);
+    }
+
+    await audit('suspense_moved_to_charges','client_charge_transactions',clientId,null,{ref,amount,type,client:client?.full_name||''});
+    toast(`Moved ${fmtMoney(amount)} to ${client?.full_name||'client'} Charges account`,'success');
+    closeModal();
+    window._chargesExcessData=null;
+    renderSuspense();
+  }catch(e){
+    toast(e.message,'error');
+    if(btn){ btn.disabled=false; btn.textContent='Move to Charges Account'; }
+  }
 }
 
 async function openSuspenseMatchModal(entryId, entryType, amount, ref, suggestedLoanId=''){
@@ -7272,7 +7427,7 @@ async function renderSettings(){
       </div>
       <div class="card" style="max-width:700px;margin-bottom:16px;border-color:var(--accent-green)">
         <h3 style="font-size:16px;margin-bottom:4px;color:var(--accent-green)">📶 M-Pesa Daraja C2B Settings</h3>
-        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:14px">Clients pay via Paybill using their <strong>National ID</strong> as the account number. Saving these credentials will automatically register the separate C2B validation and confirmation URLs with Safaricom.</p>
+        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:14px">Clients pay via Paybill using their <strong>National ID</strong> as the account reference. If the matched client has an active loan, the payment is recorded as a repayment; if the client has no active loan, it is deposited into Charges &amp; Excess for upfront registration and processing fees. Saving these credentials will automatically register the separate C2B validation and confirmation URLs with Safaricom.</p>
         <div class="form-row">
           <div class="form-group"><label>Shortcode (Paybill)</label><input class="input" id="setShortcode" value="${settings.mpesa_shortcode||''}" placeholder="e.g. 174379"></div>
           <div class="form-group"><label>Environment</label><select class="select" id="setDarajaEnv"><option value="sandbox" ${(settings.daraja_environment||'sandbox')==='sandbox'?'selected':''}>Sandbox (Testing)</option><option value="production" ${settings.daraja_environment==='production'?'selected':''}>Production (Live)</option></select></div>
@@ -7307,7 +7462,8 @@ async function renderSettings(){
           1. Open M-Pesa → Lipa na M-Pesa → Pay Bill<br>
           2. Business no: <strong>${settings.mpesa_shortcode||'&lt;your shortcode&gt;'}</strong><br>
           3. Account no: <strong>Their National ID number</strong><br>
-          4. Enter amount and PIN — payment is auto-matched to their oldest active loan ✅
+          4. Enter amount and PIN<br>
+          5. Active-loan payments go to repayments; payments made before a loan exists go to the client's Charges &amp; Excess account
         </div>
         <div class="form-group" style="display:flex;align-items:center;gap:8px">
           <label class="toggle"><input type="checkbox" id="setAutoConfirm" ${settings.mpesa_auto_confirm?'checked':''}><span class="toggle-slider"></span></label>

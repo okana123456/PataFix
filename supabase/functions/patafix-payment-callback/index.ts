@@ -53,7 +53,12 @@ async function findClient(supabase: any, businessId: string, accountNumber: stri
     if (data) return data;
   }
 
-  for (const candidate of phoneVariants(payerPhone)) {
+  const phoneCandidates = [...new Set([
+    ...phoneVariants(accountNumber),
+    ...phoneVariants(payerPhone),
+  ])];
+
+  for (const candidate of phoneCandidates) {
     const { data } = await supabase
       .from("loan_clients")
       .select("id, business_id, full_name, id_number, phone")
@@ -63,7 +68,7 @@ async function findClient(supabase: any, businessId: string, accountNumber: stri
     if (data) return data;
   }
 
-  for (const tail of phoneVariants(payerPhone).map((phone) => phone.slice(-9))) {
+  for (const tail of [...new Set(phoneCandidates.map((phone) => phone.slice(-9)))]) {
     const { data } = await supabase
       .from("loan_clients")
       .select("id, business_id, full_name, id_number, phone")
@@ -75,6 +80,22 @@ async function findClient(supabase: any, businessId: string, accountNumber: stri
   }
 
   return null;
+}
+
+async function recordUnmatchedPayment(
+  supabase: any,
+  { businessId, accountNumber, amount, transId, payerPhone, payerName, body }: any,
+) {
+  await supabase.from("unmatched_payments").insert({
+    amount,
+    account_number: accountNumber,
+    business_id: businessId,
+    mpesa_reference: transId,
+    payer_phone: payerPhone,
+    payer_name: payerName,
+    raw_payload: body,
+    resolved: false,
+  });
 }
 
 serve(async (req) => {
@@ -163,22 +184,19 @@ serve(async (req) => {
     const client = await findClient(supabase, businessId, accountNumber, payerPhone);
     if (!client) {
       console.log("PataFix callback unmatched client", { transId, businessId, accountNumber, payerPhone });
-      await supabase.from("unmatched_payments").insert({
-        amount,
-        account_number: accountNumber,
-        business_id: businessId,
-        mpesa_reference: transId,
-        payer_phone: payerPhone,
-        payer_name: payerName,
-        raw_payload: body,
-        resolved: false,
-      });
+      await recordUnmatchedPayment(supabase, { businessId, accountNumber, amount, transId, payerPhone, payerName, body });
+      if (queue?.id) {
+        await supabase
+          .from("mpesa_callback_queue")
+          .update({ confirmed: true, unmatched: true, unmatched_reason: "No matching client found" })
+          .eq("id", queue.id);
+      }
       return accepted();
     }
 
     const { data: loan } = await supabase
       .from("loans")
-      .select("id, outstanding_balance, total_paid, total_payable, total_interest, status")
+      .select("id, client_id, loan_no, outstanding_balance, total_paid, total_payable, total_interest, status")
       .eq("business_id", businessId)
       .eq("client_id", client.id)
       .eq("status", "active")
@@ -188,17 +206,41 @@ serve(async (req) => {
       .maybeSingle();
 
     if (!loan) {
-      console.log("PataFix callback unmatched loan", { transId, businessId, clientId: client.id, amount });
-      await supabase.from("unmatched_payments").insert({
-        amount,
-        account_number: accountNumber,
+      const paymentDate = mpesaDate(body?.TransTime);
+      const { error: chargeError } = await supabase
+        .from("client_charge_transactions")
+        .insert({
+          business_id: businessId,
+          client_id: client.id,
+          transaction_type: "deposit",
+          charge_type: "other",
+          amount,
+          transaction_date: paymentDate.slice(0, 10),
+          reference: transId,
+          payment_method: "mpesa_c2b",
+          description: `M-Pesa deposit for registration/processing charges. Account: ${accountNumber}. Payer: ${payerName}`,
+          source_key: `mpesa-charge:${transId}`,
+        });
+      if (chargeError && !String(chargeError.message || "").toLowerCase().includes("duplicate")) throw chargeError;
+
+      await supabase.from("journal_entries").insert({
         business_id: businessId,
-        mpesa_reference: transId,
-        payer_phone: payerPhone,
-        payer_name,
-        raw_payload: body,
-        resolved: false,
+        date: paymentDate.slice(0, 10),
+        ref: transId,
+        description: `M-Pesa deposit to Charges & Excess for ${client.full_name || "client"} | Client ID: ${client.id} | Account: ${accountNumber}`,
+        debit: "M-Pesa",
+        credit: "Charges & Excess Account",
+        amount,
+        synced: false,
       });
+
+      if (queue?.id) {
+        await supabase
+          .from("mpesa_callback_queue")
+          .update({ confirmed: true })
+          .eq("id", queue.id);
+      }
+      console.log("PataFix callback confirmed charge deposit", { transId, businessId, clientId: client.id, amount });
       return accepted();
     }
 
@@ -209,6 +251,7 @@ serve(async (req) => {
     }
 
     const appliedAmount = Math.min(amount, Number(loan.outstanding_balance || 0));
+    const excessAmount = Number(Math.max(0, amount - appliedAmount).toFixed(2));
     const totalPayable = Number(loan.total_payable || 0);
     const totalInterest = Number(loan.total_interest || 0);
     const interestRatio = totalPayable > 0 && totalInterest > 0 ? totalInterest / totalPayable : 0;
@@ -274,6 +317,36 @@ serve(async (req) => {
       })
       .eq("id", loan.id);
 
+    if (excessAmount > 0) {
+      const { error: excessError } = await supabase
+        .from("client_charge_transactions")
+        .insert({
+          business_id: businessId,
+          client_id: client.id,
+          loan_id: loan.id,
+          transaction_type: "excess_deposit",
+          charge_type: "excess",
+          amount: excessAmount,
+          transaction_date: paymentDate.slice(0, 10),
+          reference: transId,
+          payment_method: "mpesa_c2b",
+          description: `Amount paid above the remaining balance of loan ${loan.loan_no || loan.id}`,
+          source_key: `mpesa-excess:${transId}`,
+        });
+      if (excessError && !String(excessError.message || "").toLowerCase().includes("duplicate")) throw excessError;
+
+      await supabase.from("journal_entries").insert({
+        business_id: businessId,
+        date: paymentDate.slice(0, 10),
+        ref: `${transId}-EXCESS`,
+        description: `Excess repayment deposited to Charges & Excess | Loan ${loan.loan_no || loan.id} | Client ID: ${client.id}`,
+        debit: "M-Pesa",
+        credit: "Charges & Excess Account",
+        amount: excessAmount,
+        synced: false,
+      });
+    }
+
     if (queue?.id) {
       await supabase
         .from("mpesa_callback_queue")
@@ -281,7 +354,7 @@ serve(async (req) => {
         .eq("id", queue.id);
     }
 
-    console.log("PataFix callback confirmed repayment", { transId, businessId, clientId: client.id, loanId: loan.id, repaymentId: repayment.id, appliedAmount, newBalance });
+    console.log("PataFix callback confirmed repayment", { transId, businessId, clientId: client.id, loanId: loan.id, repaymentId: repayment.id, appliedAmount, excessAmount, newBalance });
     return accepted();
   } catch (error) {
     console.error("PataFix C2B callback error:", error);
