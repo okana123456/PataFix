@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-02-daraja-c2b-v2-v24';
+const APP_VERSION = 'patafix-2026-08-04-bulk-disbursement-dues-v25';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1801,6 +1801,7 @@ function buildDueTodayTable(dailyDueScheds, allLoans, allReps, todayStr){
     if(remaining === 0) return null;
     return {
       name: loan.loan_clients?.full_name || '-',
+      id_number: loan.loan_clients?.id_number || '-',
       phone: loan.loan_clients?.phone || '-',
       loan_no: loan.loan_no,
       installment_no: s.installment_no,
@@ -1825,7 +1826,7 @@ function buildDueTodayTable(dailyDueScheds, allLoans, allReps, todayStr){
   html += '</div>';
   html += '<div class="table-wrap" style="max-height:340px;overflow-y:auto;margin-bottom:0">';
   html += '<table style="font-size:12px"><thead><tr>';
-  html += '<th>Client</th><th>Phone</th><th>Loan #</th><th>Inst #</th><th>Due</th><th>Paid</th><th>Remaining</th><th>Arrears</th><th>Loan Balance</th><th>Officer</th><th>Status</th><th></th>';
+  html += '<th>Client</th><th>ID Number</th><th>Phone</th><th>Loan #</th><th>Inst #</th><th>Due</th><th>Paid</th><th>Remaining</th><th>Arrears</th><th>Loan Balance</th><th>Officer</th><th>Status</th><th></th>';
   html += '</tr></thead><tbody>';
 
   rows.forEach(x => {
@@ -1844,6 +1845,7 @@ function buildDueTodayTable(dailyDueScheds, allLoans, allReps, todayStr){
       : '<td><span style="color:var(--text-secondary)">—</span></td>';
     html += '<tr style="' + (isPaid?'opacity:0.55':'') + '">';
     html += '<td><strong>' + x.name + '</strong></td>';
+    html += '<td>' + x.id_number + '</td>';
     html += '<td><a href="tel:' + x.phone + '" style="color:var(--accent-blue)">' + x.phone + '</a></td>';
     html += '<td>' + x.loan_no + '</td>';
     html += '<td style="text-align:center">#' + x.installment_no + '</td>';
@@ -1920,7 +1922,7 @@ async function renderDashboard(){
   try{
     const todayFetch=today();
     const[loansR,schedR,todaySchedR,repR,appsR,clientsR]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name,phone)').eq('business_id', currentUser.business_id),
+      sb('loans').select('*,loan_clients(full_name,phone,id_number,address),loan_applications(loan_products(name))').eq('business_id', currentUser.business_id),
       sb('loan_schedules').select('*').eq('business_id', currentUser.business_id).limit(50000),
       sb('loan_schedules').select('*').eq('business_id', currentUser.business_id).eq('due_date', todayFetch),
       sb('loan_repayments').select('*').eq('business_id', currentUser.business_id),
@@ -1989,6 +1991,8 @@ async function renderDashboard(){
     const active=myLoans.filter(l=>l.status==='active');
     const portfolio=active.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
     const outstanding=active.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
+    const principalOutstanding=active.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0);
+    const interestOutstanding=active.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0);
     const overdue=active.filter(l=>l.overdue_days>0);
     const par30=active.filter(l=>l.overdue_days>30);
     const npl=active.filter(l=>l.overdue_days>180);
@@ -2144,6 +2148,8 @@ async function renderDashboard(){
       <h3 class="dash-h3">Global Portfolio Snapshot</h3>
       <div class="kpi-grid">
         <div class="kpi-card"><div class="kpi-label">OLB (Outstanding Balance)</div><div class="kpi-value" style="color:var(--accent-blue)">${fmtMoney(portfolio)}</div><div class="kpi-sub">${active.length} active loans</div></div>
+        <div class="kpi-card"><div class="kpi-label">Principal Outstanding</div><div class="kpi-value" style="color:var(--accent-purple)">${fmtMoney(principalOutstanding)}</div><div class="kpi-sub">Unpaid principal portion</div></div>
+        <div class="kpi-card"><div class="kpi-label">Interest Outstanding</div><div class="kpi-value" style="color:var(--accent-orange)">${fmtMoney(interestOutstanding)}</div><div class="kpi-sub">Unpaid interest portion</div></div>
         <div class="kpi-card" style="cursor:pointer" onclick="navigateTo('overdue')"><div class="kpi-label">Loans in Arrears</div><div class="kpi-value" style="color:var(--accent-red)">${overdue.length}</div><div class="kpi-sub" style="color:var(--accent-red)">KES ${fmtMoney(overdue.reduce((s,l)=>s+Number(l.arrears_amount||0),0))} outstanding</div></div>
         <div class="kpi-card"><div class="kpi-label">PAR 30</div><div class="kpi-value" style="color:${par30pct>10?'var(--accent-red)':'var(--accent-yellow)'}">${par30pct.toFixed(1)}%</div></div>
         <div class="kpi-card"><div class="kpi-label">NPL (>180 Days)</div><div class="kpi-value" style="color:var(--accent-red)">${npl.length}</div><div class="kpi-sub">Non-Performing Loans</div></div>
@@ -2840,7 +2846,7 @@ async function renderApplications(page=1){
     main.innerHTML=`
       <div class="page-header"><h1>Loan Applications</h1><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" id="btnBulkApproveApps" onclick="openBulkApproveApplicationsModal()" style="display:none">Approve Selected (<span id="bulkApproveAppsCount">0</span>)</button><button class="btn btn-primary" onclick="openNewApplication()">+ New Application</button></div></div>
       <div class="search-bar"><input class="input" placeholder="Search application or client..." oninput="filterApps(this.value)"><select class="select" onchange="filterAppStatus(this.value)"><option value="">All Status</option><option value="draft">Draft</option><option value="submitted">Submitted</option><option value="under_review">Under Review</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="disbursed">Disbursed</option></select></div>
-      <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager')?'<input type="checkbox" id="bulkApproveAllApps" onchange="toggleBulkApproveApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
+      <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager')?'<input type="checkbox" id="bulkApproveAllApps" onchange="toggleBulkApproveApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
       <tbody id="appsBody">${renderAppRows(p.items)}</tbody></table></div>
       ${paginationHtml(p,'renderApplications')}
     `;
@@ -2857,6 +2863,7 @@ function renderAppRows(apps){
     <td>${canApprove?`<input type="checkbox" class="app-approve-chk" value="${a.id}" onchange="updateBulkApproveApplicationsBtn()">`:''}</td>
     <td><strong>${a.application_no||'DRAFT'}</strong></td>
     <td><strong>${a.loan_clients?.full_name||'—'}</strong></td>
+    <td>${a.loan_clients?.id_number||'-'}</td>
     <td>${a.loan_clients?.phone||'-'}</td>
     <td>${fmtMoney(a.applied_amount)}</td><td>${a.applied_term_weeks}w</td>
     <td><span class="badge badge-blue">${escapeHtml(a.loan_products?.name||getAutoTier(a.applied_amount))}</span></td>
@@ -3319,7 +3326,7 @@ async function rejectApp(id){
 async function renderDisbursement(){
   const main=$('#mainContent');
   try{
-    const{data:apps,error:appsError}=await sb('loan_applications').select('*,loan_clients(full_name,phone)').eq('business_id', currentUser.business_id).in('status',['approved','disbursed']).order('approved_at',{ascending:false});
+    const{data:apps,error:appsError}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number),loan_products(name)').eq('business_id', currentUser.business_id).in('status',['approved','disbursed']).order('approved_at',{ascending:false});
     if(appsError)throw appsError;
     const appIds=(apps||[]).map(a=>a.id).filter(Boolean);
     let loansByApp={};
@@ -3330,9 +3337,9 @@ async function renderDisbursement(){
     }
     cachedData.disbursements=(apps||[]).map(a=>({...a,loan_record:loansByApp[a.id]||null}));
     main.innerHTML=`
-      <div class="page-header"><h1>Disbursement</h1></div>
+      <div class="page-header"><h1>Disbursement</h1><button class="btn btn-primary btn-sm" id="btnBulkDisburseApps" onclick="openBulkDisbursementModal()" style="display:none">Disburse Selected (<span id="bulkDisburseAppsCount">0</span>)</button></div>
       <div class="search-bar">
-        <input class="input" id="disbursementSearch" placeholder="Search client, phone, app or loan no..." oninput="applyDisbursementFilters()">
+        <input class="input" id="disbursementSearch" placeholder="Search client, ID, phone, app or loan no..." oninput="applyDisbursementFilters()">
         <select class="select" id="disbursementStatusFilter" onchange="applyDisbursementFilters()">
           <option value="">All disbursements</option>
           <option value="awaiting">Awaiting disbursement</option>
@@ -3341,7 +3348,7 @@ async function renderDisbursement(){
         <input class="input" type="date" id="disbursementDateFrom" onchange="applyDisbursementFilters()" title="From date">
         <input class="input" type="date" id="disbursementDateTo" onchange="applyDisbursementFilters()" title="To date">
       </div>
-      <div class="table-wrap"><table><thead><tr><th>App #</th><th>Client Name</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Approved</th><th>Disbursed</th><th>Method</th><th>Reference</th><th>Actions</th></tr></thead><tbody id="disbursementBody">
+      <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager','cashier')?'<input type="checkbox" id="bulkDisburseAllApps" onchange="toggleBulkDisbursementApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Approved</th><th>Disbursed</th><th>Method</th><th>Reference</th><th>Actions</th></tr></thead><tbody id="disbursementBody">
       ${(apps||[]).map(a=>`<tr><td>${a.application_no}</td><td><strong>${a.loan_clients?.full_name||'—'}</strong></td><td>${a.loan_clients?.phone||'-'}</td><td>${fmtMoney(a.applied_amount)}</td><td>${a.applied_term_weeks}w</td><td><span class="badge badge-blue">${getAutoTier(a.applied_amount)}</span></td><td>${fmtDate(a.approved_at)}</td><td><button class="btn btn-primary btn-sm" onclick="openDisburseModal('${a.id}')">Disburse</button></td></tr>`).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--text-secondary)">No approved applications awaiting disbursement</td></tr>'}
       </tbody></table></div>
     `;
@@ -3359,8 +3366,10 @@ function renderDisbursementRows(rows){
     const loan=a.loan_record||{};
     const isDisbursed=a.status==='disbursed'||!!loan.id;
     return `<tr>
+      <td>${!isDisbursed&&hasRole('admin','branch_manager','cashier')?`<input type="checkbox" class="app-disburse-chk" value="${a.id}" onchange="updateBulkDisbursementBtn()">`:''}</td>
       <td><strong>${a.application_no||'-'}</strong>${loan.loan_no?`<br><span style="font-size:10px;color:var(--text-secondary)">Loan: ${loan.loan_no}</span>`:''}</td>
       <td><strong>${a.loan_clients?.full_name||'-'}</strong></td>
+      <td>${a.loan_clients?.id_number||'-'}</td>
       <td>${a.loan_clients?.phone||'-'}</td>
       <td>${fmtMoney(loan.disbursed_amount||a.applied_amount)}</td>
       <td>${a.applied_term_weeks||'-'}w</td>
@@ -3372,7 +3381,7 @@ function renderDisbursementRows(rows){
       <td>${isDisbursed?(loan.disbursement_reference||'-'):'-'}</td>
       <td>${isDisbursed?'<span class="badge badge-green">Done</span>':`<button class="btn btn-primary btn-sm" onclick="openDisburseModal('${a.id}')">Disburse</button>`}</td>
     </tr>`;
-  }).join('')||'<tr><td colspan="12" style="text-align:center;color:var(--text-secondary)">No disbursement records found</td></tr>';
+  }).join('')||'<tr><td colspan="14" style="text-align:center;color:var(--text-secondary)">No disbursement records found</td></tr>';
 }
 
 function applyDisbursementFilters(){
@@ -3385,7 +3394,7 @@ function applyDisbursementFilters(){
     const isDisbursed=a.status==='disbursed'||!!loan.id;
     if(status==='awaiting'&&isDisbursed)return false;
     if(status==='disbursed'&&!isDisbursed)return false;
-    const hay=[a.application_no,a.loan_clients?.full_name,a.loan_clients?.phone,loan.loan_no,loan.disbursement_reference].join(' ').toLowerCase();
+    const hay=[a.application_no,a.loan_clients?.full_name,a.loan_clients?.id_number,a.loan_clients?.phone,loan.loan_no,loan.disbursement_reference].join(' ').toLowerCase();
     if(q&&!hay.includes(q))return false;
     const d=String(disbursementRowDate(a)).slice(0,10);
     if(from&&d<from)return false;
@@ -3394,10 +3403,93 @@ function applyDisbursementFilters(){
   });
   const body=$('#disbursementBody');
   if(body)body.innerHTML=renderDisbursementRows(rows);
+  updateBulkDisbursementBtn();
+}
+
+function selectedDisbursementApplicationIds(){
+  return [...document.querySelectorAll('.app-disburse-chk:checked')].map(ch=>ch.value).filter(Boolean);
+}
+
+function updateBulkDisbursementBtn(){
+  const checked=selectedDisbursementApplicationIds();
+  const btn=document.getElementById('btnBulkDisburseApps');
+  const count=document.getElementById('bulkDisburseAppsCount');
+  if(count)count.textContent=checked.length;
+  if(btn)btn.style.display=checked.length?'inline-flex':'none';
+  const all=document.getElementById('bulkDisburseAllApps');
+  const visible=[...document.querySelectorAll('.app-disburse-chk')];
+  if(all)all.checked=visible.length>0&&checked.length===visible.length;
+}
+
+function toggleBulkDisbursementApplications(checked){
+  document.querySelectorAll('.app-disburse-chk').forEach(ch=>{ch.checked=checked;});
+  updateBulkDisbursementBtn();
+}
+
+function openBulkDisbursementModal(){
+  const ids=selectedDisbursementApplicationIds();
+  if(!ids.length)return toast('Select at least one approved application','warning');
+  const selected=(cachedData.disbursements||[]).filter(a=>ids.includes(a.id)&&a.status==='approved'&&!a.loan_record?.id);
+  if(!selected.length)return toast('The selected applications have already been disbursed','warning');
+  const total=selected.reduce((sum,a)=>sum+Number(a.applied_amount||0),0);
+  openModal(`
+    <h2>Bulk Disbursement</h2>
+    <div class="card" style="margin-bottom:14px;background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.25)">
+      <p><strong>${selected.length} approved application${selected.length===1?'':'s'}</strong> selected</p>
+      <p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Total principal to release: <strong>${fmtMoney(total)}</strong>. Each client's upfront fee balance will be checked separately before disbursement.</p>
+    </div>
+    <div class="table-wrap" style="max-height:220px;overflow-y:auto;margin-bottom:14px"><table><thead><tr><th>Client</th><th>ID Number</th><th>Phone</th><th>Application</th><th>Amount</th></tr></thead><tbody>
+      ${selected.map(a=>`<tr><td>${escapeHtml(a.loan_clients?.full_name||'-')}</td><td>${escapeHtml(a.loan_clients?.id_number||'-')}</td><td>${escapeHtml(a.loan_clients?.phone||'-')}</td><td>${escapeHtml(a.application_no||'-')}</td><td>${fmtMoney(a.applied_amount)}</td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="form-row">
+      <div class="form-group"><label>Disbursement Date *</label><input class="input" type="date" id="bulkDisbDate" value="${today()}" max="${today()}"></div>
+      <div class="form-group"><label>Disbursement Method *</label><select class="select" id="bulkDisbMethod"><option value="mpesa" selected>M-Pesa</option><option value="cash">Cash</option><option value="bank_transfer">Bank Transfer</option></select></div>
+    </div>
+    <div class="form-group"><label>Reference Prefix / Batch Note</label><input class="input" id="bulkDisbRef" placeholder="e.g. M-Pesa batch or voucher reference"></div>
+    <div class="form-group"><label>Fee Deduction Note</label><input class="input" id="bulkDisbFeeRef" placeholder="Optional note applied to all selected loans"></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnConfirmBulkDisburse" onclick='confirmBulkDisbursement(${JSON.stringify(ids)})'>Confirm Bulk Disbursement</button></div>
+  `,true);
+}
+
+async function confirmBulkDisbursement(ids){
+  const disbDate=document.getElementById('bulkDisbDate')?.value||'';
+  const method=document.getElementById('bulkDisbMethod')?.value||'mpesa';
+  const refPrefix=(document.getElementById('bulkDisbRef')?.value||'').trim();
+  const feeRef=(document.getElementById('bulkDisbFeeRef')?.value||'').trim();
+  if(!disbDate)return toast('Select the disbursement date','warning');
+  if(isFutureDateValue(disbDate))return toast('Disbursement date cannot be in the future','warning');
+  const btn=document.getElementById('btnConfirmBulkDisburse');
+  if(btn){btn.disabled=true;btn.textContent='Processing 0 of '+ids.length+'...';}
+  let completed=0;
+  const failures=[];
+  for(let i=0;i<ids.length;i++){
+    const app=(cachedData.disbursements||[]).find(a=>a.id===ids[i]);
+    if(!app){failures.push(`Application ${ids[i]}: not found`);continue;}
+    if(btn)btn.textContent=`Processing ${i+1} of ${ids.length}...`;
+    try{
+      const product=patafixProductByName(app.loan_products?.name)||getPataFixProduct(app.applied_amount);
+      const firstRepDate=parseLocalDate(disbDate);
+      firstRepDate.setDate(firstRepDate.getDate()+Number(product?.paymentEveryWeeks||1)*7);
+      await disburseApprovedApplication({
+        appId:app.id,clientId:app.client_id,termWeeks:app.applied_term_weeks,
+        amount:Number(app.applied_amount),method,reference:refPrefix?`${refPrefix}-${i+1}`:'',
+        disbDate,firstRep:localISODate(firstRepDate),openingBalanceRaw:'',feeRef
+      });
+      completed++;
+    }catch(e){
+      failures.push(`${app.loan_clients?.full_name||app.application_no}: ${e.message||e}`);
+    }
+  }
+  closeModal();
+  await renderDisbursement();
+  if(completed)toast(`${completed} loan${completed===1?'':'s'} disbursed successfully`,'success');
+  if(failures.length){
+    alert(`${failures.length} selected application${failures.length===1?' was':'s were'} not disbursed:\n\n${failures.join('\n')}`);
+  }
 }
 
 async function openDisburseModal(appId){
-  const{data:app}=await sb('loan_applications').select('*,loan_clients(full_name,phone,notes),loan_products(name)').eq('id',appId).single();
+  const{data:app}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,notes),loan_products(name)').eq('id',appId).single();
   if(!app)return toast('Application not found','error');
   const amt=app.applied_amount;
   const product=patafixProductByName(app.loan_products?.name)||getPataFixProduct(amt);
@@ -3421,11 +3513,12 @@ async function openDisburseModal(appId){
   const firstRep=parseLocalDate(defaultDisbDate);firstRep.setDate(firstRep.getDate()+((product?.paymentEveryWeeks||1)*7));
   const clientName=app.loan_clients?.full_name||'Unknown Client';
   const clientPhone=app.loan_clients?.phone||'';
+  const clientIdNumber=app.loan_clients?.id_number||'-';
   openModal(`
     <h2>Disburse Loan — ${app.application_no}</h2>
     <div class="card" style="margin-bottom:12px;font-size:13px;background:rgba(59,130,246,0.08);border-color:rgba(59,130,246,0.3)">
       <p style="font-size:15px;font-weight:700;margin-bottom:4px">👤 ${clientName}</p>
-      <p style="color:var(--text-secondary)">${clientPhone} &nbsp;|&nbsp; <strong>Product:</strong> ${product?.name||'-'} | <strong>Rate:</strong> ${product?.monthlyRate||0}% / month | <strong>Payments:</strong> ${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'} | <strong>Term:</strong> ${app.applied_term_weeks} weeks</p>
+      <p style="color:var(--text-secondary)">ID: ${clientIdNumber} &nbsp;|&nbsp; Phone: ${clientPhone||'-'} &nbsp;|&nbsp; <strong>Product:</strong> ${product?.name||'-'} | <strong>Rate:</strong> ${product?.monthlyRate||0}% / month | <strong>Payments:</strong> ${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'} | <strong>Term:</strong> ${app.applied_term_weeks} weeks</p>
     </div>
     <div class="form-row"><div class="form-group"><label>Approved Loan Amount</label><input class="input" type="number" id="dAmt" value="${amt}"></div><div class="form-group"><label>Disbursement Method</label><select class="select" id="dMethod"><option value="cash">Cash</option><option value="mpesa" selected>M-Pesa</option><option value="bank_transfer">Bank Transfer</option></select></div></div>
     <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="dRef"></div><div class="form-group"><label>Disbursement Date</label><input class="input" type="date" id="dDate" value="${defaultDisbDate}" max="${today()}" onchange="updateDisbursementFirstRepayment(${product?.paymentEveryWeeks||1})"></div></div>
@@ -3467,19 +3560,14 @@ function updateDisbursementFirstRepayment(intervalWeeks=1){
   firstInput.value=localISODate(d);
 }
 
-async function confirmDisburse(appId,clientId,termWeeks){
-  const btn = document.getElementById('btnConfirmDisburse');
-  if(btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
-  try{
+async function disburseApprovedApplication(options){
+    const{appId,clientId,termWeeks}=options;
     const {data: appCheck} = await sb('loan_applications').select('status,loan_products(name)').eq('id', appId).single();
     if(appCheck?.status === 'disbursed') {
-        toast('This application has already been disbursed!', 'warning');
-        closeModal();
-        renderDisbursement();
-        return;
+        throw new Error('This application has already been disbursed.');
     }
 
-    const amt=Number($('#dAmt').value);const term=Number(termWeeks);
+    const amt=Number(options.amount);const term=Number(termWeeks);
     const product=patafixProductByName(appCheck?.loan_products?.name)||getPataFixProduct(amt);
     const c=calcPataFixLoan(amt,term,product?.name,'flat');
     const procFee=processingFeeFor(amt, product?.name);
@@ -3489,11 +3577,11 @@ async function confirmDisburse(appId,clientId,termWeeks){
     const isReturningClient=(prevLoans&&prevLoans.length>0);
     const regFee=registrationFeeForClient(feeClient, prevLoans, product?.name);
     const netDisbursement=amt;
-    const disbDate=$('#dDate').value;const firstRep=$('#dFirstRep').value;
+    const disbDate=options.disbDate;const firstRep=options.firstRep;
     if(!disbDate)throw new Error('Select disbursement date.');
     if(isFutureDateValue(disbDate))throw new Error('Disbursement date cannot be in the future.');
     if(firstRep && firstRep < disbDate)throw new Error('First repayment date cannot be before disbursement date.');
-    const feeRef=($('#dFeeRef')?.value||'').trim();
+    const feeRef=String(options.feeRef||'').trim();
     const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(c.installments-1)*c.intervalWeeks*7);
 
     const loanNo = generateUniqueNo('LN');
@@ -3514,12 +3602,12 @@ async function confirmDisburse(appId,clientId,termWeeks){
       disbOfficerId = prevLoans[0].loan_officer_id;
     }
     // Processing/application fee is paid upfront; loan balance still follows the approved principal plus interest.
-    const openingBalanceRaw=$('#dOpeningBalance')?.value;
+    const openingBalanceRaw=options.openingBalanceRaw;
     const openingBalance=openingBalanceRaw===''?c.totalPayable:Math.max(0,Number(openingBalanceRaw)||0);
     if(openingBalance>c.totalPayable) throw new Error('Current remaining balance cannot be more than total payable.');
     const openingPaid=Number(Math.max(0,c.totalPayable-openingBalance).toFixed(2));
     const loanStatus=openingBalance<=0?'completed':'active';
-    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:c.periodRate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:netDisbursement,disbursement_method:$('#dMethod').value,disbursement_reference:$('#dRef').value,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:loanStatus,outstanding_balance:openingBalance,total_paid:openingPaid,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType,created_at:dateInputToLocalDateTime(disbDate)};
+    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:c.periodRate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:netDisbursement,disbursement_method:options.method,disbursement_reference:options.reference,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:loanStatus,outstanding_balance:openingBalance,total_paid:openingPaid,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType,created_at:dateInputToLocalDateTime(disbDate)};
 
     // Guard: if loan_type column doesn't exist yet in DB, retry without it
     let{data:loan,error:lErr}=await sb('loans').insert(loanRec).select().single();
@@ -3592,10 +3680,25 @@ async function confirmDisburse(appId,clientId,termWeeks){
     }catch(feeErr){ console.warn('[Disburse] Processing fee income log failed:',feeErr?.message); }
 
     await audit('loan_disbursed','loans',loan.id,null,loanRec);
-    toast(`Loan ${loanNo} disbursed successfully!`,'success');closeModal();renderDisbursement();
+    return loan;
+}
+
+async function confirmDisburse(appId,clientId,termWeeks){
+  const btn=document.getElementById('btnConfirmDisburse');
+  if(btn){btn.disabled=true;btn.textContent='Processing...';}
+  try{
+    const loan=await disburseApprovedApplication({
+      appId,clientId,termWeeks,
+      amount:Number($('#dAmt').value),method:$('#dMethod').value,reference:$('#dRef').value,
+      disbDate:$('#dDate').value,firstRep:$('#dFirstRep').value,
+      openingBalanceRaw:$('#dOpeningBalance')?.value,feeRef:($('#dFeeRef')?.value||'').trim()
+    });
+    toast(`Loan ${loan.loan_no} disbursed successfully!`,'success');
+    closeModal();
+    renderDisbursement();
   }catch(e){
     toast(e.message,'error');
-    if(btn) { btn.disabled = false; btn.textContent = 'Confirm & Disburse'; }
+    if(btn){btn.disabled=false;btn.textContent='Confirm & Disburse';}
   }
 }
 
@@ -3625,7 +3728,7 @@ async function renderLoans(page=1){
         <button class="btn btn-primary btn-sm" id="btnViewAllLoans" onclick="showAllLoans(true)">View Active Loans (${openActiveLoans.length})</button>
       </div>
       <div id="loansTableWrap" style="display:none">
-        <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Client Name</th><th>Phone</th><th>Officer</th><th>Type</th><th>Principal</th><th>Balance</th><th>Weekly</th><th>Overdue</th><th>Status</th><th>Actions</th></tr></thead>
+        <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Officer</th><th>Type</th><th>Principal</th><th>Balance</th><th>Weekly</th><th>Overdue</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody id="loansBody"></tbody></table></div>
         <div id="loansPagination"></div>
       </div>
@@ -3661,6 +3764,7 @@ function renderLoanRows(loans){
     return`<tr style="${rowColor}">
       <td><strong>${l.loan_no||'-'}</strong></td>
       <td><strong>${l.loan_clients?.full_name||'—'}</strong></td>
+      <td>${l.loan_clients?.id_number||'-'}</td>
       <td>${l.loan_clients?.phone||'-'}</td>
       <td><span class="badge badge-gray" style="text-transform:capitalize">${window._staffMap?.[l.loan_officer_id]||'Unassigned'}</span></td>
       <td>${l.loan_type==='repeat_loan'?'<span class="badge badge-purple">Repeat</span>':'<span class="badge badge-blue">New</span>'}</td>
@@ -3705,7 +3809,7 @@ function filterLoanStatus(v){
 }
 
 async function viewLoan(id){
-  const{data:loan}=await sb('loans').select('*,loan_clients(full_name,phone)').eq('id',id).single();
+  const{data:loan}=await sb('loans').select('*,loan_clients(full_name,phone,id_number)').eq('id',id).single();
   const{data:schedules}=await sb('loan_schedules').select('*').eq('loan_id',id).order('installment_no');
   const{data:payments}=await sb('loan_repayments').select('*').eq('loan_id',id).order('payment_date',{ascending:true}).order('created_at',{ascending:true});
   const{data:loanPenalties}=await sb('loan_penalties').select('*').eq('loan_id',id).order('date_charged',{ascending:true});
@@ -3714,7 +3818,7 @@ async function viewLoan(id){
   openModal(`
     <h2>Loan ${loan.loan_no}</h2>
     <div style="display:flex;gap:8px;margin-bottom:8px">${statusBadge(loan.status)} ${loan.overdue_days>0?`<span class="badge badge-red">${loan.overdue_days} days overdue</span>`:''}</div>
-    <div style="font-size:13px;margin-bottom:12px;color:var(--text-secondary)">👤 <strong style="color:var(--text)">${loan.loan_clients?.full_name||'-'}</strong> &nbsp; ${loan.loan_clients?.phone||''}</div>
+    <div style="font-size:13px;margin-bottom:12px;color:var(--text-secondary)">👤 <strong style="color:var(--text)">${loan.loan_clients?.full_name||'-'}</strong> &nbsp; ID: ${loan.loan_clients?.id_number||'-'} &nbsp; Phone: ${loan.loan_clients?.phone||'-'}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:13px;margin-bottom:16px">
       <div><strong>Principal:</strong> ${fmtMoney(loan.principal_amount)}</div>
       <div><strong>Rate:</strong> ${Number(loan.interest_rate||0)}% / repayment period</div>
@@ -3977,7 +4081,7 @@ let repPage=1;
 async function renderRepayments(page=1){
   repPage=page;const main=$('#mainContent');
   try{
-    const{data:reps}=await sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,outstanding_balance,total_paid,status,processing_fee,total_payable,disbursement_date,loan_clients(full_name,phone))').eq('business_id', currentUser.business_id).order('payment_date',{ascending:false}).order('created_at',{ascending:false});
+    const{data:reps}=await sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,outstanding_balance,total_paid,status,processing_fee,total_payable,disbursement_date,loan_clients(full_name,phone,id_number))').eq('business_id', currentUser.business_id).order('payment_date',{ascending:false}).order('created_at',{ascending:false});
 
     const f = appFilters.repayments || { type: 'this_month', start: '', end: '' };
     let filteredReps = filterByDate(reps||[], 'payment_date', f);
@@ -4044,7 +4148,7 @@ async function renderRepayments(page=1){
         <div class="table-wrap"><table><thead><tr><th>Trans ID</th><th>Amount</th><th>Phone</th><th>Account Ref</th><th>Time</th><th>Actions</th></tr></thead><tbody>
         ${myQueue.map(q=>`<tr><td>${escapeHtml(q.trans_id||'-')}</td><td>${fmtMoney(q.trans_amount)}</td><td>${paymentPhoneHtml(q)}</td><td>${escapeHtml(q.bill_ref_number||'-')}</td><td>${fmtDateTime(q.created_at)}</td><td>${canPay?`<button class="btn btn-success btn-sm" onclick="confirmMpesaPayment('${q.id}','${q.msisdn||q.bill_ref_number||''}',${q.trans_amount},'${q.trans_id}')">Confirm</button> <button class="btn btn-outline btn-sm" onclick="dismissMpesaPayment('${q.id}')">Dismiss</button>`:''}</td></tr>`).join('')}
         </tbody></table></div></div>`:''}
-      <div class="table-wrap"><table><thead><tr><th>Receipt</th><th>Client</th><th>Phone</th><th>Loan #</th><th>Type</th><th>Reference</th><th>Amount (KES)</th><th>Balance Remaining</th><th>Method</th><th>Date & Time</th><th>Actions</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Receipt</th><th>Client</th><th>ID Number</th><th>Phone</th><th>Loan #</th><th>Type</th><th>Reference</th><th>Amount (KES)</th><th>Balance Remaining</th><th>Method</th><th>Date & Time</th><th>Actions</th></tr></thead><tbody>
       ${p.items.map(r=>{
         // Balance AFTER this specific payment (running balance, not current balance)
         const balRem   = cachedData._balAfterMap?.[r.id] ?? Number(r.loans?.outstanding_balance ?? 0);
@@ -4071,6 +4175,7 @@ async function renderRepayments(page=1){
           : '<span style="color:var(--text-secondary);font-size:11px">—</span>';
         const rid = r.id;
         const rclient = r.loans?.loan_clients?.full_name||'-';
+        const ridNumber = r.loans?.loan_clients?.id_number||'-';
         const rphone  = r.loans?.loan_clients?.phone||'-';
         const rloan   = r.loans?.loan_no||(r.loan_id?.toString().slice(0,8))||'-';
         const rref    = r.payment_reference||'-';
@@ -4081,6 +4186,7 @@ async function renderRepayments(page=1){
           '<tr>',
           '<td><strong>',r.receipt_no,'</strong></td>',
           '<td>',rclient,'</td>',
+          '<td>',ridNumber,'</td>',
           '<td>',rphone,'</td>',
           '<td>',rloan,'</td>',
           '<td>',payType,'</td>',
@@ -4092,7 +4198,7 @@ async function renderRepayments(page=1){
           '<td><button class="btn btn-outline btn-sm" onclick="printReceipt(',JSON.stringify(rid),')">Print</button></td>',
           '</tr>'
         ].join('');
-      }).join('')||'<tr><td colspan="11" style="text-align:center;color:var(--text-secondary)">No repayments recorded for this period</td></tr>'}
+      }).join('')||'<tr><td colspan="12" style="text-align:center;color:var(--text-secondary)">No repayments recorded for this period</td></tr>'}
       </tbody></table></div>
       ${paginationHtml(p,'renderRepayments')}
     `;
@@ -4554,6 +4660,7 @@ function exportRepaymentsExcel(){
     return {
       'Receipt':           r.receipt_no,
       'Client':            r.loans?.loan_clients?.full_name||'-',
+      'ID Number':         r.loans?.loan_clients?.id_number||'-',
       'Phone':             r.loans?.loan_clients?.phone||'-',
       'Loan #':            r.loans?.loan_no||'-',
       'Payment Type':      payType,
@@ -4567,7 +4674,7 @@ function exportRepaymentsExcel(){
     };
   });
   const ws=XLSX.utils.json_to_sheet(data);
-  ws['!cols']=[{wch:14},{wch:22},{wch:14},{wch:12},{wch:16},{wch:16},{wch:12},{wch:16},{wch:16},{wch:14},{wch:12},{wch:20}];
+  ws['!cols']=[{wch:14},{wch:22},{wch:16},{wch:14},{wch:12},{wch:16},{wch:16},{wch:12},{wch:16},{wch:16},{wch:14},{wch:12},{wch:20}];
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Repayments');
   XLSX.writeFile(wb,'PataFix_Repayments.xlsx');
@@ -4589,7 +4696,7 @@ async function renderOverdue(opts){
     const isOfficerOnly = hasRole('loan_officer') && !hasRole('admin','branch_manager');
 
     // Fetch active loans — officers see only their own, admins see all
-    let loansQuery = sb('loans').select('*,loan_clients(full_name,phone,address)')
+    let loansQuery = sb('loans').select('*,loan_clients(full_name,phone,id_number,address),loan_applications(loan_products(name))')
       .eq('business_id',currentUser.business_id).eq('status','active').order('overdue_days',{ascending:false});
     if(isOfficerOnly) loansQuery = loansQuery.eq('loan_officer_id', currentUser.id);
 
@@ -4760,7 +4867,7 @@ async function renderOverdue(opts){
 
     // ── 2. Missed instalments grouped by loan/client ──
     let missedHtml = '<div class="table-wrap"><table style="font-size:12px"><thead><tr>' +
-      '<th>Client</th><th>Phone</th><th>Loan #</th><th>Missed Inst.</th><th>Oldest Due</th><th>Total Due</th><th>Paid</th><th>Total Arrears</th><th>Loan Balance</th><th>Officer</th><th>Days Overdue</th><th>Actions</th>' +
+      '<th>Client</th><th>ID Number</th><th>Phone</th><th>Loan #</th><th>Missed Inst.</th><th>Oldest Due</th><th>Total Due</th><th>Paid</th><th>Total Arrears</th><th>Loan Balance</th><th>Officer</th><th>Days Overdue</th><th>Actions</th>' +
       '</tr></thead><tbody>';
     if(missedLoanRows.length){
       missedLoanRows.forEach(function(item){
@@ -4768,6 +4875,7 @@ async function renderOverdue(opts){
         var color=daysOld>90?'var(--accent-red)':daysOld>30?'var(--accent-orange)':'var(--accent-yellow)';
         missedHtml += '<tr>' +
           '<td><strong>'+(loan.loan_clients?.full_name||'-')+'</strong></td>' +
+          '<td>'+(loan.loan_clients?.id_number||'-')+'</td>' +
           '<td><a href="tel:'+(loan.loan_clients?.phone||'')+'" style="color:var(--accent-blue)">'+(loan.loan_clients?.phone||'-')+'</a></td>' +
           '<td>'+loan.loan_no+'</td>' +
           '<td style="text-align:center;font-weight:700">'+item.installmentNos+'</td>' +
@@ -4782,14 +4890,14 @@ async function renderOverdue(opts){
         '</tr>';
       });
     } else {
-      missedHtml += '<tr><td colspan="12" style="text-align:center;color:var(--text-secondary);padding:12px">No missed instalments</td></tr>';
+      missedHtml += '<tr><td colspan="13" style="text-align:center;color:var(--text-secondary);padding:12px">No missed instalments</td></tr>';
     }
     missedHtml += '</tbody></table></div>';
     const missedArrears = missedRows.reduce(function(s,r){return s+r.remaining;},0);
 
     // ── 3. Loan Summary table ──
     let summaryHtml = '<div class="table-wrap"><table style="font-size:12px"><thead><tr>' +
-      '<th>Client</th><th>Phone</th><th>Loan #</th><th>Loan Officer</th><th>Total Arrears</th><th>Days Overdue</th><th>Bucket</th><th>Actions</th>' +
+      '<th>Client</th><th>ID Number</th><th>Phone</th><th>Loan #</th><th>Loan Officer</th><th>Total Arrears</th><th>Days Overdue</th><th>Bucket</th><th>Actions</th>' +
       '</tr></thead><tbody>';
     if(overdueLoans.length){
       overdueLoans.forEach(function(l){
@@ -4800,6 +4908,7 @@ async function renderOverdue(opts){
         var officerName=(window._staffMap && l.loan_officer_id && window._staffMap[l.loan_officer_id])||'Unassigned';
         summaryHtml += '<tr>' +
           '<td><strong>'+(l.loan_clients?.full_name||'-')+'</strong></td>' +
+          '<td>'+(l.loan_clients?.id_number||'-')+'</td>' +
           '<td><a href="tel:'+(l.loan_clients?.phone||'')+'" style="color:var(--accent-blue)">'+(l.loan_clients?.phone||'-')+'</a></td>' +
           '<td>'+l.loan_no+'</td>' +
           '<td><span class="badge badge-gray" style="text-transform:capitalize">'+officerName+'</span></td>' +
@@ -4810,7 +4919,7 @@ async function renderOverdue(opts){
         '</tr>';
       });
     } else {
-      summaryHtml += '<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:12px">No overdue loans</td></tr>';
+      summaryHtml += '<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:12px">No overdue loans</td></tr>';
     }
     summaryHtml += '</tbody></table></div>';
 
@@ -4884,12 +4993,20 @@ function toggleSection(id){
   if(icon) icon.style.transform = isOpen ? '' : 'rotate(180deg)';
 }
 
+function patafixBranchLabel(){
+  return 'PataFix001';
+}
+
+function loanProductLabel(loan){
+  return loan?.loan_applications?.loan_products?.name||getAutoTier(Number(loan?.principal_amount||0));
+}
+
 function buildDuesTable(dueRows){
   // Only show unpaid/partial rows — exclude fully paid installments
   const filteredRows = (dueRows||[]).filter(function(r){return r.remaining>0;});
   if(!filteredRows.length) return '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px">✅ All installments for this date are paid</div>';
   var html = '<div class="table-wrap"><table style="font-size:12px"><thead><tr>';
-  html += '<th>Client</th><th>Phone</th><th>Loan #</th><th>Inst #</th><th>Amount Due</th><th>Paid</th><th>Remaining</th><th>Arrears</th><th>Loan Balance</th><th>Officer</th><th>Status</th><th></th>';
+  html += '<th>Branch</th><th>Client</th><th>ID Number</th><th>Phone</th><th>Address</th><th>Loan #</th><th>Loan Product</th><th>Due Date</th><th>Loan Officer</th><th>Principal</th><th>Inst #</th><th>Total Due</th><th>Amount Paid</th><th>Due Balance</th><th>Arrears</th><th>Maturity Date</th><th>Outstanding Loan Balance</th><th>Status</th><th>Actions</th>';
   html += '</tr></thead><tbody>';
   filteredRows.forEach(function(item){
     var loan=item.loan, s=item.s, remaining=item.remaining, paid=item.paid;
@@ -4905,16 +5022,23 @@ function buildDuesTable(dueRows){
       ? '<td style="color:var(--accent-red);font-weight:700">'+fmtMoney(arrears)+'</td>'
       : '<td><span style="color:var(--text-secondary)">—</span></td>';
     html += '<tr>' +
+      '<td>'+patafixBranchLabel()+'</td>' +
       '<td><strong>'+(loan.loan_clients?.full_name||'-')+'</strong></td>' +
+      '<td>'+(loan.loan_clients?.id_number||'-')+'</td>' +
       '<td><a href="tel:'+(loan.loan_clients?.phone||'')+'" style="color:var(--accent-blue)">'+(loan.loan_clients?.phone||'-')+'</a></td>' +
+      '<td>'+(loan.loan_clients?.address||'-')+'</td>' +
       '<td>'+loan.loan_no+'</td>' +
+      '<td>'+loanProductLabel(loan)+'</td>' +
+      '<td>'+fmtDate(s.due_date)+'</td>' +
+      '<td><span class="badge badge-gray" style="text-transform:capitalize">'+((window._staffMap && loan.loan_officer_id && window._staffMap[loan.loan_officer_id])||'Unassigned')+'</span></td>' +
+      '<td>'+fmtMoney(loan.principal_amount||0)+'</td>' +
       '<td style="text-align:center">#'+s.installment_no+'</td>' +
       '<td>'+fmtMoney(s.total_due)+'</td>' +
       '<td>'+fmtMoney(paid)+'</td>' +
       '<td style="color:'+(remaining>0?'var(--accent-red)':'var(--accent-green)')+';font-weight:600">'+fmtMoney(remaining)+'</td>' +
       arrearsCell +
+      '<td>'+fmtDate(loan.maturity_date)+'</td>' +
       '<td style="color:var(--accent-yellow);font-weight:700">'+fmtMoney(loanBalance)+'</td>' +
-      '<td><span class="badge badge-gray" style="text-transform:capitalize">'+((window._staffMap && loan.loan_officer_id && window._staffMap[loan.loan_officer_id])||'Unassigned')+'</span></td>' +
       '<td>'+badge+'</td>' +
       '<td>'+payBtn+'</td>' +
     '</tr>';
@@ -4987,23 +5111,32 @@ function downloadDuesExcel(){
   const dueRows=snap.dueRows||[];
   if(!dueRows.length){toast('No dues data to download','warning');return;}
   const sheet=dueRows.map(({loan,s,remaining,paid})=>({
-    'Date Range':rangeLabel,
+    'Branch':patafixBranchLabel(),
     'Client Name':loan.loan_clients?.full_name||'-',
+    'ID Number':loan.loan_clients?.id_number||'-',
     'Phone':loan.loan_clients?.phone||'-',
     'Address':loan.loan_clients?.address||'-',
     'Loan #':loan.loan_no,
-    'Loan Officer':(window._staffMap && loan.loan_officer_id) ? window._staffMap[loan.loan_officer_id] : 'Unassigned',
-    'Installment #':s.installment_no,
+    'Loan Product':loanProductLabel(loan),
     'Due Date':s.due_date,
-    'Amount Due (KES)':Number(s.total_due||0),
+    'Loan Officer':(window._staffMap && loan.loan_officer_id) ? window._staffMap[loan.loan_officer_id] : 'Unassigned',
+    'Principal (KES)':Number(loan.principal_amount||0),
+    'Installment #':s.installment_no,
+    'Total Due (KES)':Number(s.total_due||0),
     'Amount Paid (KES)':paid,
-    'Remaining (KES)':remaining,
+    'Due Balance (KES)':remaining,
     'Arrears (KES)':Number(loan._asof_arrears != null ? loan._asof_arrears : loan.arrears_amount||0),
-    'Loan Balance (KES)':Number(loan.outstanding_balance||0),
+    'Maturity Date':loan.maturity_date||'-',
+    'Outstanding Loan Balance (KES)':Number(loan.outstanding_balance||0),
     'Status':remaining===0?'Paid':paid>0?'Partial':'Unpaid'
   }));
+  const ws=XLSX.utils.json_to_sheet(sheet);
+  ws['!cols']=[
+    {wch:12},{wch:24},{wch:16},{wch:14},{wch:24},{wch:12},{wch:16},{wch:13},{wch:22},
+    {wch:15},{wch:13},{wch:15},{wch:18},{wch:17},{wch:15},{wch:14},{wch:29},{wch:12}
+  ];
   const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(sheet),sheetLabel);
+  XLSX.utils.book_append_sheet(wb,ws,sheetLabel);
   XLSX.writeFile(wb,'Dues_'+fileLabel+'.xlsx');
   toast('Dues report downloaded!','success');
 }
@@ -5016,6 +5149,7 @@ function downloadMissedExcel(){
   const sheet=missedLoanRows.map(({loan,installmentNos,oldestDue,totalDue,totalPaid,remaining,daysOld})=>({
     'Loan #':loan.loan_no,
     'Client Name':loan.loan_clients?.full_name||'-',
+    'ID Number':loan.loan_clients?.id_number||'-',
     'Phone':loan.loan_clients?.phone||'-',
     'Loan Officer':(window._staffMap && loan.loan_officer_id) ? window._staffMap[loan.loan_officer_id] : 'Unassigned',
     'Missed Installments':installmentNos,
@@ -5041,6 +5175,7 @@ function downloadArrearsSummaryExcel(){
   const sheet=overdueLoans.map(l=>({
     'Loan #':l.loan_no,
     'Client Name':l.loan_clients?.full_name||'-',
+    'ID Number':l.loan_clients?.id_number||'-',
     'Phone':l.loan_clients?.phone||'-',
     'Address':l.loan_clients?.address||'-',
     'Loan Officer':(window._staffMap && l.loan_officer_id) ? window._staffMap[l.loan_officer_id] : 'Unassigned',
@@ -5177,7 +5312,7 @@ async function loadReportData(id){
   if(id==='collection_daily'){
     const todayStr=today();
     const[{data:reps},{data:scheds},{data:staffList}]=await Promise.all([
-      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name))').eq('business_id',biz).eq('payment_date',todayStr),
+      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name,id_number,phone))').eq('business_id',biz).eq('payment_date',todayStr),
       sb('loan_schedules').select('*').eq('business_id',biz).eq('due_date',todayStr),
       sb('loan_staff').select('id,name').eq('business_id',biz)
     ]);
@@ -5191,12 +5326,12 @@ async function loadReportData(id){
       {label:'Date',value:today},{label:'Total Due Today',value:fmtMoney(due)},
       {label:'Total Collected',value:fmtMoney(collected)},{label:'Collection Rate',value:rate.toFixed(1)+'%'},
       {label:'Payments Count',value:filteredRepsDly.length}
-    ],rows:filteredRepsDly.map(r=>({'Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','Loan #':r.loans?.loan_no||'-','Amount (KES)':Number(r.amount||0),'Method':r.payment_method,'Reference':r.payment_reference||'-','Date':r.payment_date,'Loan Officer':r.loans?.loan_officer_id?staffMap[r.loans.loan_officer_id]||'-':'-'})),cols:['Receipt','Client','Loan #','Amount (KES)','Method','Reference','Date','Loan Officer']};
+    ],rows:filteredRepsDly.map(r=>({'Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','ID Number':r.loans?.loan_clients?.id_number||'-','Phone':r.loans?.loan_clients?.phone||'-','Loan #':r.loans?.loan_no||'-','Amount (KES)':Number(r.amount||0),'Method':r.payment_method,'Reference':r.payment_reference||'-','Date':r.payment_date,'Loan Officer':r.loans?.loan_officer_id?staffMap[r.loans.loan_officer_id]||'-':'-'})),cols:['Receipt','Client','ID Number','Phone','Loan #','Amount (KES)','Method','Reference','Date','Loan Officer']};
   }
   if(id==='collection_monthly'){
     const nowM=localISODate().slice(0,7);
     const[{data:reps},{data:scheds},{data:staffList}]=await Promise.all([
-      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name))').eq('business_id',biz).gte('payment_date',nowM+'-01'),
+      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name,id_number,phone))').eq('business_id',biz).gte('payment_date',nowM+'-01'),
       sb('loan_schedules').select('*').eq('business_id',biz).gte('due_date',nowM+'-01').lt('due_date',(()=>{const d=parseLocalDate(nowM+'-01');d.setMonth(d.getMonth()+1);return localISODate(d)})()),
       sb('loan_staff').select('id,name').eq('business_id',biz)
     ]);
@@ -5210,11 +5345,11 @@ async function loadReportData(id){
       {label:'Month',value:nowM},{label:'Total Due',value:fmtMoney(due)},
       {label:'Total Collected',value:fmtMoney(collected)},{label:'Collection Rate',value:rate.toFixed(1)+'%'},
       {label:'Payments Count',value:filteredRepsMth.length}
-    ],rows:filteredRepsMth.map(r=>({'Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','Loan #':r.loans?.loan_no||'-','Amount (KES)':Number(r.amount||0),'Method':r.payment_method,'Reference':r.payment_reference||'-','Date':r.payment_date,'Loan Officer':r.loans?.loan_officer_id?staffMap[r.loans.loan_officer_id]||'-':'-'})),cols:['Receipt','Client','Loan #','Amount (KES)','Method','Reference','Date','Loan Officer']};
+    ],rows:filteredRepsMth.map(r=>({'Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','ID Number':r.loans?.loan_clients?.id_number||'-','Phone':r.loans?.loan_clients?.phone||'-','Loan #':r.loans?.loan_no||'-','Amount (KES)':Number(r.amount||0),'Method':r.payment_method,'Reference':r.payment_reference||'-','Date':r.payment_date,'Loan Officer':r.loans?.loan_officer_id?staffMap[r.loans.loan_officer_id]||'-':'-'})),cols:['Receipt','Client','ID Number','Phone','Loan #','Amount (KES)','Method','Reference','Date','Loan Officer']};
   }
   if(id==='mpesa_payments'){
     const[{data:reps},{data:staffList}]=await Promise.all([
-      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name))').eq('business_id',biz).eq('payment_method','mpesa').order('payment_date',{ascending:false}),
+      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name,id_number,phone))').eq('business_id',biz).eq('payment_method','mpesa').order('payment_date',{ascending:false}),
       sb('loan_staff').select('id,name').eq('business_id',biz)
     ]);
     const staffMap={};(staffList||[]).forEach(s=>{staffMap[s.id]=s.name;});
@@ -5223,11 +5358,11 @@ async function loadReportData(id){
     const total=filteredRepsMpesa.reduce((s,r)=>s+Number(r.amount||0),0);
     return{title:'M-Pesa Payments Report',summary:[
       {label:'Total M-Pesa Transactions',value:filteredRepsMpesa.length},{label:'Total Amount',value:fmtMoney(total)}
-    ],rows:filteredRepsMpesa.map(r=>({'Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','Loan #':r.loans?.loan_no||'-','Amount (KES)':Number(r.amount||0),'M-Pesa Ref':r.payment_reference||'-','Date':r.payment_date,'Loan Officer':r.loans?.loan_officer_id?staffMap[r.loans.loan_officer_id]||'-':'-'})),cols:['Receipt','Client','Loan #','Amount (KES)','M-Pesa Ref','Date','Loan Officer']};
+    ],rows:filteredRepsMpesa.map(r=>({'Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','ID Number':r.loans?.loan_clients?.id_number||'-','Phone':r.loans?.loan_clients?.phone||'-','Loan #':r.loans?.loan_no||'-','Amount (KES)':Number(r.amount||0),'M-Pesa Ref':r.payment_reference||'-','Date':r.payment_date,'Loan Officer':r.loans?.loan_officer_id?staffMap[r.loans.loan_officer_id]||'-':'-'})),cols:['Receipt','Client','ID Number','Phone','Loan #','Amount (KES)','M-Pesa Ref','Date','Loan Officer']};
   }
   if(id==='repayment_perf'){
     const[{data:reps},{data:staffList}]=await Promise.all([
-      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name))').eq('business_id',biz).order('payment_date',{ascending:false}),
+      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name,id_number,phone))').eq('business_id',biz).order('payment_date',{ascending:false}),
       sb('loan_staff').select('id,name').eq('business_id',biz)
     ]);
     const staffMap={};(staffList||[]).forEach(s=>{staffMap[s.id]=s.name;});
@@ -5238,7 +5373,7 @@ async function loadReportData(id){
     return{title:'Repayment Performance Report',summary:[
       {label:'Total Payments',value:filteredRepsPerf.length},{label:'Total Collected',value:fmtMoney(total)},
       ...Object.entries(byMethod).map(([m,v])=>({label:`Via ${m}`,value:fmtMoney(v)}))
-    ],rows:filteredRepsPerf.map(r=>({'Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','Loan #':r.loans?.loan_no||'-','Amount (KES)':Number(r.amount||0),'Method':r.payment_method,'Reference':r.payment_reference||'-','Date':r.payment_date,'Loan Officer':r.loans?.loan_officer_id?staffMap[r.loans.loan_officer_id]||'-':'-'})),cols:['Receipt','Client','Loan #','Amount (KES)','Method','Reference','Date','Loan Officer']};
+    ],rows:filteredRepsPerf.map(r=>({'Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','ID Number':r.loans?.loan_clients?.id_number||'-','Phone':r.loans?.loan_clients?.phone||'-','Loan #':r.loans?.loan_no||'-','Amount (KES)':Number(r.amount||0),'Method':r.payment_method,'Reference':r.payment_reference||'-','Date':r.payment_date,'Loan Officer':r.loans?.loan_officer_id?staffMap[r.loans.loan_officer_id]||'-':'-'})),cols:['Receipt','Client','ID Number','Phone','Loan #','Amount (KES)','Method','Reference','Date','Loan Officer']};
   }
   if(id==='portfolio'){
     const[{data:loans},{data:staff}]=await Promise.all([
@@ -5347,8 +5482,8 @@ async function loadReportData(id){
   }
   if(id==='income'){
     const[{data:reps},{data:clients},{data:activeLoans}]=await Promise.all([
-      sb('loan_repayments').select('*,loans(principal_amount,total_interest,total_payable,loan_no)').eq('business_id',biz),
-      sb('loan_clients').select('id,full_name,created_at,notes').eq('business_id',biz),
+      sb('loan_repayments').select('*,loans(principal_amount,total_interest,total_payable,loan_no,loan_clients(full_name,id_number,phone))').eq('business_id',biz),
+      sb('loan_clients').select('id,full_name,id_number,phone,created_at,notes').eq('business_id',biz),
       sb('loans').select('id,client_id,principal_amount,total_interest,total_payable,loan_no,disbursement_date').eq('business_id',biz).order('disbursement_date',{ascending:true})
     ]);
     // For repayments missing interest_portion, derive it from the loan's interest ratio
@@ -5372,18 +5507,18 @@ async function loadReportData(id){
     const rows=[];
     (reps||[]).forEach(r=>{
       const iPortion=calcInterestPortion(r);
-      rows.push({'Source':'Repayment','Receipt':r.receipt_no,'Date':r.payment_date,'Interest (KES)':Number(iPortion.toFixed(2)),'Penalty (KES)':Number(r.penalty_portion||0),'Total (KES)':Number(r.amount||0),'Client':r.loans?.loan_no||'-'});
+      rows.push({'Source':'Repayment','Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','ID Number':r.loans?.loan_clients?.id_number||'-','Phone':r.loans?.loan_clients?.phone||'-','Loan #':r.loans?.loan_no||'-','Date':r.payment_date,'Interest (KES)':Number(iPortion.toFixed(2)),'Penalty (KES)':Number(r.penalty_portion||0),'Total (KES)':Number(r.amount||0)});
     });
-    (clients||[]).forEach(c=>{const firstLoan=firstLoanByClient[c.id];const amt=registrationFeeIncomeAmount(c, firstLoan);if(amt<=0)return;const date=registrationFeeIncomeDate(c, firstLoan);rows.push({'Source':'Registration Fee','Receipt':'REG-'+String(c.id).slice(0,8),'Date':date,'Interest (KES)':0,'Penalty (KES)':0,'Total (KES)':Number(amt||0),'Client':c.full_name});});
+    (clients||[]).forEach(c=>{const firstLoan=firstLoanByClient[c.id];const amt=registrationFeeIncomeAmount(c, firstLoan);if(amt<=0)return;const date=registrationFeeIncomeDate(c, firstLoan);rows.push({'Source':'Registration Fee','Receipt':'REG-'+String(c.id).slice(0,8),'Client':c.full_name,'ID Number':c.id_number||'-','Phone':c.phone||'-','Loan #':firstLoan?.loan_no||'-','Date':date,'Interest (KES)':0,'Penalty (KES)':0,'Total (KES)':Number(amt||0)});});
     return{title:'Income Report',summary:[
       {label:'Interest Collected',value:fmtMoney(totalInterest)},{label:'Penalties Collected',value:fmtMoney(totalPenalties)},
       {label:'Registration Fees',value:fmtMoney(totalReg)},{label:'Processing Fees',value:fmtMoney(totalProc)},
       {label:'Grand Total Revenue',value:fmtMoney(totalInterest+totalPenalties+totalReg+totalProc)}
-    ],rows,cols:['Source','Receipt','Client','Date','Interest (KES)','Penalty (KES)','Total (KES)']};
+    ],rows,cols:['Source','Receipt','Client','ID Number','Phone','Loan #','Date','Interest (KES)','Penalty (KES)','Total (KES)']};
   }
   if(id==='portfolio_summary'){
     const[{data:loans},{data:clients}]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name)').eq('business_id',biz).eq('status','active'),
+      sb('loans').select('*,loan_clients(full_name,id_number,phone)').eq('business_id',biz).eq('status','active'),
       sb('loan_clients').select('*').eq('business_id',biz)
     ]);
     const withArrears=(loans||[]).filter(l=>Number(l.arrears_amount||0)>0);
@@ -5402,6 +5537,8 @@ async function loadReportData(id){
       {label:'Clean Portfolio',value:(loans||[]).length-withArrears.length}
     ],rows:(loans||[]).map(l=>({
       'Client':l.loan_clients?.full_name||'-',
+      'ID Number':l.loan_clients?.id_number||'-',
+      'Phone':l.loan_clients?.phone||'-',
       'Loan #':l.loan_no,
       'Principal (KES)':Number(l.principal_amount||0),
       'Interest (KES)':Number(l.total_interest||0),
@@ -5411,7 +5548,7 @@ async function loadReportData(id){
       'Arrears (KES)':Number(l.arrears_amount||0),
       'Overdue Days':l.overdue_days,
       'Status':Number(l.arrears_amount||0)>0?'Has Arrears':'Clean'
-    })),cols:['Client','Loan #','Principal (KES)','Interest (KES)','Total P+I (KES)','Outstanding (KES)','Total Paid (KES)','Arrears (KES)','Overdue Days','Status']};
+    })),cols:['Client','ID Number','Phone','Loan #','Principal (KES)','Interest (KES)','Total P+I (KES)','Outstanding (KES)','Total Paid (KES)','Arrears (KES)','Overdue Days','Status']};
   }
   return null;
 }
