@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-04-payment-routing-v26';
+const APP_VERSION = 'patafix-2026-08-04-suspense-match-v27';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -4282,7 +4282,7 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
         date:today(),reference:transId||receiptNo,paymentMethod:'mpesa',
         description:`Excess repayment from loan ${loan.loan_no}`,sourceKey:`excess:${receiptNo}`
       }).catch(e=>{console.error('M-Pesa excess wallet deposit failed:',e.message);toast(e.message,'warning');});
-      await sb('journal_entries').insert({
+      const{error:mpesaExcessJournalError}=await sb('journal_entries').insert({
         id:crypto.randomUUID(),
         business_id:currentUser?.business_id,
         date:today(),
@@ -4292,7 +4292,8 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
         credit:'Charges & Excess Account',
         amount:mpExcessAmount,
         synced:false
-      }).catch(e=>console.warn('M-Pesa excess journal failed:',e.message));
+      });
+      if(mpesaExcessJournalError)console.warn('M-Pesa excess journal failed:',mpesaExcessJournalError.message);
     }
     await sb('mpesa_callback_queue').update({confirmed:true,loan_id:loan.id}).eq('id',queueId);
     await audit('mpesa_payment_confirmed','loan_repayments',null,null,rec);
@@ -4592,7 +4593,7 @@ async function savePayment(){
         date:paymentDate,reference:$('#payRef').value||receiptNo,paymentMethod:$('#payMethod').value||'cash',
         description:`Excess repayment from loan ${loan.loan_no}`,sourceKey:`excess:${receiptNo}`
       }).catch(e=>{console.error('Manual excess wallet deposit failed:',e.message);toast(e.message,'warning');});
-      await sb('journal_entries').insert({
+      const{error:manualExcessJournalError}=await sb('journal_entries').insert({
         id:crypto.randomUUID(),
         business_id:currentUser?.business_id,
         date:paymentDate,
@@ -4602,7 +4603,8 @@ async function savePayment(){
         credit:'Charges & Excess Account',
         amount:excessAmount,
         synced:false
-      }).catch(e=>console.warn('Manual excess journal failed:',e.message));
+      });
+      if(manualExcessJournalError)console.warn('Manual excess journal failed:',manualExcessJournalError.message);
     }
 
     await audit('payment_recorded','loan_repayments',null,null,rec);
@@ -6479,7 +6481,7 @@ async function confirmSuspenseChargeMatch(entryId, entryType, amount, ref=''){
       description:`${typeLabel} moved from suspense${notes?' | '+notes:''}`,
       sourceKey
     });
-    await sb('journal_entries').insert({
+    const{error:suspenseChargeJournalError}=await sb('journal_entries').insert({
       id:crypto.randomUUID(),
       business_id:currentUser.business_id,
       date:today(),
@@ -6489,7 +6491,8 @@ async function confirmSuspenseChargeMatch(entryId, entryType, amount, ref=''){
       credit:'Charges & Excess Account',
       amount,
       synced:false
-    }).catch(e=>console.warn('Suspense charge journal failed:',e.message));
+    });
+    if(suspenseChargeJournalError)console.warn('Suspense charge journal failed:',suspenseChargeJournalError.message);
 
     if(entryType==='mpesa'){
       await sb('mpesa_callback_queue').update({confirmed:true}).eq('id',entryId);
@@ -6675,7 +6678,7 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
         date:paymentDate,reference:ref||receiptNo,paymentMethod:method,
         description:`Excess suspense payment from loan ${loan.loan_no}`,sourceKey:`excess:${receiptNo}`
       }).catch(e=>{console.error('Suspense excess wallet deposit failed:',e.message);toast(e.message,'warning');});
-      await sb('journal_entries').insert({
+      const{error:suspenseExcessJournalError}=await sb('journal_entries').insert({
         id:crypto.randomUUID(),
         business_id:currentUser?.business_id,
         date:paymentDate,
@@ -6685,7 +6688,8 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
         credit:'Charges & Excess Account',
         amount:excessAmount,
         synced:false
-      }).catch(e=>console.warn('Excess account journal failed:',e.message));
+      });
+      if(suspenseExcessJournalError)console.warn('Excess account journal failed:',suspenseExcessJournalError.message);
     }
 
     // Mark suspense entry as matched
@@ -6708,7 +6712,7 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
     }
 
     // Record in journal_entries for accounting
-    await sb('journal_entries').insert({
+    const{error:suspenseJournalError}=await sb('journal_entries').insert({
       id: crypto.randomUUID(),
       business_id:currentUser.business_id,
       date:today(),
@@ -6718,7 +6722,8 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
       credit:'Suspense Account',
       amount:amountApplied,
       synced:false
-    }).catch(e=>console.warn('Journal entry failed:',e.message));
+    });
+    if(suspenseJournalError)console.warn('Journal entry failed:',suspenseJournalError.message);
 
     await audit('suspense_matched','loan_repayments',loanId,null,{ref,amount,amount_applied:amountApplied,excess_amount:excessAmount,loan_no:loan.loan_no});
     const msg = minIntResult.adjusted
