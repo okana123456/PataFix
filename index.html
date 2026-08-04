@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-04-suspense-match-v27';
+const APP_VERSION = 'patafix-2026-08-04-suspense-reconcile-v28';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -6284,7 +6284,7 @@ async function renderSuspense(){
           <div><div style="font-size:10px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px">Unmatched Payments</div><div style="font-size:22px;font-weight:800;color:var(--accent-yellow)">${queue.length+pendingManualSuspense.length}</div></div>
           <div><div style="font-size:10px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px">Total Suspense Amount</div><div style="font-size:22px;font-weight:800;color:var(--accent-yellow)">${fmtMoney(totalSuspense)}</div></div>
         </div>
-        <p style="font-size:11px;color:var(--text-secondary);margin-top:6px">These are M-Pesa payments received that could not be automatically matched. Match repayments to a loan, or move upfront registration/processing fees to the correct client's Charges account.</p>
+        <p style="font-size:11px;color:var(--text-secondary);margin-top:6px">These are M-Pesa payments received that could not be automatically matched. Match repayments to a loan, or move upfront registration/processing fees to the correct client's Charges account. Match each M-Pesa reference once using whichever pending row is shown; PataFix will close its linked Daraja and Suspense records together.</p>
       </div>
 
       <h3 class="dash-h3">Unmatched M-Pesa (Daraja Queue)</h3>
@@ -6309,7 +6309,7 @@ async function renderSuspense(){
         </table>
       </div>
 
-      <h3 class="dash-h3">Manual Suspense Entries</h3>
+      <h3 class="dash-h3">Suspense Matching Records</h3>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Date</th><th>Reference</th><th>Description</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead>
@@ -6322,7 +6322,7 @@ async function renderSuspense(){
                 <td><strong style="color:var(--accent-green)">${fmtMoney(r.amount)}</strong></td>
                 <td>${!r.resolved?'<span class="badge badge-yellow">Pending</span>':'<span class="badge badge-green">Matched</span>'}</td>
                 <td>${!r.resolved?`<div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}')">Match Loan</button><button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}','${r.account_number||''}','${r.payer_name||''}')">Match Charges</button></div>`:'<span style="font-size:11px;color:var(--text-secondary)">Done</span>'}</td>
-              </tr>`).join(''):'<tr><td colspan="6"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No manual suspense entries waiting to be matched</div></td></tr>'}
+              </tr>`).join(''):'<tr><td colspan="6"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No suspense records waiting to be matched</div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -6415,6 +6415,32 @@ function filterSuspenseChargeClients(q){
   list.innerHTML=renderSuspenseChargeClientRows(filtered);
 }
 
+async function resolveLinkedSuspenseRecords(entryId,entryType,ref,{loanId=null,repaymentId=null}={}){
+  const resolvedAt=new Date().toISOString();
+  const resolvedBy=currentUser?.id||null;
+  const queueUpdate={confirmed:true};
+  if(loanId)queueUpdate.loan_id=loanId;
+  if(repaymentId)queueUpdate.repayment_id=repaymentId;
+
+  if(entryType==='mpesa'){
+    const{error}=await sb('mpesa_callback_queue').update(queueUpdate).eq('id',entryId);
+    if(error)throw error;
+  }else{
+    const{error}=await sb('unmatched_payments').update({resolved:true,resolved_at:resolvedAt,resolved_by:resolvedBy}).eq('id',entryId);
+    if(error)throw error;
+  }
+
+  if(ref){
+    const linkedResults=await Promise.all([
+      sb('mpesa_callback_queue').update(queueUpdate).eq('trans_id',ref),
+      sb('unmatched_payments').update({resolved:true,resolved_at:resolvedAt,resolved_by:resolvedBy})
+        .eq('business_id',currentUser.business_id).eq('mpesa_reference',ref)
+    ]);
+    const linkedError=linkedResults.find(result=>result?.error)?.error;
+    if(linkedError)throw linkedError;
+  }
+}
+
 async function openSuspenseChargeModal(entryId, entryType, amount, ref='', account='', payer=''){
   if(!(window._suspenseChargeClients||[]).length){
     const{data:clients}=await sb('loan_clients')
@@ -6494,22 +6520,7 @@ async function confirmSuspenseChargeMatch(entryId, entryType, amount, ref=''){
     });
     if(suspenseChargeJournalError)console.warn('Suspense charge journal failed:',suspenseChargeJournalError.message);
 
-    if(entryType==='mpesa'){
-      await sb('mpesa_callback_queue').update({confirmed:true}).eq('id',entryId);
-      if(ref){
-        await sb('unmatched_payments').update({
-          resolved:true,
-          resolved_at:new Date().toISOString(),
-          resolved_by:currentUser.id
-        }).eq('business_id',currentUser.business_id).eq('mpesa_reference',ref);
-      }
-    }else{
-      await sb('unmatched_payments').update({
-        resolved:true,
-        resolved_at:new Date().toISOString(),
-        resolved_by:currentUser.id
-      }).eq('id',entryId);
-    }
+    await resolveLinkedSuspenseRecords(entryId,entryType,ref);
 
     await audit('suspense_moved_to_charges','client_charge_transactions',clientId,null,{ref,amount,type,client:client?.full_name||''});
     toast(`Moved ${fmtMoney(amount)} to ${client?.full_name||'client'} Charges account`,'success');
@@ -6692,24 +6703,8 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
       if(suspenseExcessJournalError)console.warn('Excess account journal failed:',suspenseExcessJournalError.message);
     }
 
-    // Mark suspense entry as matched
-    if(entryType==='mpesa'){
-      await sb('mpesa_callback_queue').update({confirmed:true,loan_id:loanId,repayment_id:repayment?.id||null}).eq('id',entryId);
-      if(ref){
-        await sb('unmatched_payments').update({
-          resolved:true,
-          resolved_at:new Date().toISOString(),
-          resolved_by:currentUser.id
-        }).eq('business_id',currentUser.business_id).eq('mpesa_reference',ref);
-      }
-    } else {
-      // Mark unmatched_payments row as resolved
-      await sb('unmatched_payments').update({
-        resolved:true,
-        resolved_at:new Date().toISOString(),
-        resolved_by:currentUser.id
-      }).eq('id',entryId);
-    }
+    // Close both the raw Daraja row and any linked manual suspense row.
+    await resolveLinkedSuspenseRecords(entryId,entryType,ref,{loanId,repaymentId:repayment?.id||null});
 
     // Record in journal_entries for accounting
     const{error:suspenseJournalError}=await sb('journal_entries').insert({
