@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-04-suspense-reconcile-v28';
+const APP_VERSION = 'patafix-2026-08-04-charge-duplicate-guard-v29';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -6154,7 +6154,7 @@ async function openClientChargePaymentModal(preselectedClientId=''){
       <div class="form-group"><label>Notes</label><textarea class="textarea" id="chargeNotes" placeholder="Optional notes"></textarea></div>
       <div class="modal-actions">
         <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveClientChargePayment()">Save Charge Payment</button>
+        <button class="btn btn-primary" id="btnSaveChargePayment" onclick="saveClientChargePayment()">Save Charge Payment</button>
       </div>
     `);
     if(preselectedClientId)selectChargeClient(preselectedClientId);
@@ -6221,31 +6221,58 @@ async function saveClientChargePayment(){
   if(!ref)return toast('Enter the M-Pesa code or payment reference','warning');
   const client=(window._chargeClients||[]).find(c=>c.id===clientId);
   const typeLabel=type==='registration'?'Registration Fee':type==='other'?'Other Charge':'Processing/Application Fee';
+  const btn=document.getElementById('btnSaveChargePayment');
+  const oldBtnText=btn?.textContent||'Save Charge Payment';
+  if(btn){btn.disabled=true;btn.textContent='Saving...';}
   try{
-    const sourceKey='charge-deposit:'+crypto.randomUUID();
-    await depositClientChargeWallet({
-      clientId,amount,transactionType:'deposit',chargeType:type,date,reference:ref,
-      paymentMethod:method,description:`${typeLabel} payment deposited${notes?' | '+notes:''}`,sourceKey
-    });
-    const journalId=crypto.randomUUID();
-    const{error:journalError}=await sb('journal_entries').insert({
-      id:journalId,
-      business_id:currentUser.business_id,
-      date,
-      ref,
-      description:`${typeLabel} wallet deposit by ${client?.full_name||'client'} | Client ID: ${clientId}${notes?' | '+notes:''}`,
-      debit:method==='mpesa'?'M-Pesa':method==='bank'?'Bank':'Cash',
-      credit:'Charges & Excess Account',
-      amount,
-      synced:false
-    });
-    await audit('client_charge_payment_recorded','client_charge_transactions',clientId,null,{type,amount,ref,method,client:client?.full_name||''});
-    toast(journalError?'Charge deposited, but its accounting journal entry needs attention.':'Client charge payment deposited','success');
+    const roundedAmount=Number(amount.toFixed(2));
+    const normalizedRef=ref.toUpperCase().replace(/\s+/g,' ').trim();
+    const{data:existing,error:existingError}=await sb('client_charge_transactions')
+      .select('id').eq('business_id',currentUser.business_id).eq('client_id',clientId)
+      .eq('transaction_type','deposit').eq('charge_type',type).eq('amount',roundedAmount)
+      .ilike('reference',normalizedRef).limit(1).maybeSingle();
+    if(existingError)throw existingError;
+
+    let duplicate=!!existing;
+    if(!duplicate){
+      const sourceKey=`charge-deposit:${clientId}:${type}:${roundedAmount.toFixed(2)}:${normalizedRef}`;
+      const depositResult=await depositClientChargeWallet({
+        clientId,amount:roundedAmount,transactionType:'deposit',chargeType:type,date,reference:ref,
+        paymentMethod:method,description:`${typeLabel} payment deposited${notes?' | '+notes:''}`,sourceKey
+      });
+      duplicate=!!depositResult?.duplicate;
+    }
+
+    const journalDescription=`${typeLabel} wallet deposit by ${client?.full_name||'client'} | Client ID: ${clientId}${notes?' | '+notes:''}`;
+    const{data:existingJournal,error:journalCheckError}=await sb('journal_entries').select('id')
+      .eq('business_id',currentUser.business_id).eq('ref',ref).eq('amount',roundedAmount)
+      .eq('credit','Charges & Excess Account').ilike('description',`%Client ID: ${clientId}%`)
+      .limit(1).maybeSingle();
+    if(journalCheckError)throw journalCheckError;
+
+    let journalError=null;
+    if(!existingJournal){
+      const journalResult=await sb('journal_entries').insert({
+        id:crypto.randomUUID(),
+        business_id:currentUser.business_id,
+        date,
+        ref,
+        description:journalDescription,
+        debit:method==='mpesa'?'M-Pesa':method==='bank'?'Bank':'Cash',
+        credit:'Charges & Excess Account',
+        amount:roundedAmount,
+        synced:false
+      });
+      journalError=journalResult.error;
+    }
+    if(!duplicate)await audit('client_charge_payment_recorded','client_charge_transactions',clientId,null,{type,amount:roundedAmount,ref,method,client:client?.full_name||''});
+    toast(duplicate?'This exact charge payment was already recorded. No duplicate was added.':journalError?'Charge deposited, but its accounting journal entry needs attention.':'Client charge payment deposited',duplicate?'warning':'success');
     closeModal();
     window._chargesExcessData=null;
     if(window._chargePaymentReturnClient)openChargesClientAccount(window._chargePaymentReturnClient,'charges');
     else renderChargesExcessAccount();
   }catch(e){toast(e.message,'error');}
+  finally{if(btn){btn.disabled=false;btn.textContent=oldBtnText;}}
 }
 
 // ═══ SUSPENSE ACCOUNT ═══
