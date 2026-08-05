@@ -19,9 +19,11 @@ function digits(value: unknown) {
 }
 
 function phoneVariants(value: unknown) {
-  const raw = digits(value);
+  const original = String(value || "").trim();
+  if (/[xX*•]/.test(original)) return [];
+  const raw = digits(original);
   const out = new Set<string>();
-  if (!raw) return [];
+  if (raw.length < 9 || raw.length > 15) return [];
   out.add(raw);
   if (raw.length >= 9) out.add(raw.slice(-9));
   if (raw.length === 12 && raw.startsWith("254")) out.add(`0${raw.slice(3)}`);

@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-04-charge-duplicate-guard-v29';
+const APP_VERSION = 'patafix-2026-08-05-payee-number-v30';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -664,7 +664,17 @@ function clientAvatarHtml(client, large=false){
 function paymentPhoneHtml(row){
   const phone = row?.msisdn || row?.payer_phone || row?.phone_number || row?.phone || '';
   const clean = String(phone || '').trim();
-  return clean ? `<a href="tel:${escapeHtml(clean)}" style="color:var(--accent-blue);font-weight:700">${escapeHtml(clean)}</a>` : '<span style="color:var(--text-secondary)">No phone</span>';
+  if(!clean)return '<span style="color:var(--text-secondary)">Not supplied</span>';
+  const digits=clean.replace(/\D/g,'');
+  const hasMask=/[xX*•]/.test(clean);
+  const plausiblePhone=/^[+\d\s()-]+$/.test(clean)&&digits.length>=9&&digits.length<=15;
+  if(hasMask){
+    return `<span style="font-weight:700">${escapeHtml(clean)}</span><br><span class="badge badge-yellow">Masked by Safaricom</span>`;
+  }
+  if(!plausiblePhone){
+    return '<span style="color:var(--text-secondary)">Protected/unavailable</span>';
+  }
+  return `<a href="tel:${escapeHtml(clean)}" style="color:var(--accent-blue);font-weight:700">${escapeHtml(clean)}</a>`;
 }
 function updateCachedClientPhoto(clientId, photoPath){
   if(Array.isArray(cachedData.clients)){
@@ -4146,7 +4156,7 @@ async function renderRepayments(page=1){
       </div>
       ${myQueue.length>0?`<div class="card" style="margin-bottom:16px;border-color:var(--accent-yellow)"><h3 style="font-size:14px;margin-bottom:8px;color:var(--accent-yellow)">Pending M-Pesa Confirmations (${myQueue.length})</h3>
         <div class="table-wrap"><table><thead><tr><th>Trans ID</th><th>Amount</th><th>Phone</th><th>Account Ref</th><th>Time</th><th>Actions</th></tr></thead><tbody>
-        ${myQueue.map(q=>`<tr><td>${escapeHtml(q.trans_id||'-')}</td><td>${fmtMoney(q.trans_amount)}</td><td>${paymentPhoneHtml(q)}</td><td>${escapeHtml(q.bill_ref_number||'-')}</td><td>${fmtDateTime(q.created_at)}</td><td>${canPay?`<button class="btn btn-success btn-sm" onclick="confirmMpesaPayment('${q.id}','${q.msisdn||q.bill_ref_number||''}',${q.trans_amount},'${q.trans_id}')">Confirm</button> <button class="btn btn-outline btn-sm" onclick="dismissMpesaPayment('${q.id}')">Dismiss</button>`:''}</td></tr>`).join('')}
+        ${myQueue.map(q=>`<tr><td>${escapeHtml(q.trans_id||'-')}</td><td>${fmtMoney(q.trans_amount)}</td><td>${paymentPhoneHtml(q)}</td><td>${escapeHtml(q.bill_ref_number||'-')}</td><td>${fmtDateTime(q.created_at)}</td><td>${canPay?`<button class="btn btn-success btn-sm" onclick="confirmMpesaPayment('${q.id}','${q.bill_ref_number||q.msisdn||''}',${q.trans_amount},'${q.trans_id}')">Confirm</button> <button class="btn btn-outline btn-sm" onclick="dismissMpesaPayment('${q.id}')">Dismiss</button>`:''}</td></tr>`).join('')}
         </tbody></table></div></div>`:''}
       <div class="table-wrap"><table><thead><tr><th>Receipt</th><th>Client</th><th>ID Number</th><th>Phone</th><th>Loan #</th><th>Type</th><th>Reference</th><th>Amount (KES)</th><th>Balance Remaining</th><th>Method</th><th>Date & Time</th><th>Actions</th></tr></thead><tbody>
       ${p.items.map(r=>{
@@ -4209,9 +4219,15 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
   try{
     const refRaw = String(billRef||'').trim();
     if(!refRaw) return toast('M-Pesa account reference is empty','warning');
-    const phoneRefs = _phoneVariants(refRaw);
     let client = null;
+    const idRef=refRaw.replace(/\D/g,'');
+    if(idRef){
+      const{data:byId}=await sb('loan_clients').select('id').eq('business_id',currentUser.business_id).eq('id_number',idRef).maybeSingle();
+      if(byId)client=byId;
+    }
+    const phoneRefs = _phoneVariants(refRaw);
     for(const ph of phoneRefs){
+      if(client)break;
       const{data:byPhone}=await sb('loan_clients').select('id').eq('business_id', currentUser.business_id).eq('phone',ph).maybeSingle();
       if(byPhone){ client = byPhone; break; }
     }
@@ -6317,7 +6333,7 @@ async function renderSuspense(){
       <h3 class="dash-h3">Unmatched M-Pesa (Daraja Queue)</h3>
       <div class="table-wrap" style="margin-bottom:14px">
         <table>
-          <thead><tr><th>Date</th><th>M-Pesa Ref</th><th>Phone</th><th>Account Ref</th><th>Amount</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Date</th><th>M-Pesa Ref</th><th>Payee Number</th><th>Account Ref</th><th>Amount</th><th>Actions</th></tr></thead>
           <tbody>
             ${queue.length?queue.map(q=>`
               <tr>
@@ -6339,17 +6355,19 @@ async function renderSuspense(){
       <h3 class="dash-h3">Suspense Matching Records</h3>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Date</th><th>Reference</th><th>Description</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Date</th><th>Reference</th><th>Payee</th><th>Payee Number</th><th>Account Ref</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>
             ${pendingManualSuspense.length?pendingManualSuspense.map(r=>`
               <tr>
                 <td>${fmtDate(r.created_at)}</td>
                 <td>${r.mpesa_reference||r.invoice_id||'-'}</td>
-                <td>${r.payer_name||'-'} · ${r.payer_phone||'-'} · Acct: ${r.account_number||'-'}</td>
+                <td>${escapeHtml(r.payer_name||'-')}</td>
+                <td>${paymentPhoneHtml(r)}</td>
+                <td>${escapeHtml(r.account_number||'-')}</td>
                 <td><strong style="color:var(--accent-green)">${fmtMoney(r.amount)}</strong></td>
                 <td>${!r.resolved?'<span class="badge badge-yellow">Pending</span>':'<span class="badge badge-green">Matched</span>'}</td>
                 <td>${!r.resolved?`<div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}')">Match Loan</button><button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}','${r.account_number||''}','${r.payer_name||''}')">Match Charges</button></div>`:'<span style="font-size:11px;color:var(--text-secondary)">Done</span>'}</td>
-              </tr>`).join(''):'<tr><td colspan="6"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No suspense records waiting to be matched</div></td></tr>'}
+              </tr>`).join(''):'<tr><td colspan="8"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No suspense records waiting to be matched</div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -7842,9 +7860,11 @@ function _normPhone(p){
   return d;
 }
 function _phoneVariants(p){
-  const d=_str(p).replace(/\D/g,'');
+  const raw=_str(p);
+  if(/[xX*•]/.test(raw))return [];
+  const d=raw.replace(/\D/g,'');
   const out=new Set();
-  if(!d)return [];
+  if(d.length<9||d.length>15)return [];
   out.add(d);
   if(d.length>=9)out.add(d.slice(-9));
   if(d.length===12&&d.startsWith('254'))out.add('0'+d.slice(3));
