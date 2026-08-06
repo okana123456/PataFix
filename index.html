@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-05-payee-number-v30';
+const APP_VERSION = 'patafix-2026-08-06-charges-excel-reports-v32';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -5990,6 +5990,209 @@ function chargesExcessTypeBadge(type){
   return `<span class="badge badge-green">${escapeHtml(type)}</span>`;
 }
 
+function chargesExcessFilterState(){
+  if(!window._chargesExcessFilters){
+    window._chargesExcessFilters={period:'all',balance:'all',from:'',to:'',search:''};
+  }
+  return window._chargesExcessFilters;
+}
+
+function chargesExcessDateRange(state=chargesExcessFilterState()){
+  const end=today();
+  if(state.period==='today')return{from:end,to:end,label:'Today'};
+  if(state.period==='week'){
+    const d=new Date(end+'T12:00:00');
+    const mondayOffset=(d.getDay()+6)%7;
+    d.setDate(d.getDate()-mondayOffset);
+    return{from:localISODate(d),to:end,label:'This Week'};
+  }
+  if(state.period==='month')return{from:end.slice(0,7)+'-01',to:end,label:'This Month'};
+  if(state.period==='custom'){
+    return{from:state.from||'',to:state.to||'',label:`Custom ${state.from||'start'} to ${state.to||'end'}`};
+  }
+  return{from:'',to:'',label:'All Time'};
+}
+
+function chargesExcessRowDate(row){
+  return String(row?.date||row?.transaction_date||row?.created_at||'').slice(0,10);
+}
+
+function chargesExcessDateMatches(row,range){
+  const date=chargesExcessRowDate(row);
+  if(range.from&&(!date||date<range.from))return false;
+  if(range.to&&(!date||date>range.to))return false;
+  return true;
+}
+
+function onChargesExcessPeriodChange(){
+  const period=document.getElementById('chargesPeriod')?.value||'all';
+  const custom=document.getElementById('chargesCustomDates');
+  if(custom)custom.style.display=period==='custom'?'grid':'none';
+  applyChargesExcessFilters();
+}
+
+function applyChargesExcessFilters(){
+  const state=chargesExcessFilterState();
+  state.period=document.getElementById('chargesPeriod')?.value||state.period||'all';
+  state.balance=document.getElementById('chargesBalanceFilter')?.value||state.balance||'all';
+  state.from=document.getElementById('chargesDateFrom')?.value||'';
+  state.to=document.getElementById('chargesDateTo')?.value||'';
+  state.search=(document.getElementById('chargesExcessSearch')?.value||'').toLowerCase().trim();
+  const range=chargesExcessDateRange(state);
+  let visible=0;
+  document.querySelectorAll('.charges-excess-row').forEach(row=>{
+    const date=String(row.dataset.date||'');
+    const matchesDate=(!range.from||date>=range.from)&&(!range.to||date<=range.to);
+    const matchesBalance=state.balance!=='unused'||Number(row.dataset.currentBalance||0)>0.009;
+    const matchesSearch=!state.search||String(row.dataset.search||'').includes(state.search);
+    const show=matchesDate&&matchesBalance&&matchesSearch;
+    row.style.display=show?'':'none';
+    if(show)visible++;
+  });
+  const summary=document.getElementById('chargesFilterSummary');
+  if(summary)summary.textContent=`${visible} transaction${visible===1?'':'s'} shown | ${range.label}${state.balance==='unused'?' | Unused balances only':''}`;
+}
+
+function downloadChargesExcessActivityExcel(){
+  if(typeof XLSX==='undefined')return toast('Excel library is still loading. Please retry.','warning');
+  const data=window._chargesExcessData;
+  if(!data)return toast('Charges account data is not ready','warning');
+  applyChargesExcessFilters();
+  const state=chargesExcessFilterState();
+  const range=chargesExcessDateRange(state);
+  if(state.period==='custom'&&range.from&&range.to&&range.from>range.to)return toast('Custom start date cannot be after the end date','warning');
+
+  const exportRows=(data.rows||[]).filter(row=>{
+    if(!chargesExcessDateMatches(row,range))return false;
+    const search=[row._clientName,row._clientPhone,row._refText,row._loanNo,row._type,row.description,row.ref].join(' ').toLowerCase();
+    return !state.search||search.includes(state.search);
+  }).sort((a,b)=>String(b.date||b.created_at||'').localeCompare(String(a.date||a.created_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||'')));
+  if(!exportRows.length)return toast(`No charges or excess activity found for ${range.label}`,'info');
+
+  const headers=['Date','Client','ID Number','Phone','Transaction Type','Loan Number','M-Pesa / Reference','Amount Paid (KES)','Used as Charge (KES)','Client Balance After Entry (KES)','Description'];
+  const aoa=[
+    ['PataFix - Charges & Excess Account Activity'],
+    [`Period: ${range.label}`],
+    [`Generated: ${new Date().toLocaleString('en-KE')}`],
+    headers,
+    ...exportRows.map(row=>{
+      const client=data.clientById?.[row._clientId]||{};
+      return [chargesExcessRowDate(row),row._clientName||'Unknown Client',client.id_number||'',row._clientPhone||client.phone||'',row._type||'',row._loanNo||'',row._refText||'',Number(row._amountIn||0),Number(row._amountUsed||0),Number(row._balance||0),row.description||''];
+    }),
+    ['TOTALS','','','','','','',
+      exportRows.reduce((sum,row)=>sum+Number(row._amountIn||0),0),
+      exportRows.reduce((sum,row)=>sum+Number(row._amountUsed||0),0),'','']
+  ];
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges']=[XLSX.utils.decode_range('A1:K1'),XLSX.utils.decode_range('A2:K2'),XLSX.utils.decode_range('A3:K3')];
+  ws['!cols']=[{wch:13},{wch:27},{wch:15},{wch:16},{wch:28},{wch:15},{wch:22},{wch:20},{wch:23},{wch:29},{wch:42}];
+  ws['!autofilter']={ref:`A4:K${4+exportRows.length}`};
+  ws['!freeze']={xSplit:0,ySplit:4,topLeftCell:'A5',activePane:'bottomLeft',state:'frozen'};
+  const titleStyle={font:{bold:true,color:{rgb:'FFFFFF'},sz:16},fill:{fgColor:{rgb:'7C2DFF'}},alignment:{horizontal:'center'}};
+  const metaStyle={font:{bold:true,color:{rgb:'2B174D'}},fill:{fgColor:{rgb:'FFF1A8'}},alignment:{horizontal:'left'}};
+  const headerStyle={font:{bold:true,color:{rgb:'FFFFFF'}},fill:{fgColor:{rgb:'087F5B'}},alignment:{horizontal:'center',wrapText:true}};
+  const totalStyle={font:{bold:true,color:{rgb:'2B174D'}},fill:{fgColor:{rgb:'BDF4D5'}}};
+  if(ws.A1)ws.A1.s=titleStyle;
+  if(ws.A2)ws.A2.s=metaStyle;
+  if(ws.A3)ws.A3.s=metaStyle;
+  headers.forEach((_,col)=>{const cell=ws[XLSX.utils.encode_cell({r:3,c:col})];if(cell)cell.s=headerStyle;});
+  for(let row=4;row<4+exportRows.length;row++){
+    for(let col=7;col<=9;col++){
+      const cell=ws[XLSX.utils.encode_cell({r:row,c:col})];
+      if(cell)cell.z='#,##0.00';
+    }
+  }
+  const totalRow=4+exportRows.length;
+  for(let col=0;col<headers.length;col++){
+    const cell=ws[XLSX.utils.encode_cell({r:totalRow,c:col})];
+    if(cell){cell.s=totalStyle;if(col>=7&&col<=9)cell.z='#,##0.00';}
+  }
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Charges Activity');
+  const periodSlug=state.period==='custom'?`${range.from||'start'}_to_${range.to||'end'}`:state.period;
+  XLSX.writeFile(wb,`PataFix_Charges_Activity_${periodSlug}_${today()}.xlsx`,{cellStyles:true});
+  toast(`${exportRows.length} transaction${exportRows.length===1?'':'s'} exported`,'success');
+}
+
+function downloadUnusedChargesExcel(){
+  if(typeof XLSX==='undefined')return toast('Excel library is still loading. Please retry.','warning');
+  const data=window._chargesExcessData;
+  if(!data)return toast('Charges account data is not ready','warning');
+  applyChargesExcessFilters();
+  const state=chargesExcessFilterState();
+  const range=chargesExcessDateRange(state);
+  if(state.period==='custom'&&range.from&&range.to&&range.from>range.to)return toast('Custom start date cannot be after the end date','warning');
+
+  const reportRows=[];
+  (data.clients||[]).forEach(client=>{
+    const currentBalance=Number(data.clientBalances?.[client.id]||0);
+    if(currentBalance<=0.009)return;
+    const allRows=(data.rows||[]).filter(row=>row._clientId===client.id);
+    const periodRows=allRows.filter(row=>chargesExcessDateMatches(row,range));
+    const periodCredits=periodRows.filter(row=>Number(row._amountIn||0)>0);
+    if((range.from||range.to)&&!periodCredits.length)return;
+    const latestCredit=[...periodCredits].sort((a,b)=>String(b.date||b.created_at||'').localeCompare(String(a.date||a.created_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||'')))[0]
+      || [...allRows].filter(row=>Number(row._amountIn||0)>0).sort((a,b)=>String(b.date||b.created_at||'').localeCompare(String(a.date||a.created_at||'')))[0];
+    reportRows.push({
+      client:client.full_name||'Unknown Client',
+      idNumber:client.id_number||'',
+      phone:client.phone||'',
+      periodPaidIn:periodRows.reduce((sum,row)=>sum+Number(row._amountIn||0),0),
+      periodUsed:periodRows.reduce((sum,row)=>sum+Number(row._amountUsed||0),0),
+      excessPaidIn:periodRows.filter(row=>row.transaction_type==='excess_deposit'||row.charge_type==='excess').reduce((sum,row)=>sum+Number(row._amountIn||0),0),
+      currentBalance,
+      allTimePaidIn:allRows.reduce((sum,row)=>sum+Number(row._amountIn||0),0),
+      allTimeUsed:allRows.reduce((sum,row)=>sum+Number(row._amountUsed||0),0),
+      latestDate:latestCredit?chargesExcessRowDate(latestCredit):'',
+      latestReference:latestCredit?latestCredit._refText||'':'',
+      latestType:latestCredit?latestCredit._type||'':''
+    });
+  });
+  reportRows.sort((a,b)=>b.currentBalance-a.currentBalance||a.client.localeCompare(b.client));
+  if(!reportRows.length)return toast(`No clients with unused balances for ${range.label}`,'info');
+
+  const headers=['Client','ID Number','Phone','Paid In - Selected Period (KES)','Used - Selected Period (KES)','Excess Paid In - Selected Period (KES)','Current Unused Balance (KES)','All-Time Paid In (KES)','All-Time Used (KES)','Latest Deposit Date','Latest M-Pesa / Ref','Latest Deposit Type'];
+  const aoa=[
+    ['PataFix - Clients with Unused Charges & Excess Balances'],
+    [`Period: ${range.label}`],
+    [`Generated: ${new Date().toLocaleString('en-KE')}`],
+    headers,
+    ...reportRows.map(row=>[row.client,row.idNumber,row.phone,row.periodPaidIn,row.periodUsed,row.excessPaidIn,row.currentBalance,row.allTimePaidIn,row.allTimeUsed,row.latestDate,row.latestReference,row.latestType]),
+    ['TOTALS','','',
+      reportRows.reduce((s,r)=>s+r.periodPaidIn,0),reportRows.reduce((s,r)=>s+r.periodUsed,0),reportRows.reduce((s,r)=>s+r.excessPaidIn,0),
+      reportRows.reduce((s,r)=>s+r.currentBalance,0),reportRows.reduce((s,r)=>s+r.allTimePaidIn,0),reportRows.reduce((s,r)=>s+r.allTimeUsed,0),'','','']
+  ];
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges']=[XLSX.utils.decode_range('A1:L1'),XLSX.utils.decode_range('A2:L2'),XLSX.utils.decode_range('A3:L3')];
+  ws['!cols']=[{wch:26},{wch:15},{wch:16},{wch:23},{wch:23},{wch:28},{wch:27},{wch:21},{wch:21},{wch:19},{wch:21},{wch:30}];
+  ws['!autofilter']={ref:`A4:L${4+reportRows.length}`};
+  ws['!freeze']={xSplit:0,ySplit:4,topLeftCell:'A5',activePane:'bottomLeft',state:'frozen'};
+  const titleStyle={font:{bold:true,color:{rgb:'FFFFFF'},sz:16},fill:{fgColor:{rgb:'7C2DFF'}},alignment:{horizontal:'center'}};
+  const metaStyle={font:{bold:true,color:{rgb:'2B174D'}},fill:{fgColor:{rgb:'FFF1A8'}},alignment:{horizontal:'left'}};
+  const headerStyle={font:{bold:true,color:{rgb:'FFFFFF'}},fill:{fgColor:{rgb:'087F5B'}},alignment:{horizontal:'center',wrapText:true}};
+  const totalStyle={font:{bold:true,color:{rgb:'2B174D'}},fill:{fgColor:{rgb:'BDF4D5'}}};
+  if(ws.A1)ws.A1.s=titleStyle;
+  if(ws.A2)ws.A2.s=metaStyle;
+  if(ws.A3)ws.A3.s=metaStyle;
+  headers.forEach((_,col)=>{const cell=ws[XLSX.utils.encode_cell({r:3,c:col})];if(cell)cell.s=headerStyle;});
+  for(let row=4;row<4+reportRows.length;row++){
+    for(let col=3;col<=8;col++){
+      const cell=ws[XLSX.utils.encode_cell({r:row,c:col})];
+      if(cell){cell.z='#,##0.00';cell.s=col===6?{font:{bold:true,color:{rgb:'087F5B'}},fill:{fgColor:{rgb:'E5FFF1'}}}:{}};
+    }
+  }
+  const totalRow=4+reportRows.length;
+  for(let col=0;col<headers.length;col++){
+    const cell=ws[XLSX.utils.encode_cell({r:totalRow,c:col})];
+    if(cell){cell.s=totalStyle;if(col>=3&&col<=8)cell.z='#,##0.00';}
+  }
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Unused Balances');
+  const periodSlug=state.period==='custom'?`${range.from||'start'}_to_${range.to||'end'}`:state.period;
+  XLSX.writeFile(wb,`PataFix_Unused_Charges_${periodSlug}_${today()}.xlsx`,{cellStyles:true});
+  toast(`${reportRows.length} client balance${reportRows.length===1?'':'s'} exported`,'success');
+}
+
 async function renderChargesExcessAccount(){
   const main=$('#mainContent');
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
@@ -6000,32 +6203,54 @@ async function renderChargesExcessAccount(){
     const chargesTotal=data.rows.reduce((s,e)=>s+Number(e._amountUsed||0),0);
     const availableTotal=Object.values(data.clientBalances||{}).reduce((s,b)=>s+Math.max(0,Number(b||0)),0);
     const clientsWithBalance=Object.entries(data.clientBalances||{}).filter(([id,b])=>!id.startsWith('unknown:')&&Number(b)>0.009).length;
+    const filterState=chargesExcessFilterState();
     main.innerHTML=`
       <div class="page-header">
         <div>
           <h1>Charges & Excess Account</h1>
           <p style="color:var(--text-secondary);font-size:12px;margin-top:4px">Click a client to open their charges statement and loan history.</p>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="openClientChargePaymentModal()">+ Record Charge Payment</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-outline btn-sm" onclick="downloadChargesExcessActivityExcel()">Download All Activity</button>
+          <button class="btn btn-outline btn-sm" onclick="downloadUnusedChargesExcel()">Download Unused Balances</button>
+          <button class="btn btn-primary btn-sm" onclick="openClientChargePaymentModal()">+ Record Charge Payment</button>
+        </div>
       </div>
       <div class="kpi-grid" style="margin-bottom:16px">
         <div class="kpi-card" style="border-top:4px solid var(--accent-green)"><div class="kpi-label">Available Client Balance</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(availableTotal)}</div><div class="kpi-sub">Unused charge deposits and excess repayments</div></div>
         <div class="kpi-card"><div class="kpi-label">Charges Paid & Used</div><div class="kpi-value">${fmtMoney(chargesTotal)}</div><div class="kpi-sub">Registration + processing/application fees</div></div>
         <div class="kpi-card"><div class="kpi-label">Clients with Balance</div><div class="kpi-value">${clientsWithBalance}</div><div class="kpi-sub">Clients with money available for future fees</div></div>
       </div>
-      <div class="search-bar" style="margin-bottom:12px">
-        <input class="input" id="chargesExcessSearch" placeholder="Search client, phone, M-Pesa code, receipt, loan no or type..." oninput="filterChargesExcessStatement(this.value)">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin-bottom:8px">
+        <select class="select" id="chargesPeriod" onchange="onChargesExcessPeriodChange()">
+          <option value="today" ${filterState.period==='today'?'selected':''}>Today</option>
+          <option value="week" ${filterState.period==='week'?'selected':''}>This Week</option>
+          <option value="month" ${filterState.period==='month'?'selected':''}>This Month</option>
+          <option value="all" ${filterState.period==='all'?'selected':''}>All Time</option>
+          <option value="custom" ${filterState.period==='custom'?'selected':''}>Custom Dates</option>
+        </select>
+        <select class="select" id="chargesBalanceFilter" onchange="applyChargesExcessFilters()">
+          <option value="all" ${filterState.balance==='all'?'selected':''}>All account activity</option>
+          <option value="unused" ${filterState.balance==='unused'?'selected':''}>Unused balances only</option>
+        </select>
+        <input class="input" id="chargesExcessSearch" value="${escapeHtml(filterState.search||'')}" placeholder="Search client, phone, M-Pesa code, receipt, loan no or type..." oninput="applyChargesExcessFilters()">
       </div>
+      <div id="chargesCustomDates" style="display:${filterState.period==='custom'?'grid':'none'};grid-template-columns:repeat(auto-fit,minmax(150px,1fr));max-width:500px;gap:8px;margin-bottom:8px">
+        <div class="form-group" style="margin:0"><label>From</label><input class="input" type="date" id="chargesDateFrom" value="${escapeHtml(filterState.from||'')}" onchange="applyChargesExcessFilters()"></div>
+        <div class="form-group" style="margin:0"><label>To</label><input class="input" type="date" id="chargesDateTo" value="${escapeHtml(filterState.to||'')}" onchange="applyChargesExcessFilters()"></div>
+      </div>
+      <div id="chargesFilterSummary" style="font-size:11px;color:var(--text-secondary);margin-bottom:10px"></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Date</th><th>Client</th><th>Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used as Charge</th><th>Client Balance</th></tr></thead>
           <tbody>
             ${displayRows.length?displayRows.map(e=>{
               const search=[e._clientName,e._clientPhone,e._refText,e._loanNo,e._type,e.description,e.ref].join(' ').toLowerCase();
+              const currentBalance=Number(data.clientBalances?.[e._clientId]||0);
               const clientCell=e._clientId
                 ? `<button type="button" onclick="openChargesClientAccount('${e._clientId}','charges')" style="border:0;background:transparent;padding:0;color:var(--accent-blue);text-align:left;cursor:pointer"><strong>${escapeHtml(e._clientName)}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(e._clientPhone||'View account')}</span></button>`
                 : `<strong>${escapeHtml(e._clientName)}</strong>`;
-              return `<tr class="charges-excess-row" data-search="${escapeHtml(search)}">
+              return `<tr class="charges-excess-row" data-search="${escapeHtml(search)}" data-date="${escapeHtml(chargesExcessRowDate(e))}" data-current-balance="${currentBalance}">
                 <td>${fmtDate(e.date||e.created_at)}</td>
                 <td>${clientCell}</td>
                 <td>${chargesExcessTypeBadge(e._type)}</td>
@@ -6040,6 +6265,7 @@ async function renderChargesExcessAccount(){
         </table>
       </div>
     `;
+    requestAnimationFrame(()=>applyChargesExcessFilters());
   }catch(e){
     main.innerHTML=`<div class="empty-state"><p>Error: ${escapeHtml(e.message)}</p></div>`;
     toast(e.message,'error');
@@ -6127,10 +6353,9 @@ function showChargesClientAccountTab(tab){
 }
 
 function filterChargesExcessStatement(q){
-  const term=String(q||'').toLowerCase().trim();
-  document.querySelectorAll('.charges-excess-row').forEach(row=>{
-    row.style.display=!term || String(row.dataset.search||'').includes(term) ? '' : 'none';
-  });
+  const input=document.getElementById('chargesExcessSearch');
+  if(input&&input.value!==String(q||''))input.value=String(q||'');
+  applyChargesExcessFilters();
 }
 
 async function openClientChargePaymentModal(preselectedClientId=''){
