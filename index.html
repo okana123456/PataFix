@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-06-charges-excel-reports-v32';
+const APP_VERSION = 'patafix-2026-08-08-officer-arrears-report-v34';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -7017,15 +7017,47 @@ function splitLoanBalanceAmount(loan, amount){
   };
 }
 
+function loanPerformanceArrearsAmount(loan){
+  return Number(loan?._performance_arrears ?? loan?.arrears_amount ?? 0);
+}
+
+function loanPerformanceArrearsSplit(loan){
+  if(loan && loan._performance_arrears_split) return loan._performance_arrears_split;
+  return splitLoanBalanceAmount(loan, loanPerformanceArrearsAmount(loan));
+}
+
+function attachPerformanceArrears(loans, schedules, asOfDate){
+  const byLoan = new Map();
+  (schedules||[]).forEach(s=>{
+    if(!s.loan_id || !s.due_date || s.due_date > asOfDate) return;
+    const due = Number(s.total_due||0);
+    const paid = Number(s.total_paid||0);
+    const unpaid = Math.max(0, due - paid);
+    if(unpaid <= 0.01) return;
+    byLoan.set(s.loan_id, Number(((byLoan.get(s.loan_id)||0) + unpaid).toFixed(2)));
+  });
+  return (loans||[]).map(l=>{
+    const scheduleArrears = Number(byLoan.get(l.id)||0);
+    const storedArrears = Number(l.arrears_amount||0);
+    const arrears = Math.max(scheduleArrears, storedArrears);
+    const split = splitLoanBalanceAmount(l, arrears);
+    return {
+      ...l,
+      _performance_arrears: Number(arrears.toFixed(2)),
+      _performance_arrears_split: split
+    };
+  });
+}
+
 function downloadOfficerPerformanceReport(){
   const rows = window._perfRows || [];
   if(!rows.length) return toast('No data to download','warning');
   const nowM = localISODate().slice(0,7);
   const data = rows.map(({o,oActive,oLoansMonth,outstanding,overdueLoans,collected})=>{
     const clientsInArr = new Set(overdueLoans.map(l=>l.client_id)).size;
-    const totalArrAmt  = overdueLoans.reduce((s,l)=>s+Number(l.arrears_amount||0),0);
-    const principalArrears = overdueLoans.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.arrears_amount).principal,0);
-    const interestArrears = overdueLoans.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.arrears_amount).interest,0);
+    const totalArrAmt  = overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsAmount(l),0);
+    const principalArrears = overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsSplit(l).principal,0);
+    const interestArrears = overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsSplit(l).interest,0);
     const principalOutstanding = oActive.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0);
     const interestOutstanding = oActive.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0);
     const bq  = oActive.length>0 ? ((oActive.length-clientsInArr)/oActive.length*100) : 100;
@@ -7057,9 +7089,9 @@ function downloadOfficerPerformanceReport(){
     'ACC Arrears (Clients)': rows.reduce((s,r)=>s+new Set(r.overdueLoans.map(l=>l.client_id)).size,0),
     'BQ %':              '',
     'OLB (KES)':         Number(rows.reduce((s,r)=>s+r.outstanding,0).toFixed(2)),
-    'Arrears (KES)':     Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+Number(l.arrears_amount||0),0),0).toFixed(2)),
-    'Principal Arrears (KES)': Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.arrears_amount).principal,0),0).toFixed(2)),
-    'Interest Arrears (KES)': Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.arrears_amount).interest,0),0).toFixed(2)),
+    'Arrears (KES)':     Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+loanPerformanceArrearsAmount(l),0),0).toFixed(2)),
+    'Principal Arrears (KES)': Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+loanPerformanceArrearsSplit(l).principal,0),0).toFixed(2)),
+    'Interest Arrears (KES)': Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+loanPerformanceArrearsSplit(l).interest,0),0).toFixed(2)),
     'Principal Outstanding (KES)': Number(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0),0).toFixed(2)),
     'Interest Outstanding (KES)': Number(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0),0).toFixed(2)),
     'PAR %':             '',
@@ -7093,14 +7125,15 @@ async function renderOfficerPerformance(){
   const main=$('#mainContent');
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
   try{
-    const[loansR,repsR,appsR,staffR]=await Promise.all([
+    const[loansR,repsR,appsR,staffR,schedulesR]=await Promise.all([
       sb('loans').select('*,loan_clients(full_name)').eq('business_id',currentUser.business_id),
       sb('loan_repayments').select('*').eq('business_id',currentUser.business_id),
       sb('loan_applications').select('*').eq('business_id',currentUser.business_id),
       // FIX #13: loan_staff column is `name`, not `full_name`
-      sb('loan_staff').select('id,name,email,role').eq('business_id',currentUser.business_id)
+      sb('loan_staff').select('id,name,email,role').eq('business_id',currentUser.business_id),
+      sb('loan_schedules').select('loan_id,due_date,total_due,total_paid,status').eq('business_id',currentUser.business_id).lte('due_date', localISODate()).limit(100000)
     ]);
-    const allLoans=loansR.data||[];
+    const allLoans=attachPerformanceArrears(loansR.data||[], schedulesR.data||[], localISODate());
     const allReps=repsR.data||[];
     const allApps=appsR.data||[];
     const allStaff=staffR.data||[];
@@ -7131,7 +7164,7 @@ async function renderOfficerPerformance(){
       const oClientIds = new Set(oLoans.map(l=>l.client_id));
       const portfolio = oActive.reduce((s,l)=>s+Number(l.principal_amount||0),0);
       const outstanding = oActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
-      const overdueLoans = oActive.filter(l=>l.overdue_days>0);
+      const overdueLoans = oActive.filter(l=>loanPerformanceArrearsAmount(l)>0 || Number(l.overdue_days||0)>0);
       // Collections this month attributed to officer's loans
       const oLoanIds = new Set(oLoans.map(l=>l.id));
       const oRepsMonth = allReps.filter(r=>r.loan_id && oLoanIds.has(r.loan_id) && r.payment_date && r.payment_date.startsWith(nowM));
@@ -7162,9 +7195,9 @@ async function renderOfficerPerformance(){
           <tbody>
             ${rows.map(({o,oLoans,oActive,oClientIds,portfolio,outstanding,overdueLoans,collected,oLoansMonth})=>{
               const clientsInArr=new Set(overdueLoans.map(l=>l.client_id)).size;
-              const totalArrAmt=overdueLoans.reduce((s,l)=>s+Number(l.arrears_amount||0),0);
-              const principalArrears=overdueLoans.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.arrears_amount).principal,0);
-              const interestArrears=overdueLoans.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.arrears_amount).interest,0);
+              const totalArrAmt=overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsAmount(l),0);
+              const principalArrears=overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsSplit(l).principal,0);
+              const interestArrears=overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsSplit(l).interest,0);
               const principalOutstanding=oActive.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0);
               const interestOutstanding=oActive.reduce((s,l)=>s+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0);
               const bq=oActive.length>0?((oActive.length-clientsInArr)/oActive.length*100):100;
@@ -7198,9 +7231,9 @@ async function renderOfficerPerformance(){
               <td><strong>${rows.reduce((s,r)=>s+new Set(r.overdueLoans.map(l=>l.client_id)).size,0)}</strong></td>
               <td></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.outstanding,0))}</strong></td>
-              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+Number(l.arrears_amount||0),0),0))}</strong></td>
-              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.arrears_amount).principal,0),0))}</strong></td>
-              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.arrears_amount).interest,0),0))}</strong></td>
+              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+loanPerformanceArrearsAmount(l),0),0))}</strong></td>
+              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+loanPerformanceArrearsSplit(l).principal,0),0))}</strong></td>
+              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+loanPerformanceArrearsSplit(l).interest,0),0))}</strong></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0),0))}</strong></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0),0))}</strong></td>
               <td></td>
@@ -7466,13 +7499,49 @@ async function renderStaff(){
       <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email/Phone</th><th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th></tr></thead><tbody>
       ${(staff||[]).map(s=>`<tr><td><strong>${s.name}</strong></td><td>${s.email||s.phone||'-'}</td><td><span class="badge badge-blue" style="max-width:150px;white-space:normal;display:inline-block">${(s.role||'').replace(/_/g,' ').toUpperCase()}</span></td><td>${s.is_active?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>'}</td><td>${fmtDateTime(s.last_login)}</td><td><button class="btn btn-outline btn-sm" onclick="editStaff('${s.id}')">Edit</button></td></tr>`).join('')}
       </tbody></table></div>
-      <div class="card" style="margin-top:20px"><h3 style="font-size:14px;margin-bottom:8px">Role Permissions</h3>
-        <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:4px">
-          <div><span class="badge badge-blue">admin</span> Full access (Manager)</div>
-          <div><span class="badge badge-blue">loan_officer</span> Manage own clients & applications</div>
-          <div><span class="badge badge-blue">cashier</span> Record repayments (Cashier/Accountant)</div>
-          <div><span class="badge badge-blue">viewer</span> Read-only (Customer Support)</div>
-        </div>
+      <div class="card" style="margin-top:20px">
+        <h3 style="font-size:14px;margin-bottom:4px">Role Access Guide</h3>
+        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:10px">Roles can be combined. A staff member with more than one role receives the combined access of all selected roles.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Role</th><th>Main Responsibility</th><th>Pages Available</th><th>Important Actions Allowed</th><th>Key Restrictions</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="badge badge-blue">ADMIN</span></td>
+              <td>System owner and overall controller</td>
+              <td>Every PataFix page, including Staff, Settings and Audit Log</td>
+              <td>Manage staff and products; approve, reject and disburse loans; record repayments; manage clients, accounting, reports, charges and suspense; delete clients and loans</td>
+              <td>No operational restrictions within the business account</td>
+            </tr>
+            <tr>
+              <td><span class="badge badge-blue">MANAGER</span></td>
+              <td>Daily lending and branch operations</td>
+              <td>Dashboard, Clients, Products, Applications, Disbursement, Active Loans, Repayments, Arrears, Reports, Officer Performance, Accounting, Charges &amp; Excess, Suspense and Calculator</td>
+              <td>Manage and transfer clients; approve or reject applications; disburse and edit loans; record repayments; review reports and accounting</td>
+              <td>Cannot manage staff, system settings or audit log; cannot delete clients or loans; loan products are view-only</td>
+            </tr>
+            <tr>
+              <td><span class="badge badge-blue">LOAN OFFICER</span></td>
+              <td>Client onboarding and assigned loan portfolio</td>
+              <td>Own Clients, own Applications, own Active Loans, own Repayments, own Arrears, Officer Performance, My Dashboard and Calculator</td>
+              <td>Add clients and applications; edit own pending applications; view assigned loans and repayment history; record arrears follow-ups</td>
+              <td>Cannot approve, reject or disburse loans; cannot record repayments; cannot access accounting, reports, charges, suspense, staff or settings</td>
+            </tr>
+            <tr>
+              <td><span class="badge badge-blue">CASHIER</span></td>
+              <td>Money collection and payment processing</td>
+              <td>Disbursement, Active Loans, Repayments, Charges &amp; Excess and Suspense Account</td>
+              <td>Disburse approved loans; record and confirm repayments; manage charge deposits, excess payments and suspense matching</td>
+              <td>Cannot create clients or applications, approve loans, access management reports, accounting, staff or settings</td>
+            </tr>
+            <tr>
+              <td><span class="badge badge-gray">VIEWER</span></td>
+              <td>Legacy restricted role</td>
+              <td>No operational pages are currently assigned</td>
+              <td>No transaction or management actions</td>
+              <td>This role is not offered when adding staff; use Loan Officer or Cashier for restricted working access</td>
+            </tr>
+          </tbody>
+        </table></div>
       </div>
     `;
   }catch(e){toast(e.message,'error')}
