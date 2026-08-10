@@ -5,14 +5,13 @@ do $$
 declare
   v_loan public.loans%rowtype;
   v_payment public.loan_repayments%rowtype;
-  v_client_name text;
   v_repayment_count integer;
   v_repayment_total numeric(14,2);
   v_schedule_count integer;
   v_schedule_paid numeric(14,2);
 begin
-  select l, c.full_name
-  into v_loan, v_client_name
+  select l.*
+  into v_loan
   from public.loans l
   join public.loan_clients c on c.id = l.client_id
   where l.business_id = 'BIZ-58D22296'
