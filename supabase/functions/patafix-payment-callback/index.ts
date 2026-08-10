@@ -43,6 +43,28 @@ function mpesaDate(value: unknown) {
   return new Date().toISOString();
 }
 
+function currentScheduleInterestRatio(schedules: any[], loan: any) {
+  let principalRemaining = 0;
+  let interestRemaining = 0;
+  for (const schedule of schedules || []) {
+    const principalDue = Math.max(0, Number(schedule?.principal_due || 0));
+    const interestDue = Math.max(0, Number(schedule?.interest_due || 0));
+    const coreDue = principalDue + interestDue;
+    if (coreDue <= 0) continue;
+    const paidTowardCore = Math.min(coreDue, Math.max(0, Number(schedule?.total_paid || 0)));
+    const remainingFactor = Math.max(0, (coreDue - paidTowardCore) / coreDue);
+    principalRemaining += principalDue * remainingFactor;
+    interestRemaining += interestDue * remainingFactor;
+  }
+  const remainingCore = principalRemaining + interestRemaining;
+  if (remainingCore > 0) return Math.max(0, Math.min(1, interestRemaining / remainingCore));
+  const totalPayable = Number(loan?.total_payable || 0);
+  const totalInterest = Number(loan?.total_interest || 0);
+  return totalPayable > 0 && totalInterest > 0
+    ? Math.max(0, Math.min(1, totalInterest / totalPayable))
+    : 0;
+}
+
 async function findClient(supabase: any, businessId: string, accountNumber: string, payerPhone: string) {
   const accountDigits = digits(accountNumber);
   if (accountDigits) {
@@ -254,9 +276,13 @@ serve(async (req) => {
 
     const appliedAmount = Math.min(amount, Number(loan.outstanding_balance || 0));
     const excessAmount = Number(Math.max(0, amount - appliedAmount).toFixed(2));
-    const totalPayable = Number(loan.total_payable || 0);
-    const totalInterest = Number(loan.total_interest || 0);
-    const interestRatio = totalPayable > 0 && totalInterest > 0 ? totalInterest / totalPayable : 0;
+    const { data: schedules } = await supabase
+      .from("loan_schedules")
+      .select("id, due_date, principal_due, interest_due, total_due, total_paid, status")
+      .eq("loan_id", loan.id)
+      .in("status", ["pending", "partial", "overdue"])
+      .order("due_date", { ascending: true });
+    const interestRatio = currentScheduleInterestRatio(schedules || [], loan);
     const interestPortion = Number((appliedAmount * interestRatio).toFixed(2));
     const principalPortion = Number((appliedAmount - interestPortion).toFixed(2));
     const paymentDate = mpesaDate(body?.TransTime);
@@ -281,13 +307,6 @@ serve(async (req) => {
       .single();
     if (repaymentError) throw repaymentError;
 
-    const { data: schedules } = await supabase
-      .from("loan_schedules")
-      .select("id, due_date, total_due, total_paid, status")
-      .eq("loan_id", loan.id)
-      .in("status", ["pending", "partial", "overdue"])
-      .order("due_date", { ascending: true });
-
     let remaining = appliedAmount;
     const today = new Date().toISOString().slice(0, 10);
     for (const schedule of schedules || []) {
@@ -307,7 +326,7 @@ serve(async (req) => {
     }
 
     const newTotalPaid = Number((Number(loan.total_paid || 0) + appliedAmount).toFixed(2));
-    const newBalance = Math.max(0, Number((totalPayable - newTotalPaid).toFixed(2)));
+    const newBalance = Math.max(0, Number((Number(loan.outstanding_balance || 0) - appliedAmount).toFixed(2)));
     await supabase
       .from("loans")
       .update({

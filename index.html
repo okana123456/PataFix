@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-10-loan-restructure-v35';
+const APP_VERSION = 'patafix-2026-08-10-restructure-interest-v36';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -641,6 +641,26 @@ function statusBadge(status){
 
 function isCollectibleSchedule(schedule){
   return ['pending','partial','overdue'].includes(String(schedule?.status||'').toLowerCase());
+}
+
+function currentScheduleInterestRatio(schedules,loan){
+  let principalRemaining=0;
+  let interestRemaining=0;
+  (schedules||[]).filter(isCollectibleSchedule).forEach(s=>{
+    const principalDue=Math.max(0,Number(s.principal_due||0));
+    const interestDue=Math.max(0,Number(s.interest_due||0));
+    const coreDue=principalDue+interestDue;
+    if(coreDue<=0)return;
+    const paidTowardCore=Math.min(coreDue,Math.max(0,Number(s.total_paid||0)));
+    const remainingFactor=Math.max(0,(coreDue-paidTowardCore)/coreDue);
+    principalRemaining+=principalDue*remainingFactor;
+    interestRemaining+=interestDue*remainingFactor;
+  });
+  const remainingCore=principalRemaining+interestRemaining;
+  if(remainingCore>0)return Math.max(0,Math.min(1,interestRemaining/remainingCore));
+  const totalPayable=Number(loan?.total_payable||0);
+  const totalInterest=Number(loan?.total_interest||0);
+  return totalPayable>0&&totalInterest>0?Math.max(0,Math.min(1,totalInterest/totalPayable)):0;
 }
 
 function escapeHtml(v){
@@ -1368,7 +1388,7 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
   if(!authUser && !staffCache)return toast('Authentication failed','error');
   try{
     let staff = staffCache;
-    
+
     if(!staff && authUser){
         const staffMatches = [];
         const addStaffRows = rows => (rows||[]).forEach(row => {
@@ -3992,12 +4012,16 @@ let restructureLoanDraft=null;
 
 async function openRestructureLoanModal(id){
   if(!hasRole('admin','branch_manager'))return toast('Admin or manager access required','warning');
-  const[{data:loan,error:loanError},{data:schedules,error:scheduleError}]=await Promise.all([
+  const[{data:loan,error:loanError},{data:schedules,error:scheduleError},{data:repayments,error:repaymentError},{data:penalties,error:penaltyError}]=await Promise.all([
     sb('loans').select('*,loan_clients(full_name,phone,id_number),loan_applications(loan_products(name))').eq('id',id).eq('business_id',currentUser.business_id).single(),
-    sb('loan_schedules').select('*').eq('loan_id',id).order('due_date',{ascending:true}).order('installment_no',{ascending:true})
+    sb('loan_schedules').select('*').eq('loan_id',id).order('due_date',{ascending:true}).order('installment_no',{ascending:true}),
+    sb('loan_repayments').select('amount,principal_portion,interest_portion,penalty_portion').eq('loan_id',id),
+    sb('loan_penalties').select('penalty_amount,is_waived').eq('loan_id',id)
   ]);
   if(loanError||!loan)return toast(loanError?.message||'Loan not found','error');
   if(scheduleError)return toast(scheduleError.message,'error');
+  if(repaymentError)return toast(repaymentError.message,'error');
+  if(penaltyError)return toast(penaltyError.message,'error');
   if(loan.status!=='active'||Number(loan.outstanding_balance||0)<=0.01)return toast('Only active loans with a balance can be restructured','warning');
 
   const activeSchedules=(schedules||[]).filter(isCollectibleSchedule);
@@ -4013,10 +4037,27 @@ async function openRestructureLoanModal(id){
   const defaultTerm=Math.max(intervalWeeks,activeSchedules.length*intervalWeeks||Number(loan.term_weeks)||intervalWeeks);
   const firstDue=parseLocalDate(today());
   firstDue.setDate(firstDue.getDate()+intervalWeeks*7);
+  const repaymentTotals=(repayments||[]).reduce((totals,r)=>{
+    totals.amount+=Number(r.amount||0);
+    totals.principal+=Number(r.principal_portion||0);
+    totals.interest+=Number(r.interest_portion||0);
+    totals.penalty+=Number(r.penalty_portion||0);
+    return totals;
+  },{amount:0,principal:0,interest:0,penalty:0});
+  const allocated=repaymentTotals.principal+repaymentTotals.interest+repaymentTotals.penalty;
+  const unallocated=Math.max(0,Math.max(repaymentTotals.amount,Number(loan.total_paid||0))-allocated);
+  const principalRatio=Number(loan.total_payable||0)>0?Math.max(0,Math.min(1,Number(loan.principal_amount||0)/Number(loan.total_payable))):1;
+  const paidPrincipal=Math.min(Number(loan.principal_amount||0),repaymentTotals.principal+(unallocated*principalRatio));
+  const remainingPrincipal=Math.max(0,Number(loan.principal_amount||0)-paidPrincipal);
+  const activePenalties=(penalties||[]).filter(p=>!p.is_waived).reduce((sum,p)=>sum+Number(p.penalty_amount||0),0);
+  const remainingPenalty=Math.max(0,activePenalties-repaymentTotals.penalty);
   restructureLoanDraft={
     id:loan.id,
     loanNo:loan.loan_no,
-    balance:Number(loan.outstanding_balance||0),
+    currentBalance:Number(loan.outstanding_balance||0),
+    remainingPrincipal,
+    remainingPenalty,
+    weeklyRate:Number(loan.interest_rate||0)/Math.max(1,intervalWeeks),
     currentMaturity:loan.maturity_date,
     clientName:loan.loan_clients?.full_name||'Unknown Client'
   };
@@ -4027,12 +4068,12 @@ async function openRestructureLoanModal(id){
       <div style="font-size:14px;font-weight:800;margin-bottom:5px">${escapeHtml(restructureLoanDraft.clientName)}</div>
       <div style="font-size:12px;color:var(--text-secondary)">ID: ${escapeHtml(loan.loan_clients?.id_number||'-')} | Phone: ${escapeHtml(loan.loan_clients?.phone||'-')}</div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px;font-size:12px">
-        <div><strong>Balance</strong><br>${fmtMoney(restructureLoanDraft.balance)}</div>
+        <div><strong>Current balance</strong><br>${fmtMoney(restructureLoanDraft.currentBalance)}</div>
+        <div><strong>Principal remaining</strong><br>${fmtMoney(restructureLoanDraft.remainingPrincipal)}</div>
         <div><strong>Current term</strong><br>${Number(loan.term_weeks||0)} weeks</div>
-        <div><strong>Current maturity</strong><br>${fmtDate(loan.maturity_date)}</div>
       </div>
     </div>
-    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">This changes only the future repayment schedule. Previous payments stay unchanged, and no new interest or fee is added.</p>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Previous payments stay unchanged. Interest is recalculated from the remaining principal using the loan rate and the new term. No processing or registration fee is added.</p>
     <div class="form-row">
       <div class="form-group"><label>New Remaining Term (weeks) *</label><input class="input" type="number" id="rlTermWeeks" min="1" max="260" value="${defaultTerm}" oninput="updateRestructurePreview()"></div>
       <div class="form-group"><label>Repayment Frequency *</label><select class="select" id="rlIntervalWeeks" onchange="updateRestructurePreview()"><option value="1" ${intervalWeeks===1?'selected':''}>Weekly</option><option value="2" ${intervalWeeks===2?'selected':''}>Biweekly</option></select></div>
@@ -4055,15 +4096,21 @@ function updateRestructurePreview(){
   const interval=Number(document.getElementById('rlIntervalWeeks')?.value||1);
   const firstDueValue=document.getElementById('rlFirstDueDate')?.value;
   const installments=Math.max(1,Math.ceil(term/interval));
-  const installmentAmount=Number((restructureLoanDraft.balance/installments).toFixed(2));
+  const periodRate=Number((restructureLoanDraft.weeklyRate*interval).toFixed(4));
+  const recalculatedInterest=Number((restructureLoanDraft.remainingPrincipal*(periodRate/100)*installments).toFixed(2));
+  const newBalance=Number((restructureLoanDraft.remainingPrincipal+recalculatedInterest+restructureLoanDraft.remainingPenalty).toFixed(2));
+  const installmentAmount=Number((newBalance/installments).toFixed(2));
   const maturity=parseLocalDate(firstDueValue);
   if(maturity)maturity.setDate(maturity.getDate()+(installments-1)*interval*7);
   preview.innerHTML=`
     <div style="font-size:11px;color:var(--text-secondary);font-weight:700;text-transform:uppercase;margin-bottom:6px">New Schedule Preview</div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:12px">
       <div><strong>${installments}</strong><br><span style="color:var(--text-secondary)">installments</span></div>
+      <div><strong>${fmtMoney(recalculatedInterest)}</strong><br><span style="color:var(--text-secondary)">recalculated interest</span></div>
+      <div><strong>${fmtMoney(newBalance)}</strong><br><span style="color:var(--text-secondary)">new balance</span></div>
       <div><strong style="color:var(--accent-blue)">${fmtMoney(installmentAmount)}</strong><br><span style="color:var(--text-secondary)">per installment</span></div>
       <div><strong>${maturity?fmtDate(localISODate(maturity)):'-'}</strong><br><span style="color:var(--text-secondary)">new maturity</span></div>
+      <div><strong>${periodRate}%</strong><br><span style="color:var(--text-secondary)">rate per period</span></div>
     </div>`;
 }
 
@@ -4376,12 +4423,11 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
       if(clientLoans && clientLoans.length) loan = clientLoans[0];
     }
     if(!loan)return toast('No matching active loan found for: '+refRaw,'warning');
-    
+
     const receiptNo = generateUniqueNo('RCP');
-    // Dynamic interest/principal split based on loan's actual ratio
-    const mpTp = Number(loan.total_payable||0);
-    const mpTi = Number(loan.total_interest||0);
-    const mpInterestRatio = (mpTp > 0 && mpTi > 0) ? (mpTi / mpTp) : 0;
+    const{data:mpesaScheds}=await sb('loan_schedules').select('*').eq('loan_id',loan.id).in('status',['pending','overdue','partial']).order('due_date',{ascending:true}).order('installment_no',{ascending:true});
+    // Use the current schedule ratio so restructured loans allocate correctly.
+    const mpInterestRatio=currentScheduleInterestRatio(mpesaScheds,loan);
     const mpAmountApplied=Number(Math.min(amount, Math.max(0, Number(loan.outstanding_balance||0))).toFixed(2));
     const mpExcessAmount=Number(Math.max(0, amount-mpAmountApplied).toFixed(2));
     let mpPenaltyPortion = 0;
@@ -4395,7 +4441,6 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
     const newPaid=Number(loan.total_paid)+mpAmountApplied;
     const newBalance=Number(loan.outstanding_balance)-mpAmountApplied;
     // Cascade into schedules
-    const{data:mpesaScheds}=await sb('loan_schedules').select('*').eq('loan_id',loan.id).in('status',['pending','overdue','partial']).order('due_date',{ascending:true}).order('installment_no',{ascending:true});
     let mpesaRem=mpAmountApplied;
     const mpesaUpdates=[];
     for(const s of (mpesaScheds||[])){
@@ -4636,11 +4681,12 @@ async function savePayment(){
 
     const receiptNo = generateUniqueNo('RCP');
 
-    // Calculate interest/principal split dynamically from loan's actual ratio
-    // instead of hardcoded 70/30 which is wrong for varying interest rates
-    const tp = Number(loan.total_payable||0);
-    const ti = Number(loan.total_interest||0);
-    const interestRatio = (tp > 0 && ti > 0) ? (ti / tp) : 0;
+    const{data:allScheds}=await sb('loan_schedules')
+      .select('*').eq('loan_id',loanId)
+      .in('status',['pending','overdue','partial'])
+      .order('due_date',{ascending:true})
+      .order('installment_no',{ascending:true});
+    const interestRatio=currentScheduleInterestRatio(allScheds,loan);
 
     // Read explicit penalty amount entered by the cashier
     const explicitPenalty = Math.min(Number($('#payPenaltyAmt').value) || 0, amountApplied);
@@ -4658,11 +4704,6 @@ async function savePayment(){
     if(error)throw error;
 
     // ── Cascade payment across schedules (oldest first by due_date) ──
-    const{data:allScheds}=await sb('loan_schedules')
-      .select('*').eq('loan_id',loanId)
-      .in('status',['pending','overdue','partial'])
-      .order('due_date',{ascending:true})
-      .order('installment_no',{ascending:true});
     let remaining=amountApplied;
     const schedUpdates=[];
     for(const s of (allScheds||[])){
@@ -7018,9 +7059,9 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
 
     // Record the repayment
     const receiptNo=generateUniqueNo('RCP');
-    const tp=Number(loan.total_payable||0);
-    const ti=Number(loan.total_interest||0);
-    const interestRatio=(tp>0&&ti>0)?(ti/tp):0;
+    const{data:scheds}=await sb('loan_schedules').select('*').eq('loan_id',loanId)
+      .in('status',['pending','overdue','partial']).order('due_date',{ascending:true}).order('installment_no',{ascending:true});
+    const interestRatio=currentScheduleInterestRatio(scheds,loan);
     const interestPortion=Number((amountApplied*interestRatio).toFixed(2));
     const principalPortion=Number((amountApplied-interestPortion).toFixed(2));
     const method=document.getElementById('suspMatchMethod')?.value||'mpesa';
@@ -7036,8 +7077,6 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
     if(repaymentErr) throw repaymentErr;
 
     // Cascade into schedules
-    const{data:scheds}=await sb('loan_schedules').select('*').eq('loan_id',loanId)
-      .in('status',['pending','overdue','partial']).order('due_date',{ascending:true}).order('installment_no',{ascending:true});
     let rem=amountApplied;
     const upds=[];
     const todayStr=today();
