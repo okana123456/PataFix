@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-08-officer-arrears-report-v34';
+const APP_VERSION = 'patafix-2026-08-10-loan-restructure-v35';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -635,8 +635,12 @@ function toast(msg,type='info'){
 function showLoading(el){el.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>'}
 
 function statusBadge(status){
-  const map={draft:'gray',submitted:'blue',under_review:'yellow',approved:'green',rejected:'red',disbursed:'purple',cancelled:'gray',active:'green',completed:'blue',cleared:'blue',fully_paid:'blue',defaulted:'red',written_off:'gray',pending:'yellow',partial:'orange',paid:'green',overdue:'red'};
+  const map={draft:'gray',submitted:'blue',under_review:'yellow',approved:'green',rejected:'red',disbursed:'purple',cancelled:'gray',active:'green',completed:'blue',cleared:'blue',fully_paid:'blue',defaulted:'red',written_off:'gray',pending:'yellow',partial:'orange',paid:'green',overdue:'red',restructured:'gray'};
   return `<span class="badge badge-${map[status]||'gray'}">${(status||'').replace(/_/g,' ')}</span>`;
+}
+
+function isCollectibleSchedule(schedule){
+  return ['pending','partial','overdue'].includes(String(schedule?.status||'').toLowerCase());
 }
 
 function escapeHtml(v){
@@ -1800,7 +1804,7 @@ async function getRegistrationFeeIncome(clients){
 // ═══ DASHBOARD ═══
 // ── Due Today Client Table Helper ──
 function buildDueTodayTable(dailyDueScheds, allLoans, allReps, todayStr){
-  const rows = dailyDueScheds.map(s => {
+  const rows = dailyDueScheds.filter(isCollectibleSchedule).map(s => {
     const loan = allLoans.find(l => l.id === s.loan_id);
     if(!loan) return null;
     // Only show active loans — exclude completed, defaulted, written_off
@@ -1887,7 +1891,7 @@ async function loadDueByDate(dateStr){
     .eq('due_date', dateStr);
 
   // Filter to active loans only — completed loans must never appear in due list
-  const scheds2 = (scheds||[]).filter(s=>activeLoanIds.has(s.loan_id));
+  const scheds2 = (scheds||[]).filter(s=>activeLoanIds.has(s.loan_id)&&isCollectibleSchedule(s));
   const dueAmt  = scheds2.reduce((s,sc)=>s+Number(sc.total_due||0),0);
   const dueLoanIds = new Set(scheds2.map(s=>s.loan_id));
 
@@ -1940,8 +1944,8 @@ async function renderDashboard(){
       sb('loan_clients').select('id,created_at,notes').eq('business_id', currentUser.business_id)
     ]);
     const allLoans=loansR.data||[];
-    const allScheds=schedR.data||[];
-    const todayScheds=todaySchedR.data||[];
+    const allScheds=(schedR.data||[]).filter(isCollectibleSchedule);
+    const todayScheds=(todaySchedR.data||[]).filter(isCollectibleSchedule);
     const allReps=repR.data||[];
     const allApps=appsR.data||[];
     const allClients=clientsR.data||[];
@@ -2027,7 +2031,7 @@ async function renderDashboard(){
           arrearsActiveLoanIdSet.has(s.loan_id) &&
           s.due_date < todayStr &&
           Number(s.total_due||0) > Number(s.total_paid||0) &&
-          s.status !== 'paid'
+          isCollectibleSchedule(s)
         )
         .map(s=>s.loan_id)
     );
@@ -2507,7 +2511,7 @@ async function viewClient(id){
           <div class="kpi-value" style="font-size:14px;color:var(--accent-yellow)">${fmtMoney((cLoans||[]).filter(l=>l.status==='active').reduce((s,l)=>s+Number(l.outstanding_balance||0),0))}</div>
         </div>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Principal</th><th>Weekly</th><th>Balance</th><th>Maturity</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Principal</th><th>Installment</th><th>Balance</th><th>Maturity</th><th>Status</th><th>Actions</th></tr></thead><tbody>
       ${(cLoans||[]).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).map(l=>`
         <tr style="${l.status==='active'&&l.outstanding_balance>0?'':'opacity:0.6'}">
           <td><strong>${l.loan_no||'-'}</strong></td>
@@ -3738,7 +3742,7 @@ async function renderLoans(page=1){
         <button class="btn btn-primary btn-sm" id="btnViewAllLoans" onclick="showAllLoans(true)">View Active Loans (${openActiveLoans.length})</button>
       </div>
       <div id="loansTableWrap" style="display:none">
-        <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Officer</th><th>Type</th><th>Principal</th><th>Balance</th><th>Weekly</th><th>Overdue</th><th>Status</th><th>Actions</th></tr></thead>
+        <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Officer</th><th>Type</th><th>Principal</th><th>Balance</th><th>Installment</th><th>Overdue</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody id="loansBody"></tbody></table></div>
         <div id="loansPagination"></div>
       </div>
@@ -3771,6 +3775,9 @@ function showAllLoans(show){
 function renderLoanRows(loans){
   return loans.map(l=>{
     const rowColor=l.overdue_days>30?'border-left:3px solid var(--accent-red)':l.overdue_days>0?'border-left:3px solid var(--accent-orange)':l.status==='active'?'border-left:3px solid var(--accent-green)':'';
+    const menuId=`loanActions_${String(l.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
+    const canPay=Number(l.outstanding_balance)>0&&hasRole('admin','branch_manager','cashier');
+    const canRestructure=l.status==='active'&&Number(l.outstanding_balance)>0.01&&hasRole('admin','branch_manager');
     return`<tr style="${rowColor}">
       <td><strong>${l.loan_no||'-'}</strong></td>
       <td><strong>${l.loan_clients?.full_name||'—'}</strong></td>
@@ -3781,7 +3788,15 @@ function renderLoanRows(loans){
       <td>${fmtMoney(l.principal_amount)}</td><td>${fmtMoney(l.outstanding_balance)}</td>
       <td>${fmtMoney(l.weekly_installment)}</td><td>${l.overdue_days>0?`<span class="badge badge-red">${l.overdue_days}d</span>`:'-'}</td>
       <td>${statusBadge(l.status)}</td>
-      <td><button class="btn btn-outline btn-sm" onclick="viewLoan('${l.id}')">View</button> ${(Number(l.outstanding_balance) <= 0) ? '<span class="badge badge-green">Paid in Full</span>' : (hasRole('admin','branch_manager','cashier') ? `<button class="btn btn-success btn-sm" onclick="openPaymentModal('${l.id}')">Pay</button>` : '')}</td>
+      <td><div class="row-action-menu" id="${menuId}">
+          <button class="row-action-toggle" type="button" aria-label="Loan actions" onclick="toggleRowActionMenu('${menuId}',event)">...</button>
+          <div class="row-action-panel">
+            <button type="button" onclick="closeRowActionMenus();viewLoan('${l.id}')">View Loan</button>
+            ${canPay?`<button type="button" class="success" onclick="closeRowActionMenus();openPaymentModal('${l.id}')">Record Payment</button>`:''}
+            ${canRestructure?`<button type="button" onclick="closeRowActionMenus();openRestructureLoanModal('${l.id}')">Restructure Loan</button>`:''}
+            <button type="button" onclick="closeRowActionMenus();exportLoanPDF('${l.id}')">Export PDF</button>
+          </div>
+        </div></td>
     </tr>`}).join('');
 }
 
@@ -3833,7 +3848,7 @@ async function viewLoan(id){
       <div><strong>Principal:</strong> ${fmtMoney(loan.principal_amount)}</div>
       <div><strong>Rate:</strong> ${Number(loan.interest_rate||0)}% / repayment period</div>
       <div><strong>Term:</strong> ${loan.term_weeks} weeks</div>
-      <div><strong>Weekly:</strong> ${fmtMoney(loan.weekly_installment)}</div>
+      <div><strong>Installment:</strong> ${fmtMoney(loan.weekly_installment)}</div>
       <div><strong>Balance:</strong> <span style="color:var(--accent-yellow)">${fmtMoney(loan.outstanding_balance)}</span></div>
       <div><strong>Total Paid:</strong> <span style="color:var(--accent-green)">${fmtMoney(loan.total_paid)}</span></div>
       <div><strong>Processing Fee:</strong> <span style="color:var(--accent-blue)">${fmtMoney(loan.processing_fee||0)} paid upfront</span></div>
@@ -3846,9 +3861,10 @@ async function viewLoan(id){
       <div class="table-wrap" style="max-height:300px;overflow-y:auto"><table><thead><tr><th>#</th><th>Due Date</th><th>Total Due</th><th>Paid</th><th>Remaining Due</th><th>Status</th></tr></thead><tbody>
       ${(schedules||[]).map(s=>{
         const due=Number(s.total_due||0); const paid=Number(s.total_paid||0);
-        const remaining=Math.max(0, due-paid);
+        const archived=String(s.status||'').toLowerCase()==='restructured';
+        const remaining=archived?0:Math.max(0, due-paid);
         const remColor = remaining===0 ? 'var(--accent-green)' : (paid>0 ? 'var(--accent-yellow)' : 'var(--accent-red)');
-        return `<tr><td>${s.installment_no}</td><td>${fmtDate(s.due_date)}</td><td>${fmtMoney(due)}</td><td>${fmtMoney(paid)}</td><td><strong style="color:${remColor}">${fmtMoney(remaining)}</strong></td><td>${statusBadge(s.status)}</td></tr>`;
+        return `<tr style="${archived?'opacity:.62;background:rgba(148,163,184,.06)':''}"><td>${s.installment_no}</td><td>${fmtDate(s.due_date)}</td><td>${fmtMoney(due)}</td><td>${fmtMoney(paid)}</td><td>${archived?'<span style="color:var(--text-secondary)">Moved to new schedule</span>':`<strong style="color:${remColor}">${fmtMoney(remaining)}</strong>`}</td><td>${statusBadge(s.status)}</td></tr>`;
       }).join('')}
       </tbody></table></div>
     </div>
@@ -3886,6 +3902,7 @@ async function viewLoan(id){
       <button class="btn btn-outline btn-sm" onclick="viewClientPayments('${loan.id}')">💳 Payments</button>
       <button class="btn btn-outline btn-sm" onclick="exportLoanPDF('${loan.id}')">Export PDF</button>
       ${hasRole('admin','branch_manager')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-yellow);color:var(--accent-yellow)" onclick="openEditLoanModal('${loan.id}')">✏️ Edit Loan</button>`:''}
+      ${loan.status==='active'&&Number(loan.outstanding_balance)>0.01&&hasRole('admin','branch_manager')?`<button class="btn btn-primary btn-sm" onclick="openRestructureLoanModal('${loan.id}')">Restructure</button>`:''}
       ${hasRole('admin')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-red);color:var(--accent-red)" onclick="deleteLoanConfirm('${loan.id}','${loan.loan_no}')">🗑 Delete</button>`:''}
       ${canPay?`<button class="btn btn-success" onclick="closeModal();openPaymentModal('${loan.id}')">Record Payment</button>`:''}
       <button class="btn btn-outline" onclick="closeModal()">Close</button>
@@ -3954,7 +3971,7 @@ async function saveEditLoan(id){
     // 3. If maturity or disbursement date changed, rebuild schedule due dates
     if(maturity||disbDate){
       const{data:loan}=await sb('loans').select('disbursement_date,term_weeks').eq('id',id).single();
-      const{data:scheds}=await sb('loan_schedules').select('id,installment_no').eq('loan_id',id).order('installment_no');
+      const{data:scheds}=await sb('loan_schedules').select('id,installment_no').eq('loan_id',id).in('status',['pending','partial','overdue']).order('installment_no');
       for(const s of (scheds||[])){
         const newDue=parseLocalDate(loan.disbursement_date);
         newDue.setDate(newDue.getDate()+s.installment_no*7);
@@ -3969,6 +3986,120 @@ async function saveEditLoan(id){
     await renderDashboard();
     renderLoans();
   }catch(e){ toast(e.message,'error'); }
+}
+
+let restructureLoanDraft=null;
+
+async function openRestructureLoanModal(id){
+  if(!hasRole('admin','branch_manager'))return toast('Admin or manager access required','warning');
+  const[{data:loan,error:loanError},{data:schedules,error:scheduleError}]=await Promise.all([
+    sb('loans').select('*,loan_clients(full_name,phone,id_number),loan_applications(loan_products(name))').eq('id',id).eq('business_id',currentUser.business_id).single(),
+    sb('loan_schedules').select('*').eq('loan_id',id).order('due_date',{ascending:true}).order('installment_no',{ascending:true})
+  ]);
+  if(loanError||!loan)return toast(loanError?.message||'Loan not found','error');
+  if(scheduleError)return toast(scheduleError.message,'error');
+  if(loan.status!=='active'||Number(loan.outstanding_balance||0)<=0.01)return toast('Only active loans with a balance can be restructured','warning');
+
+  const activeSchedules=(schedules||[]).filter(isCollectibleSchedule);
+  const productName=loan.loan_applications?.loan_products?.name||'';
+  const product=patafixProductByName(productName)||getPataFixProduct(loan.principal_amount,productName);
+  let intervalWeeks=Number(product?.paymentEveryWeeks||1);
+  if(activeSchedules.length>1){
+    const first=parseLocalDate(activeSchedules[0].due_date);
+    const second=parseLocalDate(activeSchedules[1].due_date);
+    const inferred=Math.round((second-first)/(7*24*60*60*1000));
+    if([1,2].includes(inferred))intervalWeeks=inferred;
+  }
+  const defaultTerm=Math.max(intervalWeeks,activeSchedules.length*intervalWeeks||Number(loan.term_weeks)||intervalWeeks);
+  const firstDue=parseLocalDate(today());
+  firstDue.setDate(firstDue.getDate()+intervalWeeks*7);
+  restructureLoanDraft={
+    id:loan.id,
+    loanNo:loan.loan_no,
+    balance:Number(loan.outstanding_balance||0),
+    currentMaturity:loan.maturity_date,
+    clientName:loan.loan_clients?.full_name||'Unknown Client'
+  };
+
+  openModal(`
+    <h2>Restructure Loan - ${escapeHtml(loan.loan_no)}</h2>
+    <div class="card" style="margin-bottom:12px;background:rgba(37,99,235,.06)">
+      <div style="font-size:14px;font-weight:800;margin-bottom:5px">${escapeHtml(restructureLoanDraft.clientName)}</div>
+      <div style="font-size:12px;color:var(--text-secondary)">ID: ${escapeHtml(loan.loan_clients?.id_number||'-')} | Phone: ${escapeHtml(loan.loan_clients?.phone||'-')}</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px;font-size:12px">
+        <div><strong>Balance</strong><br>${fmtMoney(restructureLoanDraft.balance)}</div>
+        <div><strong>Current term</strong><br>${Number(loan.term_weeks||0)} weeks</div>
+        <div><strong>Current maturity</strong><br>${fmtDate(loan.maturity_date)}</div>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">This changes only the future repayment schedule. Previous payments stay unchanged, and no new interest or fee is added.</p>
+    <div class="form-row">
+      <div class="form-group"><label>New Remaining Term (weeks) *</label><input class="input" type="number" id="rlTermWeeks" min="1" max="260" value="${defaultTerm}" oninput="updateRestructurePreview()"></div>
+      <div class="form-group"><label>Repayment Frequency *</label><select class="select" id="rlIntervalWeeks" onchange="updateRestructurePreview()"><option value="1" ${intervalWeeks===1?'selected':''}>Weekly</option><option value="2" ${intervalWeeks===2?'selected':''}>Biweekly</option></select></div>
+    </div>
+    <div class="form-group"><label>First Repayment Date *</label><input class="input" type="date" id="rlFirstDueDate" min="${today()}" value="${localISODate(firstDue)}" onchange="updateRestructurePreview()"></div>
+    <div class="card" id="rlPreview" style="margin:4px 0 12px"></div>
+    <div class="form-group"><label>Reason for Restructuring *</label><textarea class="textarea" id="rlReason" placeholder="e.g. Client income cycle changed; approved extension after review"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="btnSaveRestructure" onclick="saveLoanRestructure('${loan.id}')">Confirm Restructure</button>
+    </div>
+  `);
+  updateRestructurePreview();
+}
+
+function updateRestructurePreview(){
+  const preview=document.getElementById('rlPreview');
+  if(!preview||!restructureLoanDraft)return;
+  const term=Math.max(1,Number(document.getElementById('rlTermWeeks')?.value||1));
+  const interval=Number(document.getElementById('rlIntervalWeeks')?.value||1);
+  const firstDueValue=document.getElementById('rlFirstDueDate')?.value;
+  const installments=Math.max(1,Math.ceil(term/interval));
+  const installmentAmount=Number((restructureLoanDraft.balance/installments).toFixed(2));
+  const maturity=parseLocalDate(firstDueValue);
+  if(maturity)maturity.setDate(maturity.getDate()+(installments-1)*interval*7);
+  preview.innerHTML=`
+    <div style="font-size:11px;color:var(--text-secondary);font-weight:700;text-transform:uppercase;margin-bottom:6px">New Schedule Preview</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:12px">
+      <div><strong>${installments}</strong><br><span style="color:var(--text-secondary)">installments</span></div>
+      <div><strong style="color:var(--accent-blue)">${fmtMoney(installmentAmount)}</strong><br><span style="color:var(--text-secondary)">per installment</span></div>
+      <div><strong>${maturity?fmtDate(localISODate(maturity)):'-'}</strong><br><span style="color:var(--text-secondary)">new maturity</span></div>
+    </div>`;
+}
+
+async function saveLoanRestructure(id){
+  if(!hasRole('admin','branch_manager'))return toast('Admin or manager access required','warning');
+  const termWeeks=Number(document.getElementById('rlTermWeeks')?.value||0);
+  const intervalWeeks=Number(document.getElementById('rlIntervalWeeks')?.value||0);
+  const firstDueDate=document.getElementById('rlFirstDueDate')?.value;
+  const reason=String(document.getElementById('rlReason')?.value||'').trim();
+  if(!Number.isInteger(termWeeks)||termWeeks<1||termWeeks>260)return toast('Enter a remaining term between 1 and 260 weeks','warning');
+  if(![1,2].includes(intervalWeeks))return toast('Select weekly or biweekly repayments','warning');
+  if(!firstDueDate||firstDueDate<today())return toast('First repayment date cannot be in the past','warning');
+  if(reason.length<3)return toast('Enter the reason for restructuring','warning');
+  if(!await confirm_(`Restructure loan ${restructureLoanDraft?.loanNo||''}? The current unpaid schedule will be archived and replaced.`))return;
+
+  const btn=document.getElementById('btnSaveRestructure');
+  if(btn){btn.disabled=true;btn.textContent='Restructuring...';}
+  try{
+    const{data,error}=await supabaseClient.rpc('patafix_restructure_loan',{
+      p_loan_id:id,
+      p_term_weeks:termWeeks,
+      p_first_due_date:firstDueDate,
+      p_interval_weeks:intervalWeeks,
+      p_reason:reason
+    });
+    if(error)throw error;
+    const result=Array.isArray(data)?data[0]:data;
+    cachedData.loans=null;cachedData.schedules=null;
+    closeModal();
+    toast(`Loan restructured: ${result?.installments||Math.ceil(termWeeks/intervalWeeks)} installments of ${fmtMoney(result?.installment_amount||0)}`,'success');
+    await renderLoans();
+  }catch(e){
+    const missingFunction=String(e?.message||'').toLowerCase().includes('patafix_restructure_loan');
+    toast(missingFunction?'Run patafix-loan-restructure.sql in Supabase, then try again.':(e.message||'Could not restructure loan'),'error');
+    if(btn){btn.disabled=false;btn.textContent='Confirm Restructure';}
+  }
 }
 
 async function deleteLoanConfirm(id,loanNo){
@@ -4583,7 +4714,7 @@ async function savePayment(){
       const pastDueUnpaid=freshScheds.filter(s=>{
         const isDue=s.due_date<todayStr2;
         const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
-        return isDue && unpaid>0.01 && s.status!=='paid';
+        return isDue && unpaid>0.01 && isCollectibleSchedule(s);
       });
       if(pastDueUnpaid.length){
         pastDueUnpaid.sort((a,b)=>a.due_date.localeCompare(b.due_date));
@@ -4839,7 +4970,7 @@ async function renderOverdue(opts){
     // Also fetch dues for the selected date for the dues-by-date section
     const{data:dueScheds}=await sb('loan_schedules')
       .select('*').eq('business_id',currentUser.business_id).eq('due_date',asOfDate);
-    const dueRows=(dueScheds||[]).map(s=>{
+    const dueRows=(dueScheds||[]).filter(isCollectibleSchedule).map(s=>{
       const loan=loanMap[s.loan_id];
       if(!loan)return null;
       const remaining=Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0));
@@ -5085,7 +5216,7 @@ async function loadArrearsDues(startDate, endDate){
     scheds=data||[];
   }
 
-  const dueRows=((scheds||[]).map(s=>{
+  const dueRows=((scheds||[]).filter(isCollectibleSchedule).map(s=>{
     const loan=activeLoanMap[s.loan_id];
     if(!loan)return null; // skip completed/non-active loans
     const remaining=Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0));
@@ -5338,7 +5469,7 @@ async function loadReportData(id){
     const isOnlyOfficerDly = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     const filteredRepsDly = isOnlyOfficerDly ? (reps||[]).filter(r=>r.loans?.loan_officer_id===currentUser.id) : (reps||[]);
     const collected=filteredRepsDly.reduce((s,r)=>s+Number(r.amount||0),0);
-    const due=(scheds||[]).reduce((s,s2)=>s+Number(s2.total_due||0),0);
+    const due=(scheds||[]).filter(isCollectibleSchedule).reduce((s,s2)=>s+Number(s2.total_due||0),0);
     const rate=due>0?(collected/due*100):0;
     return{title:`Daily Collection Report — ${today}`,summary:[
       {label:'Date',value:today},{label:'Total Due Today',value:fmtMoney(due)},
@@ -5357,7 +5488,7 @@ async function loadReportData(id){
     const isOnlyOfficerMth = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     const filteredRepsMth = isOnlyOfficerMth ? (reps||[]).filter(r=>r.loans?.loan_officer_id===currentUser.id) : (reps||[]);
     const collected=filteredRepsMth.reduce((s,r)=>s+Number(r.amount||0),0);
-    const due=(scheds||[]).reduce((s,s2)=>s+Number(s2.total_due||0),0);
+    const due=(scheds||[]).filter(isCollectibleSchedule).reduce((s,s2)=>s+Number(s2.total_due||0),0);
     const rate=due>0?(collected/due*100):0;
     return{title:`Monthly Collection Report — ${nowM}`,summary:[
       {label:'Month',value:nowM},{label:'Total Due',value:fmtMoney(due)},
@@ -5654,7 +5785,7 @@ async function renderOfficerDashboard(){
     ]);
     const oLoans=loansR.data||[];
     const allReps=repsR.data||[];
-    const allScheds=schedsR.data||[];
+    const allScheds=(schedsR.data||[]).filter(isCollectibleSchedule);
     const allClients=clientsR.data||[];
 
     const oLoanIds=new Set(oLoans.map(l=>l.id));
@@ -6933,7 +7064,7 @@ async function confirmSuspenseMatch(entryId, entryType, amount, ref){
     let newArrears=0,newOverdueDays=0;
     const pastDueUnpaid=(freshScheds||[]).filter(s=>{
       const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
-      return s.due_date<todayStr && unpaid>0.01 && s.status!=='paid';
+      return s.due_date<todayStr && unpaid>0.01 && isCollectibleSchedule(s);
     });
     if(pastDueUnpaid.length){
       pastDueUnpaid.sort((a,b)=>a.due_date.localeCompare(b.due_date));
@@ -7029,7 +7160,7 @@ function loanPerformanceArrearsSplit(loan){
 function attachPerformanceArrears(loans, schedules, asOfDate){
   const byLoan = new Map();
   (schedules||[]).forEach(s=>{
-    if(!s.loan_id || !s.due_date || s.due_date > asOfDate) return;
+    if(!s.loan_id || !s.due_date || s.due_date > asOfDate || !isCollectibleSchedule(s)) return;
     const due = Number(s.total_due||0);
     const paid = Number(s.total_paid||0);
     const unpaid = Math.max(0, due - paid);
