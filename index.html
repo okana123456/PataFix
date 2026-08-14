@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-14-officer-arrears-v38';
+const APP_VERSION = 'patafix-2026-08-14-reconciled-dues-arrears-v39';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -641,6 +641,10 @@ function statusBadge(status){
 
 function isCollectibleSchedule(schedule){
   return ['pending','partial','overdue'].includes(String(schedule?.status||'').toLowerCase());
+}
+
+function isCurrentSchedule(schedule){
+  return String(schedule?.status||'').toLowerCase()!=='restructured';
 }
 
 function currentScheduleInterestRatio(schedules,loan){
@@ -1824,7 +1828,7 @@ async function getRegistrationFeeIncome(clients){
 // ═══ DASHBOARD ═══
 // ── Due Today Client Table Helper ──
 function buildDueTodayTable(dailyDueScheds, allLoans, allReps, todayStr){
-  const rows = dailyDueScheds.filter(isCollectibleSchedule).map(s => {
+  const rows = dailyDueScheds.filter(isCurrentSchedule).map(s => {
     const loan = allLoans.find(l => l.id === s.loan_id);
     if(!loan) return null;
     // Only show active loans — exclude completed, defaulted, written_off
@@ -1832,7 +1836,6 @@ function buildDueTodayTable(dailyDueScheds, allLoans, allReps, todayStr){
     const paid = Number(s.total_paid || 0);
     const remaining = Math.max(0, Number(s.total_due||0) - paid);
     // Exclude fully paid installments — no point showing them
-    if(remaining === 0) return null;
     return {
       name: loan.loan_clients?.full_name || '-',
       id_number: loan.loan_clients?.id_number || '-',
@@ -1911,13 +1914,16 @@ async function loadDueByDate(dateStr){
     .eq('due_date', dateStr);
 
   // Filter to active loans only — completed loans must never appear in due list
-  const scheds2 = (scheds||[]).filter(s=>activeLoanIds.has(s.loan_id)&&isCollectibleSchedule(s));
+  const scheds2 = (scheds||[]).filter(s=>activeLoanIds.has(s.loan_id)&&isCurrentSchedule(s));
   const dueAmt  = scheds2.reduce((s,sc)=>s+Number(sc.total_due||0),0);
   const dueLoanIds = new Set(scheds2.map(s=>s.loan_id));
 
   // Use schedule total_paid (source of truth — reflects ALL payments ever made on each installment)
   const paid   = scheds2.reduce((s,sc)=>s+Number(sc.total_paid||0),0);
   const unpaid = Math.max(0, dueAmt - paid);
+  const totalCollectedOnDate=allReps
+    .filter(r=>(r.payment_date||'').slice(0,10)===dateStr)
+    .reduce((s,r)=>s+Number(r.amount||0),0);
 
 const isToday = dateStr === today();
 const isFuture = dateStr > today();
@@ -1935,15 +1941,20 @@ if(lbl) lbl.textContent = isToday ? `— Today, ${fmtLongDate(dateStr)}` : isFut
       '<div class="kpi-sub">' + scheds2.length + ' installment' + (scheds2.length!==1?'s':'') + ' · ' + dueLoanIds.size + ' client' + (dueLoanIds.size!==1?'s':'') + '</div>' +
     '</div>' +
     '<div class="kpi-card" style="border-top:2px solid var(--accent-blue)">' +
-      '<div class="kpi-label">' + (isFuture?'Expected':'Collected') + '</div>' +
+      '<div class="kpi-label">' + (isFuture?'Expected':"Paid Against Date's Dues") + '</div>' +
       '<div class="kpi-value" style="color:var(--accent-blue)">' + (isFuture ? '-' : fmtMoney(paid)) + '</div>' +
-      '<div class="kpi-sub">' + (isFuture?'not yet due':'payments received') + '</div>' +
+      '<div class="kpi-sub">' + (isFuture?'not yet due':'applied to scheduled installments') + '</div>' +
     '</div>' +
     '<div class="kpi-card" style="border-top:2px solid ' + (isFuture?'var(--accent-blue)':unpaid>0?'var(--accent-red)':'var(--accent-green)') + '">' +
       '<div class="kpi-label">' + (isFuture?'Forecast':'Still Unpaid') + '</div>' +
       '<div class="kpi-value" style="color:' + (isFuture?'var(--accent-blue)':unpaid>0?'var(--accent-red)':'var(--accent-green)') + '">' + fmtMoney(isFuture?dueAmt:unpaid) + '</div>' +
       '<div class="kpi-sub">' + (dueAmt===0?'None scheduled':isFuture?'expected collection':'remaining') + '</div>' +
-    '</div>';
+    '</div>' +
+    (!isFuture?'<div class="kpi-card" style="border-top:2px solid var(--accent-purple)">' +
+      '<div class="kpi-label">Total Repayments on Date</div>' +
+      '<div class="kpi-value" style="color:var(--accent-purple)">' + fmtMoney(totalCollectedOnDate) + '</div>' +
+      '<div class="kpi-sub">all loan repayments received</div>' +
+    '</div>':'');
 
   // Update client table
   const tbl = document.getElementById('dueClientTable');
@@ -1964,8 +1975,8 @@ async function renderDashboard(){
       sb('loan_clients').select('id,created_at,notes').eq('business_id', currentUser.business_id)
     ]);
     const allLoans=loansR.data||[];
-    const allScheds=(schedR.data||[]).filter(isCollectibleSchedule);
-    const todayScheds=(todaySchedR.data||[]).filter(isCollectibleSchedule);
+    const allScheds=(schedR.data||[]).filter(isCurrentSchedule);
+    const todayScheds=(todaySchedR.data||[]).filter(isCurrentSchedule);
     const allReps=repR.data||[];
     const allApps=appsR.data||[];
     const allClients=clientsR.data||[];
@@ -1994,15 +2005,13 @@ async function renderDashboard(){
     const dailyDueScheds = (todayScheds.length ? todayScheds : allScheds.filter(s=>s.due_date===todayStr))
       .filter(s=>activeLoanIdSet.has(s.loan_id));
     const dailyDueAmt    = dailyDueScheds.reduce((s,sc)=>s+Number(sc.total_due||0),0);
-    const dailyDueLoanIds = new Set(dailyDueScheds.map(s=>s.loan_id));
-    // Fix #8: use the higher of (a) schedule total_paid or (b) actual repayments
-    // recorded today for loans that have dues today. This ensures payments that
-    // were recorded but didn't fully cascade into schedules still show up.
+    // Schedule allocations measure payment against today's dues. All receipts
+    // received today are shown separately so arrears and advance payments do not inflate this KPI.
     const schedDailyPaid = dailyDueScheds.reduce((s,sc)=>s+Number(sc.total_paid||0),0);
-    const repsDailyPaid  = (allReps||[])
-      .filter(r=>dailyDueLoanIds.has(r.loan_id) && (r.payment_date||'').slice(0,10)===todayStr)
+    const dailyPaidAmt   = Math.min(schedDailyPaid, dailyDueAmt);
+    const totalCollectedToday=(allReps||[])
+      .filter(r=>(r.payment_date||'').slice(0,10)===todayStr)
       .reduce((s,r)=>s+Number(r.amount||0),0);
-    const dailyPaidAmt   = Math.min(Math.max(schedDailyPaid, repsDailyPaid), dailyDueAmt);
     const dailyRate      = dailyDueAmt>0 ? (dailyPaidAmt/dailyDueAmt)*100 : 0;
     const dailyUnpaid    = Math.max(0, dailyDueAmt - dailyPaidAmt);
 
@@ -2095,21 +2104,26 @@ async function renderDashboard(){
       </div>
 
       <!-- Summary KPI cards for selected date -->
-      <div class="dash-grid-3" id="dueSummaryCards">
+      <div class="kpi-grid" id="dueSummaryCards">
         <div class="kpi-card" style="border-top:2px solid var(--accent-green)">
           <div class="kpi-label">Expected Today</div>
           <div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(dailyDueAmt)}</div>
           <div class="kpi-sub">Admin total for today · ${dailyDueScheds.length} installment${dailyDueScheds.length!==1?'s':''} · ${new Set(dailyDueScheds.map(s=>s.loan_id)).size} clients</div>
         </div>
         <div class="kpi-card" style="border-top:2px solid var(--accent-blue)">
-          <div class="kpi-label">Collected</div>
+          <div class="kpi-label">Paid Against Today's Dues</div>
           <div class="kpi-value" style="color:var(--accent-blue)">${fmtMoney(dailyPaidAmt)}</div>
-          <div class="kpi-sub">payments received</div>
+          <div class="kpi-sub">applied to installments due today</div>
         </div>
         <div class="kpi-card" style="border-top:2px solid ${dailyUnpaid>0?'var(--accent-red)':'var(--accent-green)'}">
           <div class="kpi-label">Still Unpaid</div>
           <div class="kpi-value" style="color:${dailyUnpaid>0?'var(--accent-red)':'var(--accent-green)'}">${fmtMoney(dailyUnpaid)}</div>
           <div class="kpi-sub">${dailyDueAmt===0?'None due':'remaining'}</div>
+        </div>
+        <div class="kpi-card" style="border-top:2px solid var(--accent-purple)">
+          <div class="kpi-label">Total Repayments Today</div>
+          <div class="kpi-value" style="color:var(--accent-purple)">${fmtMoney(totalCollectedToday)}</div>
+          <div class="kpi-sub">all loan repayments received today</div>
         </div>
       </div>
 
@@ -5032,7 +5046,7 @@ async function renderOverdue(opts){
     // Also fetch dues for the selected date for the dues-by-date section
     const{data:dueScheds}=await sb('loan_schedules')
       .select('*').eq('business_id',currentUser.business_id).eq('due_date',asOfDate);
-    const dueRows=(dueScheds||[]).filter(isCollectibleSchedule).map(s=>{
+    const dueRows=(dueScheds||[]).filter(isCurrentSchedule).map(s=>{
       const loan=loanMap[s.loan_id];
       if(!loan)return null;
       const remaining=Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0));
@@ -5150,50 +5164,21 @@ async function renderOverdue(opts){
 
     // ── Assemble page ──
     var pageHtml =
-      // Header
       '<div class="page-header" style="flex-direction:column;align-items:flex-start;gap:10px">' +
         '<h1>Dues/Forecast Report</h1>' +
-        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">' +
-          '<div style="display:flex;align-items:center;gap:6px">' +
-            '<span style="font-size:12px;color:var(--text-secondary);white-space:nowrap">As of date:</span>' +
-            '<input type="date" class="input" style="width:150px;padding:4px 8px;font-size:12px" value="'+asOfDate+'" onchange="renderOverdue({asOfDate:this.value,minDays:document.getElementById(\'arrearsMinDays\')?.value||0})">' +
-          '</div>' +
-          '<div style="display:flex;align-items:center;gap:6px">' +
-            '<span style="font-size:12px;color:var(--text-secondary);white-space:nowrap">Min days:</span>' +
-            '<select id="arrearsMinDays" class="select" style="width:auto;padding:4px 8px;font-size:12px" onchange="renderOverdue({asOfDate:document.querySelector(\'input[type=date]\')?.value||\''+asOfDate+'\',minDays:this.value})">' +
-              '<option value="0" '+(minDays===0?'selected':'')+'>All (0+ days)</option>' +
-              '<option value="1" '+(minDays===1?'selected':'')+'>1+ days (default)</option>' +
-              '<option value="7" '+(minDays===7?'selected':'')+'>7+ days</option>' +
-              '<option value="14" '+(minDays===14?'selected':'')+'>14+ days</option>' +
-              '<option value="30" '+(minDays===30?'selected':'')+'>30+ days (PAR 30)</option>' +
-              '<option value="60" '+(minDays===60?'selected':'')+'>60+ days (PAR 60)</option>' +
-              '<option value="90" '+(minDays===90?'selected':'')+'>90+ days (PAR 90)</option>' +
-            '</select>' +
-          '</div>' +
-          '<span class="badge badge-red">'+overdueLoans.length+' loan'+(overdueLoans.length!==1?'s':'')+' &nbsp;·&nbsp; KES '+fmtMoney(totalArrears)+' in arrears</span>' +
-        '</div>' +
+        '<p style="font-size:12px;color:var(--text-secondary)">View scheduled installments for today, a future date, or a custom date range.</p>' +
       '</div>' +
-      // Section 1: Dues by date (open by default)
-      makeSection('dues', '📋 Clients Due On Date', dueRows.length, duesAmtStr, duesHeader, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadDuesExcel()">⬇ Excel</button>') +
-      // Section 2: Missed installments retained in Dues/Forecast.
-      makeSection('missed', '⚠️ Loans with Missed Instalments — as of '+asOfDate, missedLoanRows.length, missedRows.length+' instalment'+(missedRows.length!==1?'s':'')+' · KES '+fmtMoney(missedArrears)+' unpaid', missedHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadMissedExcel()">⬇ Excel</button>') +
-      // Section 3: Arrears summary (collapsed by default)
-      makeSection('loansummary', '📊 Arrears Report', overdueLoans.length, 'KES '+fmtMoney(totalArrears), summaryHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadArrearsSummaryExcel()">⬇ Excel</button>') +
-      // Section 4: PAR / Chart (collapsed by default)
-      makeSection('parchart', '📈 Aging Buckets & PAR Metrics', null, 'PAR30: '+par30pct+'%  PAR60: '+par60pct+'%  PAR90: '+par90pct+'%', parHtml);
+      makeSection('dues', '📋 Clients Due / Forecast', dueRows.length, duesAmtStr, duesHeader, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadDuesExcel()">⬇ Excel</button>');
 
     main.innerHTML = pageHtml;
 
-    // Open dues and missed installments by default, as before.
-    ['dues','missed'].forEach(function(id){
+    ['dues'].forEach(function(id){
       var body = document.getElementById('arr-body-'+id);
       var icon = document.getElementById('arr-icon-'+id);
       if(body){ body.style.maxHeight = body.scrollHeight+'px'; }
       if(icon){ icon.style.transform = 'rotate(180deg)'; }
     });
 
-    const ctx=document.getElementById('chartAging');
-    if(ctx)charts.aging=new Chart(ctx,{type:'bar',data:{labels:['1-30d','31-60d','61-90d','91-180d','>180d'],datasets:[{data:buckets,backgroundColor:['#f59e0b','#f97316','#ef4444','#dc2626','#7f1d1d']}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#94a3b8'}},y:{ticks:{color:'#94a3b8'}}}}});
   }catch(e){console.error(e);toast(e.message,'error')}
 }
 
@@ -5280,11 +5265,10 @@ async function loadArrearsDues(startDate, endDate){
     scheds=data||[];
   }
 
-  const dueRows=((scheds||[]).filter(isCollectibleSchedule).map(s=>{
+  const dueRows=((scheds||[]).filter(isCurrentSchedule).map(s=>{
     const loan=activeLoanMap[s.loan_id];
     if(!loan)return null; // skip completed/non-active loans
     const remaining=Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0));
-    if(remaining===0)return null; // skip fully paid installments
     return{loan,s,remaining,paid:Number(s.total_paid||0)};
   })).filter(Boolean).sort((a,b)=>b.remaining-a.remaining);
 
@@ -5443,7 +5427,7 @@ async function renderReports(){
     {id:'repayment_perf',     title:'Repayment Performance',       icon:'📈', desc:'Collections by period, on-time vs late rates',                       color:'var(--accent-yellow)'},
     {id:'portfolio',          title:'Portfolio Report',            icon:'🏦', desc:'Active loans, outstanding balances, breakdown by product',             color:'var(--accent-blue)'},
     {id:'disbursement',       title:'Disbursement Report',         icon:'💸', desc:'Loans disbursed — amounts, methods, dates',                          color:'var(--accent-purple)'},
-    {id:'aging',              title:'Arrears Report',      icon:'⚠️', desc:'All overdue loans with aging buckets and PAR metrics',                color:'var(--accent-red)'},
+    {id:'aging',              title:'Arrears Report',      icon:'⚠️', desc:'Past-due principal and interest by client and loan officer',          color:'var(--accent-red)'},
     {id:'income',             title:'Income Report',               icon:'💰', desc:'Interest, fees, registration and penalties collected',                 color:'var(--accent-green)'},
     {id:'portfolio_summary',  title:'Portfolio Summary',           icon:'📊', desc:'Active clients without arrears vs total clients',                     color:'var(--accent-orange)'},
   ];
@@ -5531,20 +5515,26 @@ async function loadReportData(id){
   }
   if(id==='collection_daily'){
     const todayStr=today();
+    const tomorrowDate=parseLocalDate(todayStr);tomorrowDate.setDate(tomorrowDate.getDate()+1);
+    const tomorrowStr=localISODate(tomorrowDate);
     const[{data:reps},{data:scheds},{data:staffList}]=await Promise.all([
-      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name,id_number,phone))').eq('business_id',biz).eq('payment_date',todayStr),
-      sb('loan_schedules').select('*').eq('business_id',biz).eq('due_date',todayStr),
+      sb('loan_repayments').select('*,loans(loan_no,loan_officer_id,loan_clients(full_name,id_number,phone))').eq('business_id',biz).gte('payment_date',todayStr+'T00:00:00+03:00').lt('payment_date',tomorrowStr+'T00:00:00+03:00'),
+      sb('loan_schedules').select('*,loans(loan_officer_id)').eq('business_id',biz).eq('due_date',todayStr),
       sb('loan_staff').select('id,name').eq('business_id',biz)
     ]);
     const staffMap={};(staffList||[]).forEach(s=>{staffMap[s.id]=s.name;});
     const isOnlyOfficerDly = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     const filteredRepsDly = isOnlyOfficerDly ? (reps||[]).filter(r=>r.loans?.loan_officer_id===currentUser.id) : (reps||[]);
     const collected=filteredRepsDly.reduce((s,r)=>s+Number(r.amount||0),0);
-    const due=(scheds||[]).filter(isCollectibleSchedule).reduce((s,s2)=>s+Number(s2.total_due||0),0);
-    const rate=due>0?(collected/due*100):0;
-    return{title:`Daily Collection Report — ${today}`,summary:[
-      {label:'Date',value:today},{label:'Total Due Today',value:fmtMoney(due)},
-      {label:'Total Collected',value:fmtMoney(collected)},{label:'Collection Rate',value:rate.toFixed(1)+'%'},
+    const dueSchedules=(scheds||[]).filter(isCurrentSchedule).filter(s=>!isOnlyOfficerDly||s.loans?.loan_officer_id===currentUser.id);
+    const due=dueSchedules.reduce((s,s2)=>s+Number(s2.total_due||0),0);
+    const schedulePaid=dueSchedules.reduce((s,s2)=>s+Math.min(Number(s2.total_due||0),Number(s2.total_paid||0)),0);
+    const paidAgainstDue=Math.min(schedulePaid,due);
+    const rate=due>0?(paidAgainstDue/due*100):0;
+    return{title:`Daily Collection Report — ${todayStr}`,summary:[
+      {label:'Date',value:todayStr},{label:'Total Due Today',value:fmtMoney(due)},
+      {label:"Paid Against Today's Dues",value:fmtMoney(paidAgainstDue)},
+      {label:'Total Repayments Today',value:fmtMoney(collected)},{label:'Collection Rate',value:rate.toFixed(1)+'%'},
       {label:'Payments Count',value:filteredRepsDly.length}
     ],rows:filteredRepsDly.map(r=>({'Receipt':r.receipt_no,'Client':r.loans?.loan_clients?.full_name||'-','ID Number':r.loans?.loan_clients?.id_number||'-','Phone':r.loans?.loan_clients?.phone||'-','Loan #':r.loans?.loan_no||'-','Amount (KES)':Number(r.amount||0),'Method':r.payment_method,'Reference':r.payment_reference||'-','Date':r.payment_date,'Loan Officer':r.loans?.loan_officer_id?staffMap[r.loans.loan_officer_id]||'-':'-'})),cols:['Receipt','Client','ID Number','Phone','Loan #','Amount (KES)','Method','Reference','Date','Loan Officer']};
   }
@@ -5669,36 +5659,59 @@ async function loadReportData(id){
     })),cols:['Loan #','Client','ID Number','Phone','Location','Loan Officer','Disbursed Amount (KES)','Principal (KES)','Interest (KES)','Total P+I (KES)','Processing Fee (KES)','Term (Weeks)','Weekly Installment (KES)','Method','Reference','Disburse Date','Maturity Date','Status']};
   }
   if(id==='aging'){
-    const[{data:loans},{data:staff}]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name,phone,id_number,address)').eq('business_id',biz).eq('status','active'),
-      sb('loan_staff').select('id,name').eq('business_id',biz)
+    const reportDate=today();
+    const[{data:loans},{data:staff},{data:schedules}]=await Promise.all([
+      sb('loans').select('*,loan_clients(full_name,phone,id_number,address),loan_applications(loan_products(name))').eq('business_id',biz).eq('status','active'),
+      sb('loan_staff').select('id,name').eq('business_id',biz),
+      sb('loan_schedules').select('loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status').eq('business_id',biz).lt('due_date',reportDate).limit(100000)
     ]);
     const staffMap={};(staff||[]).forEach(s=>{staffMap[s.id]=s.name;});
     const isOnlyOfficerAge = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     const filteredLoansAge = isOnlyOfficerAge ? (loans||[]).filter(l=>l.loan_officer_id===currentUser.id) : (loans||[]);
-    const overdue=filteredLoansAge.filter(l=>l.overdue_days>0);
-    const bucket=d=>d<=30?'1-30d':d<=60?'31-60d':d<=90?'61-90d':'90d+';
+    const loanMap=new Map(filteredLoansAge.map(l=>[l.id,l]));
+    const arrearsByLoan=new Map();
+    let missedInstallments=0;
+    (schedules||[]).forEach(s=>{
+      if(!loanMap.has(s.loan_id)||!isCollectibleSchedule(s))return;
+      const unpaid=Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0));
+      if(unpaid<=0.01)return;
+      const split=scheduleOverdueSplit(s);
+      const current=arrearsByLoan.get(s.loan_id)||{total:0,principal:0,interest:0,oldest:s.due_date,count:0};
+      current.total+=unpaid;
+      current.principal+=split.principal;
+      current.interest+=split.interest;
+      current.oldest=String(s.due_date)<String(current.oldest)?s.due_date:current.oldest;
+      current.count+=1;
+      arrearsByLoan.set(s.loan_id,current);
+      missedInstallments+=1;
+    });
+    const overdue=filteredLoansAge.map(l=>{
+      const arr=arrearsByLoan.get(l.id);
+      if(!arr)return null;
+      const days=Math.max(1,Math.floor((parseLocalDate(reportDate)-parseLocalDate(arr.oldest))/(24*60*60*1000)));
+      return{loan:l,arrears:arr,days};
+    }).filter(Boolean).sort((a,b)=>b.days-a.days);
+    const totalArrears=overdue.reduce((sum,item)=>sum+item.arrears.total,0);
     return{title:'Arrears Report',summary:[
-      {label:'Total Active Loans',value:filteredLoansAge.length},{label:'Overdue Loans',value:overdue.length},
-      {label:'Total Arrears',value:fmtMoney(overdue.reduce((s,l)=>s+Number(l.arrears_amount||0),0))},
-      {label:'Total Outstanding (Overdue)',value:fmtMoney(overdue.reduce((s,l)=>s+Number(l.outstanding_balance||0),0))}
-    ],rows:overdue.sort((a,b)=>b.overdue_days-a.overdue_days).map(l=>({
-      'Loan #':l.loan_no,
-      'Client':l.loan_clients?.full_name||'-',
-      'ID Number':l.loan_clients?.id_number||'-',
-      'Phone':l.loan_clients?.phone||'-',
-      'Location':l.loan_clients?.address||'-',
-      'Loan Officer':l.loan_officer_id?staffMap[l.loan_officer_id]||'-':'-',
-      'Principal (KES)':Number(l.principal_amount||0),
-      'Interest (KES)':Number(l.total_interest||0),
-      'Total P+I (KES)':Number(l.total_payable||l.principal_amount||0),
-      'Outstanding (KES)':Number(l.outstanding_balance||0),
-      'Arrears (KES)':Number(l.arrears_amount||0),
-      'Overdue Days':l.overdue_days,
-      'Bucket':bucket(l.overdue_days),
-      'Disburse Date':l.disbursement_date||'-',
-      'Maturity Date':l.maturity_date||'-'
-    })),cols:['Loan #','Client','ID Number','Phone','Location','Loan Officer','Principal (KES)','Interest (KES)','Total P+I (KES)','Outstanding (KES)','Arrears (KES)','Overdue Days','Bucket','Disburse Date','Maturity Date']};
+      {label:'Report Date',value:reportDate},
+      {label:'Loans in Arrears',value:overdue.length},
+      {label:'Missed Installments',value:missedInstallments},
+      {label:'Total Arrears',value:fmtMoney(totalArrears)},
+      {label:'Total Outstanding Balance',value:fmtMoney(overdue.reduce((sum,item)=>sum+Number(item.loan.outstanding_balance||0),0))}
+    ],rows:overdue.map(({loan:l,arrears,days})=>({
+      'Branch':patafixBranchLabel(),
+      'Loan Officer':l.loan_officer_id?staffMap[l.loan_officer_id]||'Unassigned':'Unassigned',
+      'Client Name':l.loan_clients?.full_name||'-',
+      'Mobile Number':l.loan_clients?.phone||'-',
+      'Id Number':l.loan_clients?.id_number||'-',
+      'Product':loanProductLabel(l),
+      'Disbursed Amount':Number(l.disbursed_amount??l.principal_amount??0),
+      'Principal Overdue':Number(arrears.principal.toFixed(2)),
+      'Interest Overdue':Number(arrears.interest.toFixed(2)),
+      'Total Overdue':Number(arrears.total.toFixed(2)),
+      'Days in Arrears':days,
+      'Total Outstanding Balance':Number(l.outstanding_balance||0)
+    })),cols:['Branch','Loan Officer','Client Name','Mobile Number','Id Number','Product','Disbursed Amount','Principal Overdue','Interest Overdue','Total Overdue','Days in Arrears','Total Outstanding Balance']};
   }
   if(id==='income'){
     const[{data:reps},{data:clients},{data:activeLoans}]=await Promise.all([
@@ -5856,14 +5869,16 @@ async function renderOfficerDashboard(){
     ]);
     const oLoans=loansR.data||[];
     const allReps=repsR.data||[];
-    const allScheds=(schedsR.data||[]).filter(isCollectibleSchedule);
+    // Paid schedules remain part of the expected dues for their due date.
+    const allScheds=(schedsR.data||[]).filter(isCurrentSchedule);
     const allClients=clientsR.data||[];
 
     const oLoanIds=new Set(oLoans.map(l=>l.id));
     const oReps=allReps.filter(r=>oLoanIds.has(r.loan_id));
     const oScheds=allScheds.filter(s=>oLoanIds.has(s.loan_id));
+    const oLoansWithArrears=attachPerformanceArrears(oLoans,oScheds,todayStr);
 
-    const oActive=oLoans.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01);
+    const oActive=oLoansWithArrears.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01);
     const oClientIds=new Set(oLoans.map(l=>l.client_id));
 
     // New clients this month registered under loans of this officer
@@ -5876,7 +5891,7 @@ async function renderOfficerDashboard(){
     const olb=oActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
 
     // Total arrears
-    const totalArrears=oActive.reduce((s,l)=>s+Number(l.arrears_amount||0),0);
+    const totalArrears=oActive.reduce((s,l)=>s+loanPerformanceArrearsAmount(l),0);
 
     // Active clients (unique clients with active loans under this officer)
     const activeClientIds=new Set(oActive.map(l=>l.client_id));
@@ -5899,9 +5914,9 @@ async function renderOfficerDashboard(){
     const todayDueScheds=oScheds.filter(s=>s.due_date===todayStr&&activeOfficerLoanIds.has(s.loan_id));
     const dailyDue=todayDueScheds.reduce((s,sc)=>s+Number(sc.total_due||0),0);
     const schedDailyPaid=todayDueScheds.reduce((s,sc)=>s+Number(sc.total_paid||0),0);
-    const repsDailyPaid=oReps.filter(r=>(r.payment_date||'').slice(0,10)===todayStr)
+    const totalCollectedToday=oReps.filter(r=>(r.payment_date||'').slice(0,10)===todayStr)
       .reduce((s,r)=>s+Number(r.amount||0),0);
-    const dailyPaid=Math.min(Math.max(schedDailyPaid,repsDailyPaid),dailyDue);
+    const dailyPaid=Math.min(schedDailyPaid,dailyDue);
     const dailyRate=dailyDue>0?(dailyPaid/dailyDue*100):0;
 
     // Monthly collection rate — dues up to today this month vs paid
@@ -5913,12 +5928,12 @@ async function renderOfficerDashboard(){
     const monthlyRate=monthDue>0?(monthPaid/monthDue*100):0;
 
     // Arrears collected this month (payments on overdue loans)
-    const arrearsLoanIds=new Set(oActive.filter(l=>l.overdue_days>0||l.arrears_amount>0).map(l=>l.id));
+    const arrearsLoanIds=new Set(oActive.filter(l=>loanPerformanceArrearsAmount(l)>0.01).map(l=>l.id));
     const arrearsCollected=oReps.filter(r=>(r.payment_date||'').startsWith(nowM)&&arrearsLoanIds.has(r.loan_id))
       .reduce((s,r)=>s+Number(r.amount||0),0);
 
     // Book quality = (active clients - clients in arrears) / active clients × 100
-    const clientsInArrears=new Set(oActive.filter(l=>l.arrears_amount>0||l.overdue_days>0).map(l=>l.client_id)).size;
+    const clientsInArrears=new Set(oActive.filter(l=>loanPerformanceArrearsAmount(l)>0.01).map(l=>l.client_id)).size;
     const bookQuality=activeClients>0?((activeClients-clientsInArrears)/activeClients*100):100;
 
     // Build officer selector HTML (admin only)
@@ -5995,18 +6010,22 @@ async function renderOfficerDashboard(){
           <div style="font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">📅 Daily Collection Rate — Today</div>
           <div style="font-size:28px;font-weight:800;color:${rateColor(dailyRate)};margin-bottom:6px">${dailyRate.toFixed(1)}%</div>
           <div class="dash-rate-bar" style="margin-bottom:10px"><div class="dash-rate-fill" style="width:${Math.min(100,dailyRate).toFixed(1)}%;background:${rateColor(dailyRate)}"></div></div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;text-align:center">
+          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;text-align:center">
             <div style="background:rgba(255,255,255,0.05);border-radius:6px;padding:6px 4px">
               <div style="font-size:9px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px">Expected Today</div>
               <div style="font-size:13px;font-weight:800;color:var(--text-primary)">${fmtMoney(dailyDue)}</div>
             </div>
             <div style="background:rgba(5,150,105,0.12);border-radius:6px;padding:6px 4px">
-              <div style="font-size:9px;font-weight:700;color:var(--accent-green);text-transform:uppercase;letter-spacing:.4px">Collected</div>
+              <div style="font-size:9px;font-weight:700;color:var(--accent-green);text-transform:uppercase;letter-spacing:.4px">Paid Against Today's Dues</div>
               <div style="font-size:13px;font-weight:800;color:var(--accent-green)">${fmtMoney(dailyPaid)}</div>
             </div>
             <div style="background:rgba(239,68,68,0.1);border-radius:6px;padding:6px 4px">
               <div style="font-size:9px;font-weight:700;color:var(--accent-red);text-transform:uppercase;letter-spacing:.4px">Uncollected</div>
               <div style="font-size:13px;font-weight:800;color:var(--accent-red)">${fmtMoney(Math.max(0,dailyDue-dailyPaid))}</div>
+            </div>
+            <div style="background:rgba(37,99,235,0.1);border-radius:6px;padding:6px 4px">
+              <div style="font-size:9px;font-weight:700;color:var(--accent-blue);text-transform:uppercase;letter-spacing:.4px">Total Repayments Today</div>
+              <div style="font-size:13px;font-weight:800;color:var(--accent-blue)">${fmtMoney(totalCollectedToday)}</div>
             </div>
           </div>
         </div>
@@ -7279,7 +7298,7 @@ function downloadOfficerPerformanceReport(){
   const rows = window._perfRows || [];
   if(!rows.length) return toast('No data to download','warning');
   const nowM = localISODate().slice(0,7);
-  const data = rows.map(({o,oActive,oLoansMonth,outstanding,overdueLoans,collected})=>{
+  const data = rows.map(({o,oActive,oLoansMonth,outstanding,overdueLoans,collected,duesToday,paidAgainstToday,collectedToday})=>{
     const clientsInArr = new Set(overdueLoans.map(l=>l.client_id)).size;
     const totalArrAmt  = overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsAmount(l),0);
     const principalArrears = overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsSplit(l).principal,0);
@@ -7302,6 +7321,9 @@ function downloadOfficerPerformanceReport(){
       'Principal Outstanding (KES)': Number(principalOutstanding.toFixed(2)),
       'Interest Outstanding (KES)': Number(interestOutstanding.toFixed(2)),
       'PAR %':             Number(par.toFixed(2)),
+      'Dues Today (KES)':  Number(duesToday.toFixed(2)),
+      "Paid Against Today's Dues (KES)": Number(paidAgainstToday.toFixed(2)),
+      'Total Repayments Today (KES)': Number(collectedToday.toFixed(2)),
       'Collections Month (KES)': Number(collected.toFixed(2)),
       'Disbursed Month (KES)':   Number(disbMonth.toFixed(2))
     };
@@ -7321,6 +7343,9 @@ function downloadOfficerPerformanceReport(){
     'Principal Outstanding (KES)': Number(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0),0).toFixed(2)),
     'Interest Outstanding (KES)': Number(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0),0).toFixed(2)),
     'PAR %':             '',
+    'Dues Today (KES)':  Number(rows.reduce((s,r)=>s+r.duesToday,0).toFixed(2)),
+    "Paid Against Today's Dues (KES)": Number(rows.reduce((s,r)=>s+r.paidAgainstToday,0).toFixed(2)),
+    'Total Repayments Today (KES)': Number(rows.reduce((s,r)=>s+r.collectedToday,0).toFixed(2)),
     'Collections Month (KES)': Number(rows.reduce((s,r)=>s+r.collected,0).toFixed(2)),
     'Disbursed Month (KES)':   Number(rows.reduce((s,r)=>s+r.oLoansMonth.reduce((x,l)=>x+Number(l.principal_amount||0),0),0).toFixed(2))
   });
@@ -7331,7 +7356,7 @@ function downloadOfficerPerformanceReport(){
   ws['!cols'] = [
     {wch:22},{wch:10},{wch:14},{wch:18},{wch:8},
     {wch:14},{wch:14},{wch:22},{wch:22},{wch:26},{wch:25},
-    {wch:8},{wch:20},{wch:20}
+    {wch:8},{wch:18},{wch:30},{wch:28},{wch:20},{wch:20}
   ];
 
   // Header row styling hint (works in Excel)
@@ -7351,18 +7376,20 @@ async function renderOfficerPerformance(){
   const main=$('#mainContent');
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
   try{
-    const[loansR,repsR,appsR,staffR,schedulesR]=await Promise.all([
+    const[loansR,repsR,appsR,staffR,schedulesR,todaySchedulesR]=await Promise.all([
       sb('loans').select('*,loan_clients(full_name)').eq('business_id',currentUser.business_id),
       sb('loan_repayments').select('*').eq('business_id',currentUser.business_id),
       sb('loan_applications').select('*').eq('business_id',currentUser.business_id),
       // FIX #13: loan_staff column is `name`, not `full_name`
       sb('loan_staff').select('id,name,email,role').eq('business_id',currentUser.business_id),
-      sb('loan_schedules').select('loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status').eq('business_id',currentUser.business_id).lt('due_date', localISODate()).limit(100000)
+      sb('loan_schedules').select('loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status').eq('business_id',currentUser.business_id).lt('due_date', localISODate()).limit(100000),
+      sb('loan_schedules').select('loan_id,due_date,total_due,total_paid,status').eq('business_id',currentUser.business_id).eq('due_date',localISODate()).limit(100000)
     ]);
     const allLoans=attachPerformanceArrears(loansR.data||[], schedulesR.data||[], localISODate());
     const allReps=repsR.data||[];
     const allApps=appsR.data||[];
     const allStaff=staffR.data||[];
+    const todaySchedules=(todaySchedulesR.data||[]).filter(isCurrentSchedule);
 
     // Filter to staff who have the loan_officer role ONLY.
     // Admins/branch managers should not appear in officer performance —
@@ -7377,12 +7404,22 @@ async function renderOfficerPerformance(){
     const viewSelf = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     const filteredOfficers = viewSelf ? officers.filter(o=>o.id===currentUser.id) : officers;
 
-    const nowM = localISODate().slice(0,7);
+    const todayStr=localISODate();
+    const nowM = todayStr.slice(0,7);
+
+    // Keep loans without a current loan-officer assignment visible so the
+    // officer totals reconcile with the business-wide admin totals.
+    const officerIds=new Set(filteredOfficers.map(o=>o.id));
+    const unassignedLoans=allLoans.filter(l=>!officerIds.has(l.loan_officer_id));
+    const performanceSubjects=[...filteredOfficers];
+    if(!viewSelf&&unassignedLoans.length){
+      performanceSubjects.push({id:'__unassigned__',name:'Unassigned',email:'',role:'loan_officer'});
+    }
 
     window._perfRows = []; // reset
-    const rows = filteredOfficers.map(o=>{
+    const rows = performanceSubjects.map(o=>{
       // Match loans where loan_officer_id === o.id (also include apps later)
-      const oLoans = allLoans.filter(l=>l.loan_officer_id===o.id);
+      const oLoans = o.id==='__unassigned__' ? unassignedLoans : allLoans.filter(l=>l.loan_officer_id===o.id);
       const oActive = oLoans.filter(l=>l.status==='active');
       const oApps = allApps.filter(a=>a.loan_officer_id===o.id);
       const oAppsMonth = oApps.filter(a=>a.created_at && a.created_at.startsWith(nowM));
@@ -7395,7 +7432,16 @@ async function renderOfficerPerformance(){
       const oLoanIds = new Set(oLoans.map(l=>l.id));
       const oRepsMonth = allReps.filter(r=>r.loan_id && oLoanIds.has(r.loan_id) && r.payment_date && r.payment_date.startsWith(nowM));
       const collected = oRepsMonth.reduce((s,r)=>s+Number(r.amount||0),0);
-      const row = {o,oLoans,oActive,oApps,oAppsMonth,oLoansMonth,oClientIds,portfolio,outstanding,overdueLoans,collected};
+      const oTodaySchedules=todaySchedules.filter(s=>oLoanIds.has(s.loan_id));
+      const duesToday=oTodaySchedules.reduce((s,sc)=>s+Number(sc.total_due||0),0);
+      const paidAgainstToday=Math.min(
+        duesToday,
+        oTodaySchedules.reduce((s,sc)=>s+Math.min(Number(sc.total_due||0),Number(sc.total_paid||0)),0)
+      );
+      const collectedToday=allReps
+        .filter(r=>r.loan_id&&oLoanIds.has(r.loan_id)&&(r.payment_date||'').slice(0,10)===todayStr)
+        .reduce((s,r)=>s+Number(r.amount||0),0);
+      const row = {o,oLoans,oActive,oApps,oAppsMonth,oLoansMonth,oClientIds,portfolio,outstanding,overdueLoans,collected,duesToday,paidAgainstToday,collectedToday};
       window._perfRows.push(row);
       return row;
     });
@@ -7416,10 +7462,11 @@ async function renderOfficerPerformance(){
             <th>Officer</th><th>Branch</th><th>Active Clients</th><th>ACC Arrears</th>
             <th>BQ %</th><th>OLB (KES)</th><th>Arrears (KES)</th>
             <th>Principal Arrears</th><th>Interest Arrears</th><th>Principal Outstanding</th><th>Interest Outstanding</th><th>PAR %</th>
+            <th>Dues Today</th><th>Paid Against Today's Dues</th><th>Total Repayments Today</th>
             <th>Collections (Month)</th><th>Disbursed (Month)</th>
           </tr></thead>
           <tbody>
-            ${rows.map(({o,oLoans,oActive,oClientIds,portfolio,outstanding,overdueLoans,collected,oLoansMonth})=>{
+            ${rows.map(({o,oLoans,oActive,oClientIds,portfolio,outstanding,overdueLoans,collected,oLoansMonth,duesToday,paidAgainstToday,collectedToday})=>{
               const clientsInArr=new Set(overdueLoans.map(l=>l.client_id)).size;
               const totalArrAmt=overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsAmount(l),0);
               const principalArrears=overdueLoans.reduce((s,l)=>s+loanPerformanceArrearsSplit(l).principal,0);
@@ -7444,10 +7491,13 @@ async function renderOfficerPerformance(){
                 '<td>'+fmtMoney(principalOutstanding)+'</td>' +
                 '<td>'+fmtMoney(interestOutstanding)+'</td>' +
                 '<td><strong style="color:'+parColor+'">'+par.toFixed(1)+'%</strong></td>' +
+                '<td>'+fmtMoney(duesToday)+'</td>' +
+                '<td><strong style="color:var(--accent-green)">'+fmtMoney(paidAgainstToday)+'</strong></td>' +
+                '<td><strong style="color:var(--accent-blue)">'+fmtMoney(collectedToday)+'</strong></td>' +
                 '<td><strong style="color:var(--accent-green)">'+fmtMoney(collected)+'</strong></td>' +
                 '<td>'+fmtMoney(disbMonth)+'</td>' +
               '</tr>';
-            }).join('')||'<tr><td colspan="14" style="text-align:center;color:var(--text-secondary)">No officer data found</td></tr>'}
+            }).join('')||'<tr><td colspan="17" style="text-align:center;color:var(--text-secondary)">No officer data found</td></tr>'}
           </tbody>
           <tfoot>
             <tr style="font-weight:700;background:rgba(255,255,255,0.04)">
@@ -7463,6 +7513,9 @@ async function renderOfficerPerformance(){
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).principal,0),0))}</strong></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oActive.reduce((x,l)=>x+splitLoanBalanceAmount(l,l.outstanding_balance).interest,0),0))}</strong></td>
               <td></td>
+              <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.duesToday,0))}</strong></td>
+              <td><strong style="color:var(--accent-green)">${fmtMoney(rows.reduce((s,r)=>s+r.paidAgainstToday,0))}</strong></td>
+              <td><strong style="color:var(--accent-blue)">${fmtMoney(rows.reduce((s,r)=>s+r.collectedToday,0))}</strong></td>
               <td><strong style="color:var(--accent-green)">${fmtMoney(rows.reduce((s,r)=>s+r.collected,0))}</strong></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oLoansMonth.reduce((x,l)=>x+Number(l.principal_amount||0),0),0))}</strong></td>
             </tr>
