@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-14-dues-forecast-v37';
+const APP_VERSION = 'patafix-2026-08-14-officer-arrears-v38';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -4918,7 +4918,7 @@ async function renderOverdue(opts){
     if(loanIds.length){
       const{data:scheds}=await sb('loan_schedules')
         .select('*').in('loan_id',loanIds)
-        .lt('due_date',asOfDate)
+        .lte('due_date',asOfDate)
         .order('due_date',{ascending:true});
       allScheds=scheds||[];
     }
@@ -4927,7 +4927,7 @@ async function renderOverdue(opts){
     const loanMap={};
     (loans||[]).forEach(l=>{ loanMap[l.id]=l; });
 
-    // Arrears are strictly past due; dues on the selected date are forecast only.
+    // Dues/Forecast retains installments due on the selected date.
     const missed=allScheds.filter(s=>{
       const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
       return unpaid>0.01 && ['pending','partial','overdue'].includes(s.status);
@@ -4943,9 +4943,6 @@ async function renderOverdue(opts){
       loanArrears[s.loan_id].principal+=split.principal;
       loanArrears[s.loan_id].interest+=split.interest;
       loanArrears[s.loan_id].scheds.push(s);
-    });
-    (loans||[]).forEach(l=>{
-      l._strict_arrears=Number((loanArrears[l.id]?.arrears||0).toFixed(2));
     });
 
     // Loans that have arrears as of asOfDate
@@ -4967,6 +4964,21 @@ async function renderOverdue(opts){
       };
     }).filter(Boolean);
 
+    // Retain the previous fallback for older/imported loans without schedules.
+    const scheduleCapturedIds=new Set(overdueLoans.map(l=>l.id));
+    const fallbackLoans=(loans||[]).filter(l=>
+      l.status==='active' &&
+      !scheduleCapturedIds.has(l.id) &&
+      (Number(l.arrears_amount||0)>0 || Number(l.overdue_days||0)>0)
+    ).map(l=>({
+      ...l,
+      _asof_days:Number(l.overdue_days||0),
+      _asof_arrears:Number(l.arrears_amount||0),
+      _asof_arrears_split:splitLoanBalanceAmount(l,Number(l.arrears_amount||0)),
+      _scheds:[]
+    }));
+    overdueLoans=overdueLoans.concat(fallbackLoans);
+
     // ── Fallback: include any active loan with arrears_amount > 0 or overdue_days > 0
     // that was not already captured by the schedule-based logic above
     // ────────────────────────────────────────────────────────────────────────
@@ -4978,7 +4990,7 @@ async function renderOverdue(opts){
     const allActive=(loans||[]).filter(l=>l.status==='active');
     const portfolio=allActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
     const buckets=[0,0,0,0,0];
-    overdueLoans.forEach(l=>{const d=Number(l._asof_days||0);if(d<=30)buckets[0]++;else if(d<=60)buckets[1]++;else if(d<=90)buckets[2]++;else if(d<=180)buckets[3]++;else buckets[4]++;});
+    overdueLoans.forEach(l=>{const d=Number(l.overdue_days||0);if(d<=30)buckets[0]++;else if(d<=60)buckets[1]++;else if(d<=90)buckets[2]++;else if(d<=180)buckets[3]++;else buckets[4]++;});
     const totalArrears=overdueLoans.reduce((s,l)=>s+Number(l._asof_arrears!=null?l._asof_arrears:l.arrears_amount||0),0);
 
     // Build missed installment rows (flat)
@@ -5125,9 +5137,9 @@ async function renderOverdue(opts){
     summaryHtml += '</tbody></table></div>';
 
     // ── 4. PAR metrics ──
-    var par30pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l._asof_days||0)>30;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
-    var par60pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l._asof_days||0)>60;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
-    var par90pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l._asof_days||0)>90;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
+    var par30pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l.overdue_days||0)>30;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
+    var par60pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l.overdue_days||0)>60;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
+    var par90pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l.overdue_days||0)>90;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
     var parHtml =
       '<div style="padding:12px 14px;font-size:13px;display:flex;gap:24px;flex-wrap:wrap">' +
         '<span><strong>PAR 30:</strong> '+par30pct+'%</span>' +
@@ -5163,15 +5175,17 @@ async function renderOverdue(opts){
       '</div>' +
       // Section 1: Dues by date (open by default)
       makeSection('dues', '📋 Clients Due On Date', dueRows.length, duesAmtStr, duesHeader, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadDuesExcel()">⬇ Excel</button>') +
-      // Section 2: Arrears summary (collapsed by default)
+      // Section 2: Missed installments retained in Dues/Forecast.
+      makeSection('missed', '⚠️ Loans with Missed Instalments — as of '+asOfDate, missedLoanRows.length, missedRows.length+' instalment'+(missedRows.length!==1?'s':'')+' · KES '+fmtMoney(missedArrears)+' unpaid', missedHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadMissedExcel()">⬇ Excel</button>') +
+      // Section 3: Arrears summary (collapsed by default)
       makeSection('loansummary', '📊 Arrears Report', overdueLoans.length, 'KES '+fmtMoney(totalArrears), summaryHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadArrearsSummaryExcel()">⬇ Excel</button>') +
-      // Section 3: PAR / Chart (collapsed by default)
+      // Section 4: PAR / Chart (collapsed by default)
       makeSection('parchart', '📈 Aging Buckets & PAR Metrics', null, 'PAR30: '+par30pct+'%  PAR60: '+par60pct+'%  PAR90: '+par90pct+'%', parHtml);
 
     main.innerHTML = pageHtml;
 
-    // Open the dues/forecast section by default.
-    ['dues'].forEach(function(id){
+    // Open dues and missed installments by default, as before.
+    ['dues','missed'].forEach(function(id){
       var body = document.getElementById('arr-body-'+id);
       var icon = document.getElementById('arr-icon-'+id);
       if(body){ body.style.maxHeight = body.scrollHeight+'px'; }
@@ -5209,7 +5223,7 @@ function buildDuesTable(dueRows){
   html += '</tr></thead><tbody>';
   filteredRows.forEach(function(item){
     var loan=item.loan, s=item.s, remaining=item.remaining, paid=item.paid;
-    var arrears=Number(loan._strict_arrears??loan.arrears_amount??0);
+    var arrears=Number(loan.arrears_amount||0);
     var loanBalance=Number(loan.outstanding_balance||0);
     var isPartial = paid>0 && remaining>0;
     var badge = isPartial
@@ -5324,7 +5338,7 @@ function downloadDuesExcel(){
     'Total Due (KES)':Number(s.total_due||0),
     'Amount Paid (KES)':paid,
     'Due Balance (KES)':remaining,
-    'Arrears (KES)':Number(loan._strict_arrears??loan.arrears_amount??0),
+    'Arrears (KES)':Number(loan._asof_arrears != null ? loan._asof_arrears : loan.arrears_amount||0),
     'Maturity Date':loan.maturity_date||'-',
     'Outstanding Loan Balance (KES)':Number(loan.outstanding_balance||0),
     'Status':remaining===0?'Paid':paid>0?'Partial':'Unpaid'
