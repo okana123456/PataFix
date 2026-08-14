@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-10-restructure-interest-v36';
+const APP_VERSION = 'patafix-2026-08-14-dues-forecast-v37';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1562,7 +1562,7 @@ function buildSidebar() {
     { id: 'disbursement', icon: '$', label: 'Disbursement', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'loans', icon: 'L', label: 'Active Loans', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier'] },
     { id: 'repayments', icon: 'R', label: 'Repayments', roles: ['admin', 'branch_manager', 'cashier', 'loan_officer'] },
-    { id: 'overdue', icon: '!', label: 'Arrears', roles: ['admin', 'branch_manager', 'loan_officer'] },
+    { id: 'overdue', icon: '!', label: 'Dues/Forecast Report', roles: ['admin', 'branch_manager', 'loan_officer'] },
     
     { isHeader: true, label: 'Management', roles: ['admin', 'branch_manager'] },
     { id: 'reports', icon: '+', label: 'Reports', roles: ['admin', 'branch_manager'] },
@@ -4875,8 +4875,14 @@ function exportRepaymentsExcel(){
 async function renderOverdue(opts){
   // opts can be: undefined, a minDays number (legacy), or {asOfDate, minDays}
   let asOfDate, minDays=1;
-  if(opts && typeof opts==='object'){ asOfDate=opts.asOfDate; minDays=parseInt(opts.minDays??1)||1; }
-  else if(opts!==undefined){ minDays=parseInt(opts)||1; }
+  if(opts && typeof opts==='object'){
+    asOfDate=opts.asOfDate;
+    const parsedMinDays=parseInt(opts.minDays??1,10);
+    minDays=Number.isFinite(parsedMinDays)?parsedMinDays:1;
+  }else if(opts!==undefined){
+    const parsedMinDays=parseInt(opts,10);
+    minDays=Number.isFinite(parsedMinDays)?parsedMinDays:1;
+  }
   const todayStr=today();
   asOfDate=asOfDate||todayStr;
 
@@ -4912,7 +4918,7 @@ async function renderOverdue(opts){
     if(loanIds.length){
       const{data:scheds}=await sb('loan_schedules')
         .select('*').in('loan_id',loanIds)
-        .lte('due_date',asOfDate)
+        .lt('due_date',asOfDate)
         .order('due_date',{ascending:true});
       allScheds=scheds||[];
     }
@@ -4921,7 +4927,7 @@ async function renderOverdue(opts){
     const loanMap={};
     (loans||[]).forEach(l=>{ loanMap[l.id]=l; });
 
-    // Missed installments: due on or before asOfDate, with unpaid balance
+    // Arrears are strictly past due; dues on the selected date are forecast only.
     const missed=allScheds.filter(s=>{
       const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
       return unpaid>0.01 && ['pending','partial','overdue'].includes(s.status);
@@ -4931,9 +4937,15 @@ async function renderOverdue(opts){
     const loanArrears={};
     missed.forEach(s=>{
       const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
-      if(!loanArrears[s.loan_id]){ loanArrears[s.loan_id]={oldest:s.due_date,arrears:0,scheds:[]}; }
+      const split=scheduleOverdueSplit(s);
+      if(!loanArrears[s.loan_id]){ loanArrears[s.loan_id]={oldest:s.due_date,arrears:0,principal:0,interest:0,scheds:[]}; }
       loanArrears[s.loan_id].arrears+=unpaid;
+      loanArrears[s.loan_id].principal+=split.principal;
+      loanArrears[s.loan_id].interest+=split.interest;
       loanArrears[s.loan_id].scheds.push(s);
+    });
+    (loans||[]).forEach(l=>{
+      l._strict_arrears=Number((loanArrears[l.id]?.arrears||0).toFixed(2));
     });
 
     // Loans that have arrears as of asOfDate
@@ -4943,23 +4955,20 @@ async function renderOverdue(opts){
       const oldest=new Date(loanArrears[lid].oldest);
       const asOf=new Date(asOfDate);
       const daysOld=Math.floor((asOf-oldest)/(1000*60*60*24));
-      return {...loan, _asof_days:daysOld, _asof_arrears:loanArrears[lid].arrears, _scheds:loanArrears[lid].scheds};
+      return {
+        ...loan,
+        _asof_days:daysOld,
+        _asof_arrears:Number(loanArrears[lid].arrears.toFixed(2)),
+        _asof_arrears_split:{
+          principal:Number(loanArrears[lid].principal.toFixed(2)),
+          interest:Number(loanArrears[lid].interest.toFixed(2))
+        },
+        _scheds:loanArrears[lid].scheds
+      };
     }).filter(Boolean);
 
     // ── Fallback: include any active loan with arrears_amount > 0 or overdue_days > 0
     // that was not already captured by the schedule-based logic above
-    const scheduleCapturedIds=new Set(overdueLoans.map(l=>l.id));
-    const fallbackLoans=(loans||[]).filter(l=>
-      l.status==='active' &&
-      !scheduleCapturedIds.has(l.id) &&
-      (Number(l.arrears_amount||0)>0 || Number(l.overdue_days||0)>0)
-    ).map(l=>({
-      ...l,
-      _asof_days:Number(l.overdue_days||0),
-      _asof_arrears:Number(l.arrears_amount||0),
-      _scheds:[]
-    }));
-    overdueLoans=overdueLoans.concat(fallbackLoans);
     // ────────────────────────────────────────────────────────────────────────
 
     // Apply minDays filter
@@ -4969,7 +4978,7 @@ async function renderOverdue(opts){
     const allActive=(loans||[]).filter(l=>l.status==='active');
     const portfolio=allActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
     const buckets=[0,0,0,0,0];
-    overdueLoans.forEach(l=>{const d=Number(l.overdue_days||0);if(d<=30)buckets[0]++;else if(d<=60)buckets[1]++;else if(d<=90)buckets[2]++;else if(d<=180)buckets[3]++;else buckets[4]++;});
+    overdueLoans.forEach(l=>{const d=Number(l._asof_days||0);if(d<=30)buckets[0]++;else if(d<=60)buckets[1]++;else if(d<=90)buckets[2]++;else if(d<=180)buckets[3]++;else buckets[4]++;});
     const totalArrears=overdueLoans.reduce((s,l)=>s+Number(l._asof_arrears!=null?l._asof_arrears:l.arrears_amount||0),0);
 
     // Build missed installment rows (flat)
@@ -5085,38 +5094,40 @@ async function renderOverdue(opts){
     missedHtml += '</tbody></table></div>';
     const missedArrears = missedRows.reduce(function(s,r){return s+r.remaining;},0);
 
-    // ── 3. Loan Summary table ──
+    // Arrears summary in the client's requested format.
     let summaryHtml = '<div class="table-wrap"><table style="font-size:12px"><thead><tr>' +
-      '<th>Client</th><th>ID Number</th><th>Phone</th><th>Loan #</th><th>Loan Officer</th><th>Total Arrears</th><th>Days Overdue</th><th>Bucket</th><th>Actions</th>' +
+      '<th>Branch</th><th>Loan Officer</th><th>Client Name</th><th>Mobile Number</th><th>ID Number</th><th>Product</th><th>Disbursed Amount</th><th>Principal Overdue</th><th>Interest Overdue</th><th>Total Overdue</th><th>Days in Arrears</th><th>Total Outstanding Balance</th>' +
       '</tr></thead><tbody>';
     if(overdueLoans.length){
       overdueLoans.forEach(function(l){
         var arrears=Number(l._asof_arrears!=null?l._asof_arrears:l.arrears_amount||0);
         var d=Number(l._asof_days!=null?l._asof_days:l.overdue_days||0);
-        var bkt=d<=30?'1-30d':d<=60?'31-60d':d<=90?'61-90d':d<=180?'91-180d':'>180d';
-        var bktColor=d<=30?'#f59e0b':d<=60?'#f97316':d<=90?'#ef4444':d<=180?'#dc2626':'#7f1d1d';
+        var split=l._asof_arrears_split||splitLoanBalanceAmount(l,arrears);
         var officerName=(window._staffMap && l.loan_officer_id && window._staffMap[l.loan_officer_id])||'Unassigned';
         summaryHtml += '<tr>' +
-          '<td><strong>'+(l.loan_clients?.full_name||'-')+'</strong></td>' +
-          '<td>'+(l.loan_clients?.id_number||'-')+'</td>' +
-          '<td><a href="tel:'+(l.loan_clients?.phone||'')+'" style="color:var(--accent-blue)">'+(l.loan_clients?.phone||'-')+'</a></td>' +
-          '<td>'+l.loan_no+'</td>' +
+          '<td>'+patafixBranchLabel()+'</td>' +
           '<td><span class="badge badge-gray" style="text-transform:capitalize">'+officerName+'</span></td>' +
+          '<td><strong>'+(l.loan_clients?.full_name||'-')+'</strong></td>' +
+          '<td><a href="tel:'+(l.loan_clients?.phone||'')+'" style="color:var(--accent-blue)">'+(l.loan_clients?.phone||'-')+'</a></td>' +
+          '<td>'+(l.loan_clients?.id_number||'-')+'</td>' +
+          '<td>'+loanProductLabel(l)+'</td>' +
+          '<td>'+fmtMoney(l.disbursed_amount??l.principal_amount??0)+'</td>' +
+          '<td style="color:var(--accent-red)">'+fmtMoney(split.principal)+'</td>' +
+          '<td style="color:var(--accent-red)">'+fmtMoney(split.interest)+'</td>' +
           '<td style="color:var(--accent-red);font-weight:700">'+fmtMoney(arrears)+'</td>' +
           '<td><span class="badge badge-red">'+d+'d</span></td>' +
-          '<td><span class="badge" style="background:'+bktColor+';color:#fff">'+bkt+'</span></td>' +
-          '<td>'+(hasRole('admin','branch_manager','cashier')?'<button class="btn btn-success btn-sm" onclick="openPaymentModal(\''+l.id+'\')">Pay</button> ':'')+'<button class="btn btn-outline btn-sm" onclick="addFollowUp(\''+l.id+'\',\''+l.client_id+'\')">Follow-Up</button></td>' +
+          '<td style="font-weight:700">'+fmtMoney(l.outstanding_balance||0)+'</td>' +
         '</tr>';
       });
     } else {
-      summaryHtml += '<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:12px">No overdue loans</td></tr>';
+      summaryHtml += '<tr><td colspan="12" style="text-align:center;color:var(--text-secondary);padding:12px">No loans in arrears</td></tr>';
     }
     summaryHtml += '</tbody></table></div>';
 
     // ── 4. PAR metrics ──
-    var par30pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l.overdue_days||0)>30;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
-    var par60pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l.overdue_days||0)>60;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
-    var par90pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l.overdue_days||0)>90;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
+    var par30pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l._asof_days||0)>30;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
+    var par60pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l._asof_days||0)>60;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
+    var par90pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l._asof_days||0)>90;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
     var parHtml =
       '<div style="padding:12px 14px;font-size:13px;display:flex;gap:24px;flex-wrap:wrap">' +
         '<span><strong>PAR 30:</strong> '+par30pct+'%</span>' +
@@ -5129,7 +5140,7 @@ async function renderOverdue(opts){
     var pageHtml =
       // Header
       '<div class="page-header" style="flex-direction:column;align-items:flex-start;gap:10px">' +
-        '<h1>Arrears Report</h1>' +
+        '<h1>Dues/Forecast Report</h1>' +
         '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">' +
           '<div style="display:flex;align-items:center;gap:6px">' +
             '<span style="font-size:12px;color:var(--text-secondary);white-space:nowrap">As of date:</span>' +
@@ -5152,17 +5163,15 @@ async function renderOverdue(opts){
       '</div>' +
       // Section 1: Dues by date (open by default)
       makeSection('dues', '📋 Clients Due On Date', dueRows.length, duesAmtStr, duesHeader, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadDuesExcel()">⬇ Excel</button>') +
-      // Section 2: Missed installments (open by default)
-      makeSection('missed', '⚠️ Loans with Missed Instalments — as of '+asOfDate, missedLoanRows.length, missedRows.length+' instalment'+(missedRows.length!==1?'s':'')+' · KES '+fmtMoney(missedArrears)+' unpaid', missedHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadMissedExcel()">⬇ Excel</button>') +
-      // Section 3: Loan summary (collapsed by default)
-      makeSection('loansummary', '📊 Loan-Level Arrears Summary', overdueLoans.length, 'KES '+fmtMoney(totalArrears), summaryHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadArrearsSummaryExcel()">⬇ Excel</button>') +
-      // Section 4: PAR / Chart (collapsed by default)
+      // Section 2: Arrears summary (collapsed by default)
+      makeSection('loansummary', '📊 Arrears Report', overdueLoans.length, 'KES '+fmtMoney(totalArrears), summaryHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadArrearsSummaryExcel()">⬇ Excel</button>') +
+      // Section 3: PAR / Chart (collapsed by default)
       makeSection('parchart', '📈 Aging Buckets & PAR Metrics', null, 'PAR30: '+par30pct+'%  PAR60: '+par60pct+'%  PAR90: '+par90pct+'%', parHtml);
 
     main.innerHTML = pageHtml;
 
-    // Open first two sections by default
-    ['dues','missed'].forEach(function(id){
+    // Open the dues/forecast section by default.
+    ['dues'].forEach(function(id){
       var body = document.getElementById('arr-body-'+id);
       var icon = document.getElementById('arr-icon-'+id);
       if(body){ body.style.maxHeight = body.scrollHeight+'px'; }
@@ -5200,7 +5209,7 @@ function buildDuesTable(dueRows){
   html += '</tr></thead><tbody>';
   filteredRows.forEach(function(item){
     var loan=item.loan, s=item.s, remaining=item.remaining, paid=item.paid;
-    var arrears=Number(loan.arrears_amount||0);
+    var arrears=Number(loan._strict_arrears??loan.arrears_amount??0);
     var loanBalance=Number(loan.outstanding_balance||0);
     var isPartial = paid>0 && remaining>0;
     var badge = isPartial
@@ -5315,7 +5324,7 @@ function downloadDuesExcel(){
     'Total Due (KES)':Number(s.total_due||0),
     'Amount Paid (KES)':paid,
     'Due Balance (KES)':remaining,
-    'Arrears (KES)':Number(loan._asof_arrears != null ? loan._asof_arrears : loan.arrears_amount||0),
+    'Arrears (KES)':Number(loan._strict_arrears??loan.arrears_amount??0),
     'Maturity Date':loan.maturity_date||'-',
     'Outstanding Loan Balance (KES)':Number(loan.outstanding_balance||0),
     'Status':remaining===0?'Paid':paid>0?'Partial':'Unpaid'
@@ -5363,21 +5372,28 @@ function downloadArrearsSummaryExcel(){
   const{asOfDate,overdueLoans}=snap;
   if(!overdueLoans.length){toast('No arrears data to download','warning');return;}
   const sheet=overdueLoans.map(l=>({
-    'Loan #':l.loan_no,
-    'Client Name':l.loan_clients?.full_name||'-',
-    'ID Number':l.loan_clients?.id_number||'-',
-    'Phone':l.loan_clients?.phone||'-',
-    'Address':l.loan_clients?.address||'-',
+    'Branch':patafixBranchLabel(),
     'Loan Officer':(window._staffMap && l.loan_officer_id) ? window._staffMap[l.loan_officer_id] : 'Unassigned',
-    'Total Arrears (KES)':l._asof_arrears,
-    'Days Overdue':l._asof_days,
-    'Outstanding Balance (KES)':Number(l.outstanding_balance||0),
-    'Aging Bucket':l._asof_days<=30?'1-30d':l._asof_days<=60?'31-60d':l._asof_days<=90?'61-90d':l._asof_days<=180?'91-180d':'>180d'
+    'Client Name':l.loan_clients?.full_name||'-',
+    'Mobile Number':l.loan_clients?.phone||'-',
+    'Id Number':l.loan_clients?.id_number||'-',
+    'Product':loanProductLabel(l),
+    'Disbursed Amount':Number(l.disbursed_amount??l.principal_amount??0),
+    'Principal Overdue':Number((l._asof_arrears_split?.principal||0).toFixed(2)),
+    'Interest Overdue':Number((l._asof_arrears_split?.interest||0).toFixed(2)),
+    'Total Overdue':Number((l._asof_arrears||0).toFixed(2)),
+    'Days in Arrears':Number(l._asof_days||0),
+    'Total Outstanding Balance':Number(l.outstanding_balance||0)
   }));
+  const ws=XLSX.utils.json_to_sheet(sheet);
+  ws['!cols']=[
+    {wch:14},{wch:24},{wch:26},{wch:16},{wch:16},{wch:18},
+    {wch:20},{wch:20},{wch:18},{wch:18},{wch:16},{wch:27}
+  ];
   const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(sheet),'Loan Arrears Summary');
-  XLSX.writeFile(wb,'Arrears_Summary_'+asOfDate+'.xlsx');
-  toast('Loan arrears summary downloaded!','success');
+  XLSX.utils.book_append_sheet(wb,ws,'Arrears Report');
+  XLSX.writeFile(wb,'PataFix_Arrears_Report_'+asOfDate+'.xlsx');
+  toast('Arrears report downloaded!','success');
 }
 
 async function addFollowUp(loanId,clientId){
@@ -7187,6 +7203,29 @@ function splitLoanBalanceAmount(loan, amount){
   };
 }
 
+function scheduleOverdueSplit(schedule){
+  const totalRemaining=Math.max(0,Number(schedule?.total_due||0)-Number(schedule?.total_paid||0));
+  if(totalRemaining<=0.01)return{principal:0,interest:0};
+  let principal=Math.max(0,Number(schedule?.principal_due||0)-Number(schedule?.principal_paid||0));
+  let interest=Math.max(0,Number(schedule?.interest_due||0)-Number(schedule?.interest_paid||0));
+  let componentTotal=principal+interest;
+  if(componentTotal<=0.01){
+    const principalDue=Math.max(0,Number(schedule?.principal_due||0));
+    const interestDue=Math.max(0,Number(schedule?.interest_due||0));
+    const dueComponents=principalDue+interestDue;
+    const principalRatio=dueComponents>0?principalDue/dueComponents:1;
+    principal=totalRemaining*principalRatio;
+    interest=totalRemaining-principal;
+  }else{
+    const scale=totalRemaining/componentTotal;
+    principal*=scale;
+    interest*=scale;
+  }
+  principal=Number(principal.toFixed(2));
+  interest=Number((totalRemaining-principal).toFixed(2));
+  return{principal,interest};
+}
+
 function loanPerformanceArrearsAmount(loan){
   return Number(loan?._performance_arrears ?? loan?.arrears_amount ?? 0);
 }
@@ -7199,22 +7238,25 @@ function loanPerformanceArrearsSplit(loan){
 function attachPerformanceArrears(loans, schedules, asOfDate){
   const byLoan = new Map();
   (schedules||[]).forEach(s=>{
-    if(!s.loan_id || !s.due_date || s.due_date > asOfDate || !isCollectibleSchedule(s)) return;
+    if(!s.loan_id || !s.due_date || s.due_date >= asOfDate || !isCollectibleSchedule(s)) return;
     const due = Number(s.total_due||0);
     const paid = Number(s.total_paid||0);
     const unpaid = Math.max(0, due - paid);
     if(unpaid <= 0.01) return;
-    byLoan.set(s.loan_id, Number(((byLoan.get(s.loan_id)||0) + unpaid).toFixed(2)));
+    const split=scheduleOverdueSplit(s);
+    const current=byLoan.get(s.loan_id)||{total:0,principal:0,interest:0};
+    byLoan.set(s.loan_id,{
+      total:Number((current.total+unpaid).toFixed(2)),
+      principal:Number((current.principal+split.principal).toFixed(2)),
+      interest:Number((current.interest+split.interest).toFixed(2))
+    });
   });
   return (loans||[]).map(l=>{
-    const scheduleArrears = Number(byLoan.get(l.id)||0);
-    const storedArrears = Number(l.arrears_amount||0);
-    const arrears = Math.max(scheduleArrears, storedArrears);
-    const split = splitLoanBalanceAmount(l, arrears);
+    const scheduleArrears=byLoan.get(l.id)||{total:0,principal:0,interest:0};
     return {
       ...l,
-      _performance_arrears: Number(arrears.toFixed(2)),
-      _performance_arrears_split: split
+      _performance_arrears:scheduleArrears.total,
+      _performance_arrears_split:{principal:scheduleArrears.principal,interest:scheduleArrears.interest}
     };
   });
 }
@@ -7301,7 +7343,7 @@ async function renderOfficerPerformance(){
       sb('loan_applications').select('*').eq('business_id',currentUser.business_id),
       // FIX #13: loan_staff column is `name`, not `full_name`
       sb('loan_staff').select('id,name,email,role').eq('business_id',currentUser.business_id),
-      sb('loan_schedules').select('loan_id,due_date,total_due,total_paid,status').eq('business_id',currentUser.business_id).lte('due_date', localISODate()).limit(100000)
+      sb('loan_schedules').select('loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status').eq('business_id',currentUser.business_id).lt('due_date', localISODate()).limit(100000)
     ]);
     const allLoans=attachPerformanceArrears(loansR.data||[], schedulesR.data||[], localISODate());
     const allReps=repsR.data||[];
@@ -7334,7 +7376,7 @@ async function renderOfficerPerformance(){
       const oClientIds = new Set(oLoans.map(l=>l.client_id));
       const portfolio = oActive.reduce((s,l)=>s+Number(l.principal_amount||0),0);
       const outstanding = oActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
-      const overdueLoans = oActive.filter(l=>loanPerformanceArrearsAmount(l)>0 || Number(l.overdue_days||0)>0);
+      const overdueLoans = oActive.filter(l=>loanPerformanceArrearsAmount(l)>0.01);
       // Collections this month attributed to officer's loans
       const oLoanIds = new Set(oLoans.map(l=>l.id));
       const oRepsMonth = allReps.filter(r=>r.loan_id && oLoanIds.has(r.loan_id) && r.payment_date && r.payment_date.startsWith(nowM));
