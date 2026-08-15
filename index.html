@@ -6890,10 +6890,10 @@ function updateMpesaLedgerFilter(field,value){
   renderMpesaLedgerRows();
 }
 
-function changeMpesaLedgerPage(direction){
+function setMpesaLedgerPage(page){
   const state=window._mpesaLedgerState;
   if(!state)return;
-  state.page=Math.max(1,state.page+direction);
+  state.page=Math.max(1,Number(page)||1);
   renderMpesaLedgerRows();
 }
 
@@ -6915,10 +6915,11 @@ function renderMpesaLedgerRows(){
       row.client?.id_number,row.client?.phone,row.loan?.loan_no,row.destination,row.status
     ].some(value=>String(value||'').toLowerCase().includes(query));
   });
-  const pageSize=100;
-  const pageCount=Math.max(1,Math.ceil(filtered.length/pageSize));
+  const p=paginate(filtered,state.page,25);
+  const pageCount=Math.max(1,p.total);
   state.page=Math.min(state.page,pageCount);
-  const pageRows=filtered.slice((state.page-1)*pageSize,state.page*pageSize);
+  if(state.page!==p.page)return renderMpesaLedgerRows();
+  const pageRows=p.items;
   body.innerHTML=pageRows.length?pageRows.map(row=>{
     const suspenseAction=row.status==='suspense'?'<button class="btn btn-outline btn-sm" onclick="navigateTo(\'suspense\')">Open Suspense</button>':'';
     const duplicateBadge=row.duplicateCount?`<br><span class="badge badge-red">${row.deliveryCount} deliveries</span>`:'';
@@ -6936,11 +6937,9 @@ function renderMpesaLedgerRows(){
     </tr>`;
   }).join(''):'<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:20px">No M-Pesa transactions match these filters</td></tr>';
   const summary=document.getElementById('mpesaLedgerResultSummary');
-  if(summary)summary.textContent=`${filtered.length.toLocaleString()} transaction${filtered.length===1?'':'s'} | Page ${state.page} of ${pageCount}`;
-  const prev=document.getElementById('mpesaLedgerPrev');
-  const next=document.getElementById('mpesaLedgerNext');
-  if(prev)prev.disabled=state.page<=1;
-  if(next)next.disabled=state.page>=pageCount;
+  if(summary)summary.textContent=`${filtered.length.toLocaleString()} transaction${filtered.length===1?'':'s'} | 25 rows per page`;
+  const pagination=document.getElementById('mpesaLedgerPagination');
+  if(pagination)pagination.innerHTML=paginationHtml(p,'setMpesaLedgerPage');
 }
 
 async function renderMpesaTransactions(){
@@ -6992,9 +6991,9 @@ async function renderMpesaTransactions(){
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
         <span id="mpesaLedgerResultSummary" style="font-size:12px;color:var(--text-secondary)"></span>
-        <div style="display:flex;gap:6px"><button id="mpesaLedgerPrev" class="btn btn-outline btn-sm" onclick="changeMpesaLedgerPage(-1)">Previous</button><button id="mpesaLedgerNext" class="btn btn-outline btn-sm" onclick="changeMpesaLedgerPage(1)">Next</button></div>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>Date</th><th>M-Pesa Code</th><th>Account No.</th><th>Payer</th><th>Amount</th><th>Destination</th><th>Client / Loan</th><th>Status</th><th>Action</th></tr></thead><tbody id="mpesaLedgerBody"></tbody></table></div>`;
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>M-Pesa Code</th><th>Account No.</th><th>Payer</th><th>Amount</th><th>Destination</th><th>Client / Loan</th><th>Status</th><th>Action</th></tr></thead><tbody id="mpesaLedgerBody"></tbody></table></div>
+      <div id="mpesaLedgerPagination"></div>`;
     renderMpesaLedgerRows();
   }catch(e){
     main.innerHTML=`<div class="empty-state"><p>Error: ${escapeHtml(e.message||String(e))}</p></div>`;
