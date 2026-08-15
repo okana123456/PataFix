@@ -126,9 +126,14 @@ serve(async (req) => {
   console.log("PataFix callback request", { method: req.method, url: req.url });
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
+  let trackedSupabase: any = null;
+  let trackedQueueId: string | null = null;
+  let trackedTransId = "";
+
   try {
     const body = await req.json();
     const transId = String(body?.TransID || "").trim();
+    trackedTransId = transId;
     console.log("PataFix callback payload", {
       transId,
       amount: body?.TransAmount,
@@ -156,13 +161,21 @@ serve(async (req) => {
       Deno.env.get("PATAFIX_SERVICE_ROLE_KEY") || "",
       { auth: { persistSession: false, autoRefreshToken: false } },
     );
+    trackedSupabase = supabase;
 
     const { data: existingCallback } = await supabase
       .from("mpesa_callback_queue")
-      .select("id")
+      .select("id, delivery_count")
       .eq("trans_id", transId)
       .maybeSingle();
     if (existingCallback) {
+      await supabase
+        .from("mpesa_callback_queue")
+        .update({
+          delivery_count: Math.max(1, Number(existingCallback.delivery_count || 1)) + 1,
+          last_received_at: new Date().toISOString(),
+        })
+        .eq("id", existingCallback.id);
       console.log("PataFix duplicate callback ignored", { transId });
       return accepted();
     }
@@ -189,6 +202,9 @@ serve(async (req) => {
         first_name: payerName,
         raw_payload: body,
         confirmed: false,
+        delivery_count: 1,
+        last_received_at: new Date().toISOString(),
+        processing_status: "received",
       })
       .select("id")
       .maybeSingle();
@@ -199,8 +215,18 @@ serve(async (req) => {
       }
       throw queueError;
     }
+    trackedQueueId = queue?.id || null;
 
     if (!businessId) {
+      if (queue?.id) {
+        await supabase
+          .from("mpesa_callback_queue")
+          .update({
+            processing_status: "business_not_found",
+            processing_message: `No PataFix business matched shortcode ${shortcode}`,
+          })
+          .eq("id", queue.id);
+      }
       console.log("PataFix callback stored without business match", { transId, shortcode });
       return accepted();
     }
@@ -212,7 +238,13 @@ serve(async (req) => {
       if (queue?.id) {
         await supabase
           .from("mpesa_callback_queue")
-          .update({ confirmed: true, unmatched: true, unmatched_reason: "No matching client found" })
+          .update({
+            confirmed: true,
+            unmatched: true,
+            unmatched_reason: "No matching client found",
+            processing_status: "suspense",
+            processing_message: `No client matched account ${accountNumber}`,
+          })
           .eq("id", queue.id);
       }
       return accepted();
@@ -261,7 +293,11 @@ serve(async (req) => {
       if (queue?.id) {
         await supabase
           .from("mpesa_callback_queue")
-          .update({ confirmed: true })
+          .update({
+            confirmed: true,
+            processing_status: "processed_charges",
+            processing_message: `Deposited to Charges & Excess for ${client.full_name || "client"}`,
+          })
           .eq("id", queue.id);
       }
       console.log("PataFix callback confirmed charge deposit", { transId, businessId, clientId: client.id, amount });
@@ -270,7 +306,16 @@ serve(async (req) => {
 
     if (!settings?.mpesa_auto_confirm) {
       console.log("PataFix callback queued for manual confirmation", { transId, businessId, loanId: loan.id });
-      if (queue?.id) await supabase.from("mpesa_callback_queue").update({ loan_id: loan.id }).eq("id", queue.id);
+      if (queue?.id) {
+        await supabase
+          .from("mpesa_callback_queue")
+          .update({
+            loan_id: loan.id,
+            processing_status: "pending_confirmation",
+            processing_message: `Matched loan ${loan.loan_no || loan.id}; awaiting confirmation`,
+          })
+          .eq("id", queue.id);
+      }
       return accepted();
     }
 
@@ -371,7 +416,13 @@ serve(async (req) => {
     if (queue?.id) {
       await supabase
         .from("mpesa_callback_queue")
-        .update({ confirmed: true, loan_id: loan.id, repayment_id: repayment.id })
+        .update({
+          confirmed: true,
+          loan_id: loan.id,
+          repayment_id: repayment.id,
+          processing_status: "processed_repayment",
+          processing_message: `Applied to loan ${loan.loan_no || loan.id}`,
+        })
         .eq("id", queue.id);
     }
 
@@ -379,6 +430,20 @@ serve(async (req) => {
     return accepted();
   } catch (error) {
     console.error("PataFix C2B callback error:", error);
+    if (trackedSupabase && trackedQueueId) {
+      try {
+        const processingError = error instanceof Error ? error.message : String(error || "Unknown callback processing error");
+        await trackedSupabase
+          .from("mpesa_callback_queue")
+          .update({
+            processing_status: "processing_error",
+            processing_message: processingError.slice(0, 500),
+          })
+          .eq("id", trackedQueueId);
+      } catch (trackingError) {
+        console.error("PataFix callback audit update failed", { trackedTransId, trackingError });
+      }
+    }
     return accepted();
   }
 });

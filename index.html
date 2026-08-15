@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-14-dues-preview-v40';
+const APP_VERSION = 'patafix-2026-08-15-mpesa-ledger-v41';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1574,6 +1574,7 @@ function buildSidebar() {
     { id: 'officer_dashboard', icon: '◉', label: 'My Dashboard', roles: ['loan_officer'] },
     { id: 'accounting', icon: '%', label: 'Accounting', roles: ['admin', 'branch_manager'] },
     { id: 'charges_excess', icon: '+', label: 'Charges & Excess', roles: ['admin', 'branch_manager', 'cashier'] },
+    { id: 'mpesa_transactions', icon: 'M', label: 'M-Pesa Transactions', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'suspense', icon: '?', label: 'Suspense Account', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'staff', icon: 'S', label: 'Staff', roles: ['admin'] },
     { id: 'calculator', icon: '#', label: 'Calculator', roles: ['admin', 'branch_manager', 'loan_officer'] },
@@ -1711,7 +1712,7 @@ function navigateTo(section){
   const renderers={
     dashboard:renderDashboard,clients:renderClients,products:renderProducts,
     applications:renderApplications,disbursement:renderDisbursement,loans:renderLoans,
-    repayments:renderRepayments,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,charges_excess:renderChargesExcessAccount,suspense:renderSuspense,
+    repayments:renderRepayments,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,charges_excess:renderChargesExcessAccount,mpesa_transactions:renderMpesaTransactions,suspense:renderSuspense,
     accounting:renderAccounting,staff:renderStaff,calculator:renderCalculator,
     settings:renderSettings,auditlog:renderAuditLog
   };
@@ -6765,6 +6766,242 @@ async function saveClientChargePayment(){
 // ═══ SUSPENSE ACCOUNT ═══
 // Payments that arrive via M-Pesa C2B but cannot be matched to a loan fall here.
 // A cashier can then manually match them to the correct loan account.
+function mpesaReferenceKey(value,fallback=''){
+  return String(value||fallback||'').trim().toUpperCase();
+}
+
+function mpesaTransactionTime(value,fallback){
+  const raw=String(value||'').trim();
+  if(/^\d{14}$/.test(raw)){
+    return `${raw.slice(0,4)}-${raw.slice(4,6)}-${raw.slice(6,8)}T${raw.slice(8,10)}:${raw.slice(10,12)}:${raw.slice(12,14)}+03:00`;
+  }
+  return fallback||'';
+}
+
+function mpesaLedgerStatus(row){
+  if(row.processingStatus==='processing_error'||row.processingStatus==='business_not_found')return'needs_review';
+  if(row.repayments.length||row.charges.length)return'processed';
+  if(row.suspense.some(entry=>!entry.resolved))return'suspense';
+  if(row.callback&&!row.callback.confirmed)return'pending';
+  if(row.suspense.length&&row.suspense.every(entry=>entry.resolved))return'resolved';
+  if(row.callback?.unmatched)return'suspense';
+  if(row.callback?.confirmed)return'needs_review';
+  return'needs_review';
+}
+
+function mpesaLedgerStatusBadge(status){
+  const labels={processed:'Processed',suspense:'In Suspense',pending:'Pending',resolved:'Resolved',needs_review:'Needs Review'};
+  const colors={processed:'green',suspense:'yellow',pending:'blue',resolved:'gray',needs_review:'red'};
+  return `<span class="badge badge-${colors[status]||'gray'}">${labels[status]||status}</span>`;
+}
+
+function mpesaLedgerDestination(row){
+  const destinations=[];
+  if(row.repayments.length)destinations.push('Loan Repayment');
+  if(row.charges.length)destinations.push(row.charges.some(tx=>tx.transaction_type==='excess_deposit')?'Charges / Excess':'Charges Account');
+  if(row.suspense.some(entry=>!entry.resolved))destinations.push('Suspense Account');
+  if(!destinations.length&&row.status==='pending')destinations.push('Awaiting Confirmation');
+  if(!destinations.length&&row.status==='resolved')destinations.push('Resolved Suspense');
+  if(!destinations.length)destinations.push('Not Allocated');
+  return[...new Set(destinations)].join(' + ');
+}
+
+async function loadMpesaTransactionLedger(){
+  const[callbacks,suspense,repayments,charges,loans,clients]=await Promise.all([
+    fetchAllBusinessRows('mpesa_callback_queue','*'),
+    fetchAllBusinessRows('unmatched_payments','*'),
+    fetchAllBusinessRows('loan_repayments','*'),
+    fetchAllBusinessRows('client_charge_transactions','*'),
+    fetchAllBusinessRows('loans','id,loan_no,client_id,business_id,created_at'),
+    fetchAllBusinessRows('loan_clients','id,full_name,id_number,phone,business_id,created_at')
+  ]);
+  const clientById=new Map(clients.map(client=>[client.id,client]));
+  const clientByIdNumber=new Map(clients.map(client=>[String(client.id_number||'').replace(/\D/g,''),client]).filter(([id])=>id));
+  const loanById=new Map(loans.map(loan=>[loan.id,loan]));
+  const callbackRefs=new Set(callbacks.map(row=>mpesaReferenceKey(row.trans_id)).filter(Boolean));
+  const ledger=new Map();
+
+  function ensureRow(reference,fallback){
+    const key=mpesaReferenceKey(reference,fallback);
+    if(!ledger.has(key))ledger.set(key,{key,reference:String(reference||fallback||'-'),callback:null,suspense:[],repayments:[],charges:[]});
+    return ledger.get(key);
+  }
+
+  callbacks.forEach((callback,index)=>{ensureRow(callback.trans_id,`CALLBACK-${index}`).callback=callback;});
+  suspense.forEach((entry,index)=>ensureRow(entry.mpesa_reference||entry.invoice_id,`SUSPENSE-${entry.id||index}`).suspense.push(entry));
+  repayments.forEach((repayment,index)=>{
+    const reference=repayment.payment_reference||repayment.receipt_no;
+    const method=String(repayment.payment_method||'').toLowerCase();
+    if(!method.includes('mpesa')&&!callbackRefs.has(mpesaReferenceKey(reference)))return;
+    ensureRow(reference,`REPAYMENT-${repayment.id||index}`).repayments.push(repayment);
+  });
+  charges.forEach((charge,index)=>{
+    const reference=charge.reference;
+    const method=String(charge.payment_method||'').toLowerCase();
+    if(!method.includes('mpesa')&&!callbackRefs.has(mpesaReferenceKey(reference)))return;
+    ensureRow(reference,`CHARGE-${charge.id||index}`).charges.push(charge);
+  });
+
+  return[...ledger.values()].map(row=>{
+    const callback=row.callback;
+    const repayment=row.repayments[0];
+    const charge=row.charges[0];
+    const suspenseEntry=row.suspense[0];
+    const loan=repayment?loanById.get(repayment.loan_id):callback?.loan_id?loanById.get(callback.loan_id):charge?.loan_id?loanById.get(charge.loan_id):null;
+    let client=loan?clientById.get(loan.client_id):charge?.client_id?clientById.get(charge.client_id):null;
+    const accountReference=String(callback?.bill_ref_number||suspenseEntry?.account_number||'').trim();
+    if(!client&&accountReference)client=clientByIdNumber.get(accountReference.replace(/\D/g,''))||null;
+    const eventTime=mpesaTransactionTime(callback?.trans_time,callback?.created_at)||repayment?.payment_date||charge?.transaction_date||suspenseEntry?.payment_date||suspenseEntry?.created_at||'';
+    const amount=Number(callback?.trans_amount??repayment?.amount??charge?.amount??suspenseEntry?.amount??0);
+    const deliveryCount=Math.max(1,Number(callback?.delivery_count||1));
+    const result={
+      ...row,eventTime,amount,accountReference,loan,client,deliveryCount,
+      duplicateCount:Math.max(0,deliveryCount-1),
+      payerName:callback?.first_name||suspenseEntry?.payer_name||client?.full_name||'-',
+      payerPhone:callback?.msisdn||suspenseEntry?.payer_phone||client?.phone||'',
+      processingStatus:String(callback?.processing_status||''),
+      processingMessage:callback?.processing_message||callback?.unmatched_reason||''
+    };
+    result.status=mpesaLedgerStatus(result);
+    result.destination=mpesaLedgerDestination(result);
+    return result;
+  }).sort((a,b)=>String(b.eventTime).localeCompare(String(a.eventTime)));
+}
+
+function mpesaLedgerDateRange(period,start,end){
+  const now=new Date();
+  const todayStr=localISODate(now);
+  if(period==='today')return{start:todayStr,end:todayStr};
+  if(period==='week'){
+    const monday=new Date(now);monday.setDate(now.getDate()-((now.getDay()+6)%7));
+    return{start:localISODate(monday),end:todayStr};
+  }
+  if(period==='month')return{start:todayStr.slice(0,7)+'-01',end:todayStr};
+  if(period==='custom')return{start:start||'',end:end||''};
+  return{start:'',end:''};
+}
+
+function updateMpesaLedgerFilter(field,value){
+  const state=window._mpesaLedgerState||(window._mpesaLedgerState={query:'',status:'all',period:'month',start:'',end:'',page:1});
+  state[field]=value;
+  state.page=1;
+  const custom=document.getElementById('mpesaCustomDates');
+  if(custom)custom.style.display=state.period==='custom'?'flex':'none';
+  renderMpesaLedgerRows();
+}
+
+function changeMpesaLedgerPage(direction){
+  const state=window._mpesaLedgerState;
+  if(!state)return;
+  state.page=Math.max(1,state.page+direction);
+  renderMpesaLedgerRows();
+}
+
+function renderMpesaLedgerRows(){
+  const body=document.getElementById('mpesaLedgerBody');
+  if(!body)return;
+  const state=window._mpesaLedgerState;
+  const range=mpesaLedgerDateRange(state.period,state.start,state.end);
+  const query=String(state.query||'').trim().toLowerCase();
+  const filtered=(window._mpesaLedgerRows||[]).filter(row=>{
+    const date=String(row.eventTime||'').slice(0,10);
+    if(range.start&&date<range.start)return false;
+    if(range.end&&date>range.end)return false;
+    if(state.status==='duplicates'&&row.duplicateCount<1)return false;
+    if(state.status!=='all'&&state.status!=='duplicates'&&row.status!==state.status)return false;
+    if(!query)return true;
+    return[
+      row.reference,row.accountReference,row.payerName,row.payerPhone,row.client?.full_name,
+      row.client?.id_number,row.client?.phone,row.loan?.loan_no,row.destination,row.status
+    ].some(value=>String(value||'').toLowerCase().includes(query));
+  });
+  const pageSize=100;
+  const pageCount=Math.max(1,Math.ceil(filtered.length/pageSize));
+  state.page=Math.min(state.page,pageCount);
+  const pageRows=filtered.slice((state.page-1)*pageSize,state.page*pageSize);
+  body.innerHTML=pageRows.length?pageRows.map(row=>{
+    const suspenseAction=row.status==='suspense'?'<button class="btn btn-outline btn-sm" onclick="navigateTo(\'suspense\')">Open Suspense</button>':'';
+    const duplicateBadge=row.duplicateCount?`<br><span class="badge badge-red">${row.deliveryCount} deliveries</span>`:'';
+    const clientLabel=row.client?`${escapeHtml(row.client.full_name||'-')}<br><span style="font-size:10px;color:var(--text-secondary)">ID ${escapeHtml(row.client.id_number||'-')}${row.loan?.loan_no?' | Loan '+escapeHtml(row.loan.loan_no):''}</span>`:'<span style="color:var(--text-secondary)">Unmatched</span>';
+    return `<tr>
+      <td style="white-space:nowrap">${fmtPaymentDateTime(row.eventTime)}</td>
+      <td><strong>${escapeHtml(row.reference||'-')}</strong>${duplicateBadge}</td>
+      <td>${escapeHtml(row.accountReference||'-')}</td>
+      <td>${escapeHtml(row.payerName||'-')}<br>${paymentPhoneHtml({phone:row.payerPhone})}</td>
+      <td><strong>${fmtMoney(row.amount)}</strong></td>
+      <td>${escapeHtml(row.destination)}</td>
+      <td>${clientLabel}</td>
+      <td>${mpesaLedgerStatusBadge(row.status)}${row.processingMessage?`<br><span style="font-size:10px;color:var(--text-secondary)">${escapeHtml(row.processingMessage)}</span>`:''}</td>
+      <td>${suspenseAction}</td>
+    </tr>`;
+  }).join(''):'<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:20px">No M-Pesa transactions match these filters</td></tr>';
+  const summary=document.getElementById('mpesaLedgerResultSummary');
+  if(summary)summary.textContent=`${filtered.length.toLocaleString()} transaction${filtered.length===1?'':'s'} | Page ${state.page} of ${pageCount}`;
+  const prev=document.getElementById('mpesaLedgerPrev');
+  const next=document.getElementById('mpesaLedgerNext');
+  if(prev)prev.disabled=state.page<=1;
+  if(next)next.disabled=state.page>=pageCount;
+}
+
+async function renderMpesaTransactions(){
+  const main=$('#mainContent');
+  main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
+  try{
+    const rows=await loadMpesaTransactionLedger();
+    window._mpesaLedgerRows=rows;
+    window._mpesaLedgerState=window._mpesaLedgerState||{query:'',status:'all',period:'month',start:'',end:'',page:1};
+    const state=window._mpesaLedgerState;
+    const processed=rows.filter(row=>row.status==='processed').length;
+    const suspense=rows.filter(row=>row.status==='suspense').length;
+    const pending=rows.filter(row=>row.status==='pending'||row.status==='needs_review').length;
+    const duplicates=rows.filter(row=>row.duplicateCount>0).length;
+    main.innerHTML=`
+      <div class="page-header">
+        <h1>M-Pesa Transactions</h1>
+        <button class="btn btn-outline btn-sm" onclick="renderMpesaTransactions()">Refresh</button>
+      </div>
+      <div class="kpi-grid" style="margin-bottom:14px">
+        <div class="kpi-card"><div class="kpi-label">All Transactions</div><div class="kpi-value">${rows.length}</div></div>
+        <div class="kpi-card" style="border-top:2px solid var(--accent-green)"><div class="kpi-label">Processed</div><div class="kpi-value" style="color:var(--accent-green)">${processed}</div></div>
+        <div class="kpi-card" style="border-top:2px solid var(--accent-yellow)"><div class="kpi-label">In Suspense</div><div class="kpi-value" style="color:var(--accent-yellow)">${suspense}</div></div>
+        <div class="kpi-card" style="border-top:2px solid var(--accent-red)"><div class="kpi-label">Pending / Review</div><div class="kpi-value" style="color:var(--accent-red)">${pending}</div></div>
+        <div class="kpi-card" style="border-top:2px solid var(--accent-purple)"><div class="kpi-label">Duplicate Deliveries</div><div class="kpi-value" style="color:var(--accent-purple)">${duplicates}</div></div>
+      </div>
+      <div class="search-bar" style="margin-bottom:10px;align-items:center;flex-wrap:wrap">
+        <input class="input" style="min-width:260px;flex:1" value="${escapeHtml(state.query)}" placeholder="Search M-Pesa code, account number, client, phone or loan..." oninput="updateMpesaLedgerFilter('query',this.value)">
+        <select class="select" style="width:auto" onchange="updateMpesaLedgerFilter('status',this.value)">
+          <option value="all" ${state.status==='all'?'selected':''}>All Statuses</option>
+          <option value="processed" ${state.status==='processed'?'selected':''}>Processed</option>
+          <option value="suspense" ${state.status==='suspense'?'selected':''}>In Suspense</option>
+          <option value="pending" ${state.status==='pending'?'selected':''}>Pending</option>
+          <option value="resolved" ${state.status==='resolved'?'selected':''}>Resolved Suspense</option>
+          <option value="needs_review" ${state.status==='needs_review'?'selected':''}>Needs Review</option>
+          <option value="duplicates" ${state.status==='duplicates'?'selected':''}>Duplicate Deliveries</option>
+        </select>
+        <select class="select" style="width:auto" onchange="updateMpesaLedgerFilter('period',this.value)">
+          <option value="today" ${state.period==='today'?'selected':''}>Today</option>
+          <option value="week" ${state.period==='week'?'selected':''}>This Week</option>
+          <option value="month" ${state.period==='month'?'selected':''}>This Month</option>
+          <option value="all" ${state.period==='all'?'selected':''}>All Time</option>
+          <option value="custom" ${state.period==='custom'?'selected':''}>Custom Dates</option>
+        </select>
+        <div id="mpesaCustomDates" style="display:${state.period==='custom'?'flex':'none'};gap:6px">
+          <input type="date" class="input" style="width:auto" value="${escapeHtml(state.start)}" onchange="updateMpesaLedgerFilter('start',this.value)">
+          <input type="date" class="input" style="width:auto" value="${escapeHtml(state.end)}" onchange="updateMpesaLedgerFilter('end',this.value)">
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+        <span id="mpesaLedgerResultSummary" style="font-size:12px;color:var(--text-secondary)"></span>
+        <div style="display:flex;gap:6px"><button id="mpesaLedgerPrev" class="btn btn-outline btn-sm" onclick="changeMpesaLedgerPage(-1)">Previous</button><button id="mpesaLedgerNext" class="btn btn-outline btn-sm" onclick="changeMpesaLedgerPage(1)">Next</button></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>M-Pesa Code</th><th>Account No.</th><th>Payer</th><th>Amount</th><th>Destination</th><th>Client / Loan</th><th>Status</th><th>Action</th></tr></thead><tbody id="mpesaLedgerBody"></tbody></table></div>`;
+    renderMpesaLedgerRows();
+  }catch(e){
+    main.innerHTML=`<div class="empty-state"><p>Error: ${escapeHtml(e.message||String(e))}</p></div>`;
+    toast(e.message||String(e),'error');
+  }
+}
+
 async function renderSuspense(){
   const main=$('#mainContent');
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
@@ -7813,13 +8050,13 @@ async function renderStaff(){
               <td><span class="badge badge-blue">ADMIN</span></td>
               <td>System owner and overall controller</td>
               <td>Every PataFix page, including Staff, Settings and Audit Log</td>
-              <td>Manage staff and products; approve, reject and disburse loans; record repayments; manage clients, accounting, reports, charges and suspense; delete clients and loans</td>
+              <td>Manage staff and products; approve, reject and disburse loans; record repayments; review all M-Pesa transactions; manage clients, accounting, reports, charges and suspense; delete clients and loans</td>
               <td>No operational restrictions within the business account</td>
             </tr>
             <tr>
               <td><span class="badge badge-blue">MANAGER</span></td>
               <td>Daily lending and branch operations</td>
-              <td>Dashboard, Clients, Products, Applications, Disbursement, Active Loans, Repayments, Arrears, Reports, Officer Performance, Accounting, Charges &amp; Excess, Suspense and Calculator</td>
+              <td>Dashboard, Clients, Products, Applications, Disbursement, Active Loans, Repayments, Arrears, Reports, Officer Performance, Accounting, Charges &amp; Excess, M-Pesa Transactions, Suspense and Calculator</td>
               <td>Manage and transfer clients; approve or reject applications; disburse and edit loans; record repayments; review reports and accounting</td>
               <td>Cannot manage staff, system settings or audit log; cannot delete clients or loans; loan products are view-only</td>
             </tr>
@@ -7833,8 +8070,8 @@ async function renderStaff(){
             <tr>
               <td><span class="badge badge-blue">CASHIER</span></td>
               <td>Money collection and payment processing</td>
-              <td>Disbursement, Active Loans, Repayments, Charges &amp; Excess and Suspense Account</td>
-              <td>Disburse approved loans; record and confirm repayments; manage charge deposits, excess payments and suspense matching</td>
+              <td>Disbursement, Active Loans, Repayments, Charges &amp; Excess, M-Pesa Transactions and Suspense Account</td>
+              <td>Disburse approved loans; record and confirm repayments; review M-Pesa activity; manage charge deposits, excess payments and suspense matching</td>
               <td>Cannot create clients or applications, approve loans, access management reports, accounting, staff or settings</td>
             </tr>
             <tr>
