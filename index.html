@@ -4441,7 +4441,7 @@ async function renderRepayments(page=1){
           '<td>',balCell,'</td>',
           '<td>',rmethod,'</td>',
           '<td>',rdate,'</td>',
-          '<td><button class="btn btn-outline btn-sm" onclick="printReceipt(',JSON.stringify(rid),')">Print</button></td>',
+          '<td><button class="btn btn-outline btn-sm" data-repayment-id="',rid,'" onclick="printReceipt(this.dataset.repaymentId)">Print</button></td>',
           '</tr>'
         ].join('');
       }).join('')||'<tr><td colspan="12" style="text-align:center;color:var(--text-secondary)">No repayments recorded for this period</td></tr>'}
