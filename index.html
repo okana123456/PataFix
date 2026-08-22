@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-15-mpesa-ledger-v41';
+const APP_VERSION = 'patafix-2026-08-22-disbursement-export-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -3386,7 +3386,13 @@ async function renderDisbursement(){
     }
     cachedData.disbursements=(apps||[]).map(a=>({...a,loan_record:loansByApp[a.id]||null}));
     main.innerHTML=`
-      <div class="page-header"><h1>Disbursement</h1><button class="btn btn-primary btn-sm" id="btnBulkDisburseApps" onclick="openBulkDisbursementModal()" style="display:none">Disburse Selected (<span id="bulkDisburseAppsCount">0</span>)</button></div>
+      <div class="page-header">
+        <h1>Disbursement</h1>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="exportDisbursementExcel()">&#11015; Download Excel</button>
+          <button class="btn btn-primary btn-sm" id="btnBulkDisburseApps" onclick="openBulkDisbursementModal()" style="display:none">Disburse Selected (<span id="bulkDisburseAppsCount">0</span>)</button>
+        </div>
+      </div>
       <div class="search-bar">
         <input class="input" id="disbursementSearch" placeholder="Search client, ID, phone, app or loan no..." oninput="applyDisbursementFilters()">
         <select class="select" id="disbursementStatusFilter" onchange="applyDisbursementFilters()">
@@ -3396,6 +3402,7 @@ async function renderDisbursement(){
         </select>
         <input class="input" type="date" id="disbursementDateFrom" onchange="applyDisbursementFilters()" title="From date">
         <input class="input" type="date" id="disbursementDateTo" onchange="applyDisbursementFilters()" title="To date">
+        <button class="btn btn-primary btn-sm" onclick="exportDisbursementExcel()">&#11015; Download Excel</button>
       </div>
       <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager','cashier')?'<input type="checkbox" id="bulkDisburseAllApps" onchange="toggleBulkDisbursementApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Approved</th><th>Disbursed</th><th>Method</th><th>Reference</th><th>Actions</th></tr></thead><tbody id="disbursementBody">
       ${(apps||[]).map(a=>`<tr><td>${a.application_no}</td><td><strong>${a.loan_clients?.full_name||'—'}</strong></td><td>${a.loan_clients?.phone||'-'}</td><td>${fmtMoney(a.applied_amount)}</td><td>${a.applied_term_weeks}w</td><td><span class="badge badge-blue">${getAutoTier(a.applied_amount)}</span></td><td>${fmtDate(a.approved_at)}</td><td><button class="btn btn-primary btn-sm" onclick="openDisburseModal('${a.id}')">Disburse</button></td></tr>`).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--text-secondary)">No approved applications awaiting disbursement</td></tr>'}
@@ -3434,11 +3441,18 @@ function renderDisbursementRows(rows){
 }
 
 function applyDisbursementFilters(){
+  const rows=getFilteredDisbursementRows();
+  const body=$('#disbursementBody');
+  if(body)body.innerHTML=renderDisbursementRows(rows);
+  updateBulkDisbursementBtn();
+}
+
+function getFilteredDisbursementRows(){
   const q=($('#disbursementSearch')?.value||'').toLowerCase();
   const status=$('#disbursementStatusFilter')?.value||'';
   const from=$('#disbursementDateFrom')?.value||'';
   const to=$('#disbursementDateTo')?.value||'';
-  const rows=(cachedData.disbursements||[]).filter(a=>{
+  return (cachedData.disbursements||[]).filter(a=>{
     const loan=a.loan_record||{};
     const isDisbursed=a.status==='disbursed'||!!loan.id;
     if(status==='awaiting'&&isDisbursed)return false;
@@ -3450,9 +3464,38 @@ function applyDisbursementFilters(){
     if(to&&d>to)return false;
     return true;
   });
-  const body=$('#disbursementBody');
-  if(body)body.innerHTML=renderDisbursementRows(rows);
-  updateBulkDisbursementBtn();
+}
+
+function exportDisbursementExcel(){
+  if(typeof XLSX==='undefined')return toast('Excel library not loaded yet, please retry in a moment','error');
+  const rows=getFilteredDisbursementRows();
+  if(!rows.length)return toast('No disbursement records to download','warning');
+  const data=rows.map(a=>{
+    const loan=a.loan_record||{};
+    const isDisbursed=a.status==='disbursed'||!!loan.id;
+    return {
+      'Application #':a.application_no||'-',
+      'Loan #':loan.loan_no||'-',
+      'Client':a.loan_clients?.full_name||'-',
+      'ID Number':a.loan_clients?.id_number||'-',
+      'Phone':a.loan_clients?.phone||'-',
+      'Approved Amount (KES)':Number(a.applied_amount||0),
+      'Disbursed Amount (KES)':Number(loan.disbursed_amount||a.applied_amount||0),
+      'Term (Weeks)':a.applied_term_weeks||'-',
+      'Product':a.loan_products?.name||getAutoTier(a.applied_amount),
+      'Status':isDisbursed?'Disbursed':'Awaiting Disbursement',
+      'Approved Date':a.approved_at?String(a.approved_at).slice(0,10):'-',
+      'Disbursement Date':isDisbursed?(loan.disbursement_date||'-'):'-',
+      'Method':isDisbursed?(loan.disbursement_method||'-'):'-',
+      'Reference':isDisbursed?(loan.disbursement_reference||'-'):'-'
+    };
+  });
+  const ws=XLSX.utils.json_to_sheet(data);
+  ws['!cols']=[{wch:16},{wch:12},{wch:26},{wch:16},{wch:16},{wch:20},{wch:22},{wch:12},{wch:18},{wch:22},{wch:16},{wch:18},{wch:16},{wch:18}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Disbursement');
+  XLSX.writeFile(wb,'PataFix_Disbursement_'+today()+'.xlsx');
+  toast('Disbursement report downloaded','success');
 }
 
 function selectedDisbursementApplicationIds(){
@@ -7586,7 +7629,8 @@ function downloadOfficerPerformanceReport(){
       "Paid Against Today's Dues (KES)": Number(paidAgainstToday.toFixed(2)),
       'Total Repayments Today (KES)': Number(collectedToday.toFixed(2)),
       'Collections Month (KES)': Number(collected.toFixed(2)),
-      'Disbursed Month (KES)':   Number(disbMonth.toFixed(2))
+      'Disbursed Month (KES)':   Number(disbMonth.toFixed(2)),
+      'MTD Disbursed Accounts':  oLoansMonth.length
     };
   });
 
@@ -7608,7 +7652,8 @@ function downloadOfficerPerformanceReport(){
     "Paid Against Today's Dues (KES)": Number(rows.reduce((s,r)=>s+r.paidAgainstToday,0).toFixed(2)),
     'Total Repayments Today (KES)': Number(rows.reduce((s,r)=>s+r.collectedToday,0).toFixed(2)),
     'Collections Month (KES)': Number(rows.reduce((s,r)=>s+r.collected,0).toFixed(2)),
-    'Disbursed Month (KES)':   Number(rows.reduce((s,r)=>s+r.oLoansMonth.reduce((x,l)=>x+Number(l.principal_amount||0),0),0).toFixed(2))
+    'Disbursed Month (KES)':   Number(rows.reduce((s,r)=>s+r.oLoansMonth.reduce((x,l)=>x+Number(l.principal_amount||0),0),0).toFixed(2)),
+    'MTD Disbursed Accounts':  rows.reduce((s,r)=>s+r.oLoansMonth.length,0)
   });
 
   const ws = XLSX.utils.json_to_sheet(data);
@@ -7617,7 +7662,7 @@ function downloadOfficerPerformanceReport(){
   ws['!cols'] = [
     {wch:22},{wch:10},{wch:14},{wch:18},{wch:8},
     {wch:14},{wch:14},{wch:22},{wch:22},{wch:26},{wch:25},
-    {wch:8},{wch:18},{wch:30},{wch:28},{wch:20},{wch:20}
+    {wch:8},{wch:18},{wch:30},{wch:28},{wch:20},{wch:20},{wch:22}
   ];
 
   // Header row styling hint (works in Excel)
@@ -7724,7 +7769,7 @@ async function renderOfficerPerformance(){
             <th>BQ %</th><th>OLB (KES)</th><th>Arrears (KES)</th>
             <th>Principal Arrears</th><th>Interest Arrears</th><th>Principal Outstanding</th><th>Interest Outstanding</th><th>PAR %</th>
             <th>Dues Today</th><th>Paid Against Today's Dues</th><th>Total Repayments Today</th>
-            <th>Collections (Month)</th><th>Disbursed (Month)</th>
+            <th>Collections (Month)</th><th>Disbursed (Month)</th><th>MTD Disbursed Accounts</th>
           </tr></thead>
           <tbody>
             ${rows.map(({o,oLoans,oActive,oClientIds,portfolio,outstanding,overdueLoans,collected,oLoansMonth,duesToday,paidAgainstToday,collectedToday})=>{
@@ -7757,8 +7802,9 @@ async function renderOfficerPerformance(){
                 '<td><strong style="color:var(--accent-blue)">'+fmtMoney(collectedToday)+'</strong></td>' +
                 '<td><strong style="color:var(--accent-green)">'+fmtMoney(collected)+'</strong></td>' +
                 '<td>'+fmtMoney(disbMonth)+'</td>' +
+                '<td><strong style="color:var(--accent-blue)">'+oLoansMonth.length+'</strong></td>' +
               '</tr>';
-            }).join('')||'<tr><td colspan="17" style="text-align:center;color:var(--text-secondary)">No officer data found</td></tr>'}
+            }).join('')||'<tr><td colspan="18" style="text-align:center;color:var(--text-secondary)">No officer data found</td></tr>'}
           </tbody>
           <tfoot>
             <tr style="font-weight:700;background:rgba(255,255,255,0.04)">
@@ -7779,6 +7825,7 @@ async function renderOfficerPerformance(){
               <td><strong style="color:var(--accent-blue)">${fmtMoney(rows.reduce((s,r)=>s+r.collectedToday,0))}</strong></td>
               <td><strong style="color:var(--accent-green)">${fmtMoney(rows.reduce((s,r)=>s+r.collected,0))}</strong></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oLoansMonth.reduce((x,l)=>x+Number(l.principal_amount||0),0),0))}</strong></td>
+              <td><strong>${rows.reduce((s,r)=>s+r.oLoansMonth.length,0)}</strong></td>
             </tr>
           </tfoot>
         </table>
