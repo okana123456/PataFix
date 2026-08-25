@@ -2668,6 +2668,7 @@ async function openTransferClientModal(clientId, clientName){
   if(!hasRole('admin','branch_manager'))return toast('Admin/Manager access required','warning');
   const{data:staff}=await sb('loan_staff').select('id,name,role,email').eq('business_id',currentUser.business_id).eq('is_active',true);
   const officers=(staff||[]).filter(s=>{const roles=(s.role||'').split(',');return roles.some(r=>['loan_officer','admin','branch_manager'].includes(r));});
+  window._transferClientContext={clientId,clientName};
   openModal(`
     <h2>Transfer Client</h2>
     <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Transfer <strong>${clientName}</strong> and all their active loans to a different loan officer.</p>
@@ -2681,36 +2682,46 @@ async function openTransferClientModal(clientId, clientName){
     <div class="form-group"><label>Reason for Transfer</label><textarea class="textarea" id="transferReason" placeholder="e.g. Officer reassignment, area change..."></textarea></div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" id="btnConfirmTransfer" onclick="confirmTransferClient('${clientId}','${clientName}')">Confirm Transfer</button>
+      <button class="btn btn-primary" id="btnConfirmTransfer" onclick="confirmTransferClient()">Confirm Transfer</button>
     </div>
   `);
 }
 
-async function confirmTransferClient(clientId, clientName){
+async function confirmTransferClient(){
+  const clientId=window._transferClientContext?.clientId;
+  const clientName=window._transferClientContext?.clientName||'Client';
+  if(!clientId)return toast('Client transfer details are missing. Close this window and try again.','error');
   const officerId=document.getElementById('transferOfficerSel')?.value;
   const reason=document.getElementById('transferReason')?.value||'';
   if(!officerId)return toast('Please select an officer','warning');
   const btn=document.getElementById('btnConfirmTransfer');
   if(btn){btn.disabled=true;btn.textContent='Transferring...';}
   try{
-    // Update all active loans for this client to new officer
-    await sb('loans').update({loan_officer_id:officerId}).eq('client_id',clientId).eq('business_id',currentUser.business_id).eq('status','active');
-    // Update all applications too
-    await sb('loan_applications').update({loan_officer_id:officerId}).eq('client_id',clientId).eq('business_id',currentUser.business_id);
-    // Update local cache immediately so renderClients reflects the change
-    if(window._clientOffMap) window._clientOffMap[clientId] = officerId;
-    // Fetch current officer before overwriting, so we can record the full history
-    const{data:curClient}=await sb('loan_clients').select('notes,loan_officer_id').eq('id',clientId).single();
-    const prevOfficerId=window._clientOffMap?.[clientId]||curClient?.loan_officer_id||null;
-    const prevOfficerName=(window._staffMap&&prevOfficerId)?window._staffMap[prevOfficerId]:'Unknown';
+    const[{data:curClient,error:clientLoadError},{data:activeLoans,error:loanLoadError}]=await Promise.all([
+      sb('loan_clients').select('notes,loan_officer_id').eq('id',clientId).eq('business_id',currentUser.business_id).single(),
+      sb('loans').select('id,loan_officer_id').eq('client_id',clientId).eq('business_id',currentUser.business_id).eq('status','active').order('created_at',{ascending:false})
+    ]);
+    if(clientLoadError)throw clientLoadError;
+    if(loanLoadError)throw loanLoadError;
+    const prevOfficerId=activeLoans?.[0]?.loan_officer_id||curClient?.loan_officer_id||window._clientOffMap?.[clientId]||null;
+    const prevOfficerName=(window._staffMap&&prevOfficerId)?window._staffMap[prevOfficerId]:'Unassigned';
     const newOfficerName=(window._staffMap&&officerId)?window._staffMap[officerId]:officerId;
     const transferStamp=`[TRANSFER ${today()}: ${prevOfficerName} → ${newOfficerName}${reason?'. Reason: '+reason:''}]`;
-    // Append transfer history to client notes so it is never lost
     const updatedNotes=((curClient?.notes||'')+' '+transferStamp).trim();
-    await sb('loan_clients').update({notes:updatedNotes}).eq('id',clientId);
+    // Update all active loans for this client to new officer
+    const{error:loanUpdateError}=await sb('loans').update({loan_officer_id:officerId}).eq('client_id',clientId).eq('business_id',currentUser.business_id).eq('status','active');
+    if(loanUpdateError)throw loanUpdateError;
+    // Update all applications too
+    const{error:applicationUpdateError}=await sb('loan_applications').update({loan_officer_id:officerId}).eq('client_id',clientId).eq('business_id',currentUser.business_id);
+    if(applicationUpdateError)throw applicationUpdateError;
+    // Keep the client-level assignment and transfer history in sync.
+    const{error:clientUpdateError}=await sb('loan_clients').update({loan_officer_id:officerId,notes:updatedNotes}).eq('id',clientId).eq('business_id',currentUser.business_id);
+    if(clientUpdateError)throw clientUpdateError;
+    if(window._clientOffMap)window._clientOffMap[clientId]=officerId;
     await audit('client_transferred','loan_clients',clientId,null,{client_name:clientName,prev_officer_id:prevOfficerId,new_officer_id:officerId,reason});
     toast(`${clientName} transferred successfully`,'success');
     closeModal();
+    window._transferClientContext=null;
     renderClients();
   }catch(e){
     if(btn){btn.disabled=false;btn.textContent='Confirm Transfer';}
