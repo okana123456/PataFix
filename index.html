@@ -459,6 +459,7 @@ const $ = (sel) => document.querySelector(sel);
 let appFilters = {
     dashboard: { type: 'this_month', start: '', end: '' },
     accounting: { type: 'this_month', start: '', end: '' },
+    expenses: { type: 'this_month', start: '', end: '' },
     repayments: { type: 'this_month', start: '', end: '' }
 };
 
@@ -489,6 +490,7 @@ function updateDateFilter(section, type) {
     if(type !== 'custom') {
         if(section==='dashboard') renderDashboard();
         if(section==='accounting') renderAccounting();
+        if(section==='expenses') renderExpenses();
         if(section==='repayments') renderRepayments(1);
     } else {
         document.getElementById(section+'CustomDates').style.display = 'flex';
@@ -500,6 +502,7 @@ function applyCustomDate(section) {
     appFilters[section].end = document.getElementById(section+'End').value;
     if(section==='dashboard') renderDashboard();
     if(section==='accounting') renderAccounting();
+    if(section==='expenses') renderExpenses();
     if(section==='repayments') renderRepayments(1);
 }
 
@@ -1572,7 +1575,8 @@ function buildSidebar() {
     { id: 'reports', icon: '+', label: 'Reports', roles: ['admin', 'branch_manager'] },
     { id: 'officer_performance', icon: '★', label: 'Officer Performance', roles: ['admin', 'branch_manager', 'loan_officer'] },
     { id: 'officer_dashboard', icon: '◉', label: 'My Dashboard', roles: ['loan_officer'] },
-    { id: 'accounting', icon: '%', label: 'Accounting', roles: ['admin', 'branch_manager'] },
+    { id: 'accounting', icon: '%', label: 'Accounting & P&L', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier'], permission: 'view_accounting', permissionDefaults: ['admin'] },
+    { id: 'expenses', icon: 'E', label: 'Expenses', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier'], permission: 'view_expenses', permissionDefaults: ['admin'] },
     { id: 'charges_excess', icon: '+', label: 'Charges & Excess', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'mpesa_transactions', icon: 'M', label: 'M-Pesa Transactions', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'suspense', icon: '?', label: 'Suspense Account', roles: ['admin', 'branch_manager', 'cashier'] },
@@ -1584,7 +1588,7 @@ function buildSidebar() {
     { id: 'auditlog', icon: '~', label: 'Audit Log', roles: ['admin'] }
   ];
 
-  nav.innerHTML = menu.filter(item => item.roles.some(r => userRoles.includes(r))).map(item => {
+  nav.innerHTML = menu.filter(item => item.roles.some(r => userRoles.includes(r)) && (!item.permission || hasFinancePermission(item.permission,item.permissionDefaults||[]))).map(item => {
     if (item.isHeader) return `<div class="nav-section-label">${item.label}</div>`;
     return `<div class="nav-item ${currentSection===item.id?'active':''}" data-section="${item.id}" onclick="navigateTo('${item.id}')"><span class="icon">${item.icon}</span>${item.label}</div>`;
   }).join('');
@@ -1594,6 +1598,13 @@ function hasRole(...roles){
     const userRoles = (currentUser?.role || '').split(',').map(role => role.trim().toLowerCase()).filter(Boolean);
     roles = roles.map(role => String(role).trim().toLowerCase());
     return roles.some(r => userRoles.includes(r));
+}
+
+function hasFinancePermission(permission,defaultRoles=[]){
+    if(hasRole('admin')) return true;
+    const configured=currentUser?.permissions?.[permission];
+    if(typeof configured==='boolean') return configured;
+    return hasRole(...defaultRoles);
 }
 
 async function openSwitchUserModal() {
@@ -1703,6 +1714,14 @@ supabaseClient.auth.onAuthStateChange((event,session)=>{
 
 // ═══ NAVIGATION ═══
 function navigateTo(section){
+  if(section==='accounting'&&!hasFinancePermission('view_accounting',['admin'])){
+    toast('Accounting access is restricted for this account.','warning');
+    section=hasRole('branch_manager')?'dashboard':'calculator';
+  }
+  if(section==='expenses'&&!hasFinancePermission('view_expenses',['admin'])){
+    toast('Expenses access is restricted for this account.','warning');
+    section=hasRole('branch_manager')?'dashboard':'calculator';
+  }
   currentSection=section;
   try { localStorage.setItem('patafix_last_section', section); } catch(e) {}
   $$('.nav-item').forEach(n=>{n.classList.toggle('active',n.dataset.section===section)});
@@ -1713,7 +1732,7 @@ function navigateTo(section){
     dashboard:renderDashboard,clients:renderClients,products:renderProducts,
     applications:renderApplications,disbursement:renderDisbursement,loans:renderLoans,
     repayments:renderRepayments,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,charges_excess:renderChargesExcessAccount,mpesa_transactions:renderMpesaTransactions,suspense:renderSuspense,
-    accounting:renderAccounting,staff:renderStaff,calculator:renderCalculator,
+    accounting:renderAccounting,expenses:renderExpenses,staff:renderStaff,calculator:renderCalculator,
     settings:renderSettings,auditlog:renderAuditLog
   };
   if(renderers[section])renderers[section]();
@@ -6201,17 +6220,18 @@ async function loadChargesExcessAccountData(){
   }).map(tx=>{
     const loan=tx.loan_id?loanById[tx.loan_id]||null:null;
     const client=clientById[tx.client_id]||loan?.loan_clients||null;
-    const isCredit=['deposit','excess_deposit','adjustment_credit'].includes(tx.transaction_type);
+    const isCredit=['deposit','excess_deposit','adjustment_credit','transfer_in'].includes(tx.transaction_type);
     const isExcess=tx.transaction_type==='excess_deposit'||tx.charge_type==='excess';
     const isRegistration=tx.charge_type==='registration';
-    const isDebit=['fee_debit','adjustment_debit'].includes(tx.transaction_type);
-    const type=isExcess
-      ? 'Excess Repayment'
-      : isRegistration
-        ? (isDebit?'Registration Fee Used':'Registration Fee Deposit')
-        : tx.charge_type==='processing'
-          ? (isDebit?'Processing/Application Fee Used':'Processing/Application Fee Deposit')
-          : (isDebit?'Other Charge Used':'Other Deposit');
+    const isDebit=['fee_debit','adjustment_debit','refund_debit','transfer_out','loan_transfer_debit'].includes(tx.transaction_type);
+    const type=tx.transaction_type==='refund_debit'?'Refund / Reversal'
+      :tx.transaction_type==='transfer_out'?'Transfer Out'
+      :tx.transaction_type==='transfer_in'?'Transfer In'
+      :tx.transaction_type==='loan_transfer_debit'?'Transferred to Loan Repayment'
+      :isExcess?'Excess Repayment'
+      :isRegistration?(isDebit?'Registration Fee Used':'Registration Fee Deposit')
+      :tx.charge_type==='processing'?(isDebit?'Processing/Application Fee Used':'Processing/Application Fee Deposit')
+      :(isDebit?'Other Charge Used':'Other Deposit');
     const amount=Number(tx.amount||0);
     return {
       ...tx,
@@ -6286,6 +6306,9 @@ function renderClientProfileChargesAccount(clientId,data){
 
 function chargesExcessTypeBadge(type){
   if(type==='Excess Repayment')return '<span class="badge badge-yellow">Excess Repayment</span>';
+  if(type==='Refund / Reversal')return '<span class="badge badge-red">Refund / Reversal</span>';
+  if(type==='Transfer Out'||type==='Transferred to Loan Repayment')return `<span class="badge badge-purple">${escapeHtml(type)}</span>`;
+  if(type==='Transfer In')return '<span class="badge badge-green">Transfer In</span>';
   if(type.includes('Registration'))return `<span class="badge badge-blue">${escapeHtml(type)}</span>`;
   if(type.includes('Other'))return `<span class="badge badge-gray">${escapeHtml(type)}</span>`;
   return `<span class="badge badge-green">${escapeHtml(type)}</span>`;
@@ -6543,7 +6566,7 @@ async function renderChargesExcessAccount(){
       <div id="chargesFilterSummary" style="font-size:11px;color:var(--text-secondary);margin-bottom:10px"></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Date</th><th>Client</th><th>Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used as Charge</th><th>Client Balance</th></tr></thead>
+          <thead><tr><th>Date</th><th>Client</th><th>Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used / Transferred Out</th><th>Client Balance</th><th>Actions</th></tr></thead>
           <tbody>
             ${displayRows.length?displayRows.map(e=>{
               const search=[e._clientName,e._clientPhone,e._refText,e._loanNo,e._type,e.description,e.ref].join(' ').toLowerCase();
@@ -6560,8 +6583,9 @@ async function renderChargesExcessAccount(){
                 <td><strong style="color:var(--accent-green)">${fmtMoney(e._amountIn||0)}</strong></td>
                 <td>${e._amountUsed?`<strong style="color:var(--accent-red)">${fmtMoney(e._amountUsed)}</strong>`:'-'}</td>
                 <td><strong>${fmtMoney(e._balance||0)}</strong></td>
+                <td>${e._clientId&&currentBalance>0.009&&hasFinancePermission('manage_charge_adjustments',['admin'])?`<button class="btn btn-outline btn-sm" onclick="openChargesClientAccount('${e._clientId}','charges')">Manage</button>`:'-'}</td>
               </tr>`;
-            }).join(''):'<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess deposits recorded yet</td></tr>'}
+            }).join(''):'<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess deposits recorded yet</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -6596,7 +6620,10 @@ async function openChargesClientAccount(clientId,activeTab='charges'){
           ${clientAvatarHtml(client)}
           <div style="min-width:0"><h1 style="overflow-wrap:anywhere">${escapeHtml(client.full_name||'Client')}</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:3px">${escapeHtml(client.phone||'-')} | ID: ${escapeHtml(client.id_number||'-')}</p></div>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="openClientChargePaymentModal('${clientId}')">+ Record Charge Payment</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${availableBalance>0.009&&hasFinancePermission('manage_charge_adjustments',['admin'])?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-red);color:var(--accent-red)" onclick="openClientWalletRefundModal('${clientId}')">Refund / Reverse</button><button class="btn btn-outline btn-sm" onclick="openClientWalletTransferModal('${clientId}')">Transfer Balance</button>`:''}
+          <button class="btn btn-primary btn-sm" onclick="openClientChargePaymentModal('${clientId}')">+ Record Charge Payment</button>
+        </div>
       </div>
       <div class="tabs" style="margin-top:8px">
         <div class="tab ${activeTab==='charges'?'active':''}" data-client-account-tab="charges" onclick="showChargesClientAccountTab('charges')">Charges Account</div>
@@ -6609,7 +6636,7 @@ async function openChargesClientAccount(clientId,activeTab='charges'){
           <div class="kpi-card"><div class="kpi-label">Transactions</div><div class="kpi-value">${rows.length}</div><div class="kpi-sub">Charge and excess entries</div></div>
         </div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Date</th><th>Description / Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used as Charge</th><th>Balance</th></tr></thead>
+          <thead><tr><th>Date</th><th>Description / Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used / Out</th><th>Balance</th><th>Action</th></tr></thead>
           <tbody>${displayRows.map(r=>`<tr>
             <td>${fmtDate(r.date||r.created_at)}</td>
             <td>${chargesExcessTypeBadge(r._type)}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(r.description||'-')}</span></td>
@@ -6618,7 +6645,8 @@ async function openChargesClientAccount(clientId,activeTab='charges'){
             <td><strong style="color:var(--accent-green)">${fmtMoney(r._amountIn||0)}</strong></td>
             <td>${r._amountUsed?`<strong style="color:var(--accent-red)">${fmtMoney(r._amountUsed)}</strong>`:'-'}</td>
             <td><strong>${fmtMoney(r._balance||0)}</strong></td>
-          </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:20px">No charge or excess transactions for this client</td></tr>'}</tbody>
+            <td>${r._amountIn>0&&availableBalance>0.009&&hasFinancePermission('manage_charge_adjustments',['admin'])?`<button class="btn btn-outline btn-sm" onclick="openClientWalletRefundModal('${clientId}',${Math.min(Number(r._amountIn||0),Math.max(0,availableBalance))})">Refund</button>`:'-'}</td>
+          </tr>`).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:20px">No charge or excess transactions for this client</td></tr>'}</tbody>
         </table></div>
       </div>
       <div id="clientLoansAccountPanel" style="display:${activeTab==='loans'?'block':'none'}">
@@ -6651,6 +6679,135 @@ function showChargesClientAccountTab(tab){
   if(charges)charges.style.display=tab==='charges'?'block':'none';
   if(loans)loans.style.display=tab==='loans'?'block':'none';
   document.querySelectorAll('[data-client-account-tab]').forEach(el=>el.classList.toggle('active',el.dataset.clientAccountTab===tab));
+}
+
+function walletActionClientRows(clients){
+  return (clients||[]).slice(0,25).map(c=>`<button type="button" onclick="selectWalletTargetClient('${c.id}')" style="width:100%;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--text-primary);text-align:left;padding:9px 10px;cursor:pointer"><strong>${escapeHtml(c.full_name||'Client')}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(c.phone||'-')} | ID: ${escapeHtml(c.id_number||'-')}</span></button>`).join('')||'<div style="padding:12px;color:var(--text-secondary);font-size:12px">No matching clients</div>';
+}
+
+function filterWalletTargetClients(value){
+  const data=window._walletActionData||{};
+  const q=String(value||'').trim().toLowerCase();
+  const matches=(data.clients||[]).filter(c=>c.id!==data.sourceClientId&&(!q||[c.full_name,c.phone,c.id_number].join(' ').toLowerCase().includes(q)));
+  const box=document.getElementById('walletTargetClientList');
+  if(box)box.innerHTML=walletActionClientRows(matches);
+}
+
+function selectWalletTargetClient(clientId){
+  const data=window._walletActionData||{};
+  const client=(data.clients||[]).find(c=>c.id===clientId);
+  const hidden=document.getElementById('walletTargetClientId');
+  if(hidden)hidden.value=clientId;
+  const selected=document.getElementById('walletTargetClientSelected');
+  if(selected)selected.innerHTML=client?`Selected: <strong>${escapeHtml(client.full_name||'Client')}</strong> | ID: ${escapeHtml(client.id_number||'-')}`:'No client selected';
+  const search=document.getElementById('walletTargetClientSearch');
+  if(search&&client)search.value=client.full_name||client.id_number||'';
+  const list=document.getElementById('walletTargetClientList');
+  if(list)list.style.display='none';
+  refreshWalletTargetLoans();
+}
+
+function walletTransferDestinationChanged(){
+  const isLoan=document.getElementById('walletTransferDestination')?.value==='loan';
+  const wrap=document.getElementById('walletTargetLoanWrap');
+  if(wrap)wrap.style.display=isLoan?'block':'none';
+  refreshWalletTargetLoans();
+}
+
+function refreshWalletTargetLoans(){
+  const select=document.getElementById('walletTargetLoanId');
+  if(!select)return;
+  const clientId=document.getElementById('walletTargetClientId')?.value||'';
+  const loans=(window._walletActionData?.loans||[]).filter(l=>l.client_id===clientId&&l.status==='active'&&Number(l.outstanding_balance||0)>0.009);
+  select.innerHTML='<option value="">Select active loan...</option>'+loans.map(l=>`<option value="${l.id}">${escapeHtml(l.loan_no||'-')} - Balance ${fmtMoney(l.outstanding_balance||0)}</option>`).join('');
+}
+
+async function openClientWalletRefundModal(clientId,suggestedAmount=0){
+  if(!hasFinancePermission('manage_charge_adjustments',['admin']))return toast('Charge refund access is restricted.','warning');
+  const data=window._chargesExcessData||await loadChargesExcessAccountData();
+  const client=data.clientById?.[clientId];
+  const balance=Number(data.clientBalances?.[clientId]||0);
+  if(!client||balance<=0.009)return toast('This client has no available balance to refund.','warning');
+  window._walletActionData={...data,sourceClientId:clientId};
+  openModal(`
+    <h2>Refund / Reverse Client Balance</h2>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px"><strong>${escapeHtml(client.full_name||'Client')}</strong> has ${fmtMoney(balance)} available. The refund removes money from the available balance but keeps a permanent audit trail.</p>
+    <div class="form-row">
+      <div class="form-group"><label>Amount (KES) *</label><input class="input" id="walletRefundAmount" type="number" min="0.01" max="${balance}" step="0.01" value="${suggestedAmount>0?Math.min(suggestedAmount,balance):balance}"></div>
+      <div class="form-group"><label>Refund Date *</label><input class="input" id="walletRefundDate" type="date" value="${today()}"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Refund Method *</label><select class="select" id="walletRefundMethod"><option value="mpesa">M-Pesa</option><option value="cash">Cash</option><option value="bank">Bank</option></select></div>
+      <div class="form-group"><label>Reference</label><input class="input" id="walletRefundReference" placeholder="M-Pesa code, voucher or bank ref"></div>
+    </div>
+    <div class="form-group"><label>Reason *</label><textarea class="input" id="walletRefundReason" rows="3" placeholder="Why is this balance being refunded or reversed?"></textarea></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-danger" id="btnWalletRefund" onclick="saveClientWalletRefund('${clientId}')">Confirm Refund</button></div>`);
+}
+
+async function saveClientWalletRefund(clientId){
+  const amount=Number(document.getElementById('walletRefundAmount')?.value||0);
+  const reason=(document.getElementById('walletRefundReason')?.value||'').trim();
+  if(amount<=0)return toast('Enter a valid refund amount.','warning');
+  if(!reason)return toast('Enter the refund reason.','warning');
+  if(!await confirm_(`Refund ${fmtMoney(amount)} from this client's Charges Account?`))return;
+  const btn=document.getElementById('btnWalletRefund');if(btn){btn.disabled=true;btn.textContent='Refunding...';}
+  try{
+    const{data,error}=await supabaseClient.rpc('patafix_refund_client_charge',{
+      p_client_id:clientId,p_amount:amount,p_transaction_date:document.getElementById('walletRefundDate')?.value||today(),
+      p_reference:(document.getElementById('walletRefundReference')?.value||'').trim()||null,
+      p_payment_method:document.getElementById('walletRefundMethod')?.value||'cash',p_reason:reason
+    });
+    if(error)throw error;
+    await audit('client_charge_refunded','client_charge_transactions',clientId,null,{amount,reason,reference:data?.reference||''});
+    toast(`Refund recorded. New available balance: ${fmtMoney(data?.balance||0)}.`,'success');
+    closeModal();window._chargesExcessData=null;await openChargesClientAccount(clientId,'charges');
+  }catch(e){toast(`${e.message}. Run patafix-expenses-and-wallet-actions.sql in Supabase if this is the first deployment.`,'error');if(btn){btn.disabled=false;btn.textContent='Confirm Refund';}}
+}
+
+async function openClientWalletTransferModal(clientId){
+  if(!hasFinancePermission('manage_charge_adjustments',['admin']))return toast('Charge transfer access is restricted.','warning');
+  const data=window._chargesExcessData||await loadChargesExcessAccountData();
+  const client=data.clientById?.[clientId];
+  const balance=Number(data.clientBalances?.[clientId]||0);
+  if(!client||balance<=0.009)return toast('This client has no available balance to transfer.','warning');
+  const clients=(data.clients||[]).filter(c=>c.id!==clientId);
+  window._walletActionData={...data,clients,sourceClientId:clientId};
+  openModal(`
+    <h2>Transfer Client Balance</h2>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Transfer money from <strong>${escapeHtml(client.full_name||'Client')}</strong>. Available: <strong>${fmtMoney(balance)}</strong>.</p>
+    <div class="form-row">
+      <div class="form-group"><label>Destination *</label><select class="select" id="walletTransferDestination" onchange="walletTransferDestinationChanged()"><option value="charges">Another Client's Charges Account</option><option value="loan">Another Client's Loan Repayment</option></select></div>
+      <div class="form-group"><label>Amount (KES) *</label><input class="input" id="walletTransferAmount" type="number" min="0.01" max="${balance}" step="0.01"></div>
+    </div>
+    <div class="form-group"><label>Receiving Client *</label><input class="input" id="walletTargetClientSearch" placeholder="Search name, phone or ID..." onfocus="document.getElementById('walletTargetClientList').style.display='block'" oninput="document.getElementById('walletTargetClientList').style.display='block';filterWalletTargetClients(this.value)"><input type="hidden" id="walletTargetClientId"><div id="walletTargetClientList" style="max-height:170px;overflow:auto;border:1px solid var(--border);border-radius:8px;background:var(--bg-card)">${walletActionClientRows(clients)}</div><div id="walletTargetClientSelected" style="font-size:12px;color:var(--text-secondary);margin-top:5px">No client selected</div></div>
+    <div class="form-group" id="walletTargetLoanWrap" style="display:none"><label>Receiving Active Loan *</label><select class="select" id="walletTargetLoanId"><option value="">Select receiving client first...</option></select></div>
+    <div class="form-row"><div class="form-group"><label>Transfer Date *</label><input class="input" id="walletTransferDate" type="date" value="${today()}"></div><div class="form-group"><label>Reference</label><input class="input" id="walletTransferReference" placeholder="Internal transfer reference"></div></div>
+    <div class="form-group"><label>Reason *</label><textarea class="input" id="walletTransferReason" rows="3" placeholder="Reason and authorization for this transfer"></textarea></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnWalletTransfer" onclick="saveClientWalletTransfer('${clientId}')">Confirm Transfer</button></div>`);
+}
+
+async function saveClientWalletTransfer(sourceClientId){
+  const destination=document.getElementById('walletTransferDestination')?.value||'charges';
+  const targetClientId=document.getElementById('walletTargetClientId')?.value||'';
+  const loanId=document.getElementById('walletTargetLoanId')?.value||'';
+  const amount=Number(document.getElementById('walletTransferAmount')?.value||0);
+  const reason=(document.getElementById('walletTransferReason')?.value||'').trim();
+  if(!targetClientId)return toast('Select the receiving client.','warning');
+  if(destination==='loan'&&!loanId)return toast('Select the receiving active loan.','warning');
+  if(amount<=0)return toast('Enter a valid transfer amount.','warning');
+  if(!reason)return toast('Enter the transfer reason.','warning');
+  if(!await confirm_(`Transfer ${fmtMoney(amount)} to the selected ${destination==='loan'?'loan repayment':'Charges Account'}?`))return;
+  const btn=document.getElementById('btnWalletTransfer');if(btn){btn.disabled=true;btn.textContent='Transferring...';}
+  try{
+    const common={p_from_client_id:sourceClientId,p_amount:amount,p_transaction_date:document.getElementById('walletTransferDate')?.value||today(),p_reference:(document.getElementById('walletTransferReference')?.value||'').trim()||null,p_reason:reason};
+    const call=destination==='loan'
+      ?supabaseClient.rpc('patafix_transfer_charge_to_loan',{...common,p_loan_id:loanId})
+      :supabaseClient.rpc('patafix_transfer_client_charge',{...common,p_to_client_id:targetClientId});
+    const{data,error}=await call;if(error)throw error;
+    await audit(destination==='loan'?'client_charge_transferred_to_loan':'client_charge_transferred','client_charge_transactions',sourceClientId,null,{target_client_id:targetClientId,loan_id:loanId||null,amount,reason,reference:data?.reference||''});
+    toast(destination==='loan'?`Transfer recorded as repayment. Loan balance: ${fmtMoney(data?.loan_balance||0)}.`:`Transfer complete. Sending balance: ${fmtMoney(data?.from_balance||0)}.`,'success');
+    closeModal();window._chargesExcessData=null;cachedData.loans=null;cachedData.schedules=null;cachedData.repayments=null;await openChargesClientAccount(sourceClientId,'charges');
+  }catch(e){toast(`${e.message}. Run patafix-expenses-and-wallet-actions.sql in Supabase if this is the first deployment.`,'error');if(btn){btn.disabled=false;btn.textContent='Confirm Transfer';}}
 }
 
 function filterChargesExcessStatement(q){
@@ -7874,10 +8031,110 @@ function copyCallbackUrl(inputId='setConfirmationUrl'){
 
 
 
+// ═══ EXPENSES ═══
+const PATAFIX_EXPENSE_CATEGORIES=['Fuel','Airtime','Rent','Imprest','Salaries / Wages','Utilities','Office Supplies','Transport','Maintenance','Bank / M-Pesa Charges','Other'];
+
+async function renderExpenses(){
+  const main=$('#mainContent');
+  if(!hasFinancePermission('view_expenses',['admin'])){
+    main.innerHTML='<div class="empty-state"><h3>Restricted</h3><p>You do not have permission to view expenses.</p></div>';
+    return;
+  }
+  showLoading(main);
+  try{
+    const biz=currentUser.business_id;
+    const[expensesR,staffR]=await Promise.all([
+      sb('patafix_expenses').select('*').eq('business_id',biz).order('expense_date',{ascending:false}).order('created_at',{ascending:false}).limit(100000),
+      sb('loan_staff').select('id,name').eq('business_id',biz)
+    ]);
+    if(expensesR.error)throw new Error(`${expensesR.error.message}. Run patafix-expenses-and-wallet-actions.sql in Supabase first.`);
+    const staffMap={};(staffR.data||[]).forEach(s=>staffMap[s.id]=s.name);
+    const all=expensesR.data||[];
+    const rows=filterByDate(all,'expense_date',appFilters.expenses);
+    const pending=rows.filter(e=>e.status==='pending');
+    const approved=rows.filter(e=>e.status==='approved');
+    const rejected=rows.filter(e=>e.status==='rejected');
+    const approvedTotal=approved.reduce((s,e)=>s+Number(e.amount||0),0);
+    window._patafixExpenses={all,rows,staffMap};
+    const canCreate=hasFinancePermission('create_expenses',['admin','branch_manager']);
+    const canApprove=hasFinancePermission('approve_expenses',['admin']);
+    main.innerHTML=`
+      <div class="page-header" style="align-items:flex-start">
+        <div><h1>Operational Expenses</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Initiate, approve and track operating costs used in the Profit & Loss statement.</p></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" onclick="downloadExpensesExcel()">Download Excel</button>${canCreate?'<button class="btn btn-primary btn-sm" onclick="openExpenseModal()">+ Initiate Expense</button>':''}</div>
+      </div>
+      ${getDateFilterHtml('expenses')}
+      <div class="kpi-grid" style="margin-bottom:16px">
+        <div class="kpi-card"><div class="kpi-label">Pending Approval</div><div class="kpi-value" style="color:var(--accent-yellow)">${pending.length}</div><div class="kpi-sub">${fmtMoney(pending.reduce((s,e)=>s+Number(e.amount||0),0))} awaiting decision</div></div>
+        <div class="kpi-card" style="border-top:4px solid var(--accent-red)"><div class="kpi-label">Approved Expenses</div><div class="kpi-value" style="color:var(--accent-red)">${fmtMoney(approvedTotal)}</div><div class="kpi-sub">Included in Profit & Loss</div></div>
+        <div class="kpi-card"><div class="kpi-label">Rejected</div><div class="kpi-value">${rejected.length}</div><div class="kpi-sub">Not included in Profit & Loss</div></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>Expense #</th><th>Category</th><th>Description</th><th>Method / Reference</th><th>Requested By</th><th>Amount</th><th>Status</th><th>Approved By</th><th>Actions</th></tr></thead><tbody>
+        ${rows.map(e=>`<tr><td>${fmtDate(e.expense_date)}</td><td><strong>${escapeHtml(e.expense_no||'-')}</strong></td><td><span class="badge badge-blue">${escapeHtml(e.category||'Other')}</span></td><td>${escapeHtml(e.description||'-')}${e.rejection_reason?`<br><span style="font-size:11px;color:var(--accent-red)">Reason: ${escapeHtml(e.rejection_reason)}</span>`:''}</td><td>${escapeHtml((e.payment_method||'cash').toUpperCase())}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(e.payment_reference||'-')}</span></td><td>${escapeHtml(staffMap[e.requested_by]||'Unknown')}</td><td><strong>${fmtMoney(e.amount||0)}</strong></td><td>${statusBadge(e.status)}</td><td>${escapeHtml(staffMap[e.approved_by]||'-')}${e.approved_at?`<br><span style="font-size:11px;color:var(--text-secondary)">${fmtDateTime(e.approved_at)}</span>`:''}</td><td>${e.status==='pending'&&canApprove?`<div style="display:flex;gap:4px"><button class="btn btn-success btn-sm" onclick="approveExpense('${e.id}')">Approve</button><button class="btn btn-danger btn-sm" onclick="openRejectExpenseModal('${e.id}','${escapeHtml(e.expense_no||'Expense')}')">Reject</button></div>`:'-'}</td></tr>`).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);padding:20px">No expenses found for this period</td></tr>'}
+      </tbody></table></div>`;
+  }catch(e){main.innerHTML=`<div class="empty-state"><p>${escapeHtml(e.message)}</p></div>`;toast(e.message,'error');}
+}
+
+function openExpenseModal(){
+  if(!hasFinancePermission('create_expenses',['admin','branch_manager']))return toast('Expense initiation access is restricted.','warning');
+  openModal(`
+    <h2>Initiate Operational Expense</h2>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">The expense remains pending and does not affect Profit & Loss until approved.</p>
+    <div class="form-row"><div class="form-group"><label>Expense Date *</label><input class="input" id="expenseDate" type="date" value="${today()}"></div><div class="form-group"><label>Category *</label><select class="select" id="expenseCategory">${PATAFIX_EXPENSE_CATEGORIES.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select></div></div>
+    <div class="form-group"><label>Description *</label><textarea class="input" id="expenseDescription" rows="3" placeholder="What was purchased or paid for, and why?"></textarea></div>
+    <div class="form-row"><div class="form-group"><label>Amount (KES) *</label><input class="input" id="expenseAmount" type="number" min="0.01" step="0.01"></div><div class="form-group"><label>Payment Method *</label><select class="select" id="expenseMethod"><option value="cash">Cash</option><option value="mpesa">M-Pesa</option><option value="bank">Bank</option><option value="imprest">Imprest</option></select></div></div>
+    <div class="form-group"><label>Receipt / Payment Reference</label><input class="input" id="expenseReference" placeholder="Receipt, M-Pesa code, voucher or bank reference"></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnSaveExpense" onclick="saveExpense()">Submit for Approval</button></div>`);
+}
+
+async function saveExpense(){
+  const amount=Number(document.getElementById('expenseAmount')?.value||0);
+  const description=(document.getElementById('expenseDescription')?.value||'').trim();
+  if(amount<=0)return toast('Enter a valid expense amount.','warning');
+  if(!description)return toast('Enter the expense description.','warning');
+  const btn=document.getElementById('btnSaveExpense');if(btn){btn.disabled=true;btn.textContent='Submitting...';}
+  try{
+    const{data,error}=await supabaseClient.rpc('patafix_create_expense',{
+      p_expense_date:document.getElementById('expenseDate')?.value||today(),p_category:document.getElementById('expenseCategory')?.value||'Other',
+      p_description:description,p_amount:amount,p_payment_method:document.getElementById('expenseMethod')?.value||'cash',p_payment_reference:(document.getElementById('expenseReference')?.value||'').trim()||null
+    });
+    if(error)throw error;toast(`Expense ${data?.expense_no||''} submitted for approval.`,'success');closeModal();renderExpenses();
+  }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Submit for Approval';}}
+}
+
+async function approveExpense(id){
+  if(!hasFinancePermission('approve_expenses',['admin']))return toast('Expense approval access is restricted.','warning');
+  if(!await confirm_('Approve this expense and include it in Profit & Loss?'))return;
+  try{const{error}=await supabaseClient.rpc('patafix_decide_expense',{p_expense_id:id,p_decision:'approved',p_reason:null});if(error)throw error;toast('Expense approved and posted to accounting.','success');renderExpenses();}catch(e){toast(e.message,'error');}
+}
+
+function openRejectExpenseModal(id,expenseNo){
+  if(!hasFinancePermission('approve_expenses',['admin']))return toast('Expense approval access is restricted.','warning');
+  openModal(`<h2>Reject ${escapeHtml(expenseNo)}</h2><div class="form-group"><label>Rejection Reason *</label><textarea class="input" id="expenseRejectReason" rows="4" placeholder="Explain why this request was rejected"></textarea></div><div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-danger" id="btnRejectExpense" onclick="rejectExpense('${id}')">Reject Expense</button></div>`);
+}
+
+async function rejectExpense(id){
+  const reason=(document.getElementById('expenseRejectReason')?.value||'').trim();if(!reason)return toast('Enter the rejection reason.','warning');
+  const btn=document.getElementById('btnRejectExpense');if(btn){btn.disabled=true;btn.textContent='Rejecting...';}
+  try{const{error}=await supabaseClient.rpc('patafix_decide_expense',{p_expense_id:id,p_decision:'rejected',p_reason:reason});if(error)throw error;toast('Expense rejected.','success');closeModal();renderExpenses();}catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Reject Expense';}}
+}
+
+function downloadExpensesExcel(){
+  if(typeof XLSX==='undefined')return toast('Excel library is still loading. Please retry.','warning');
+  const data=window._patafixExpenses;if(!data?.rows?.length)return toast('No expenses to export for this period.','info');
+  const aoa=[['PataFix - Operational Expenses'],['Generated',new Date().toLocaleString('en-KE')],[],['Date','Expense No','Category','Description','Method','Reference','Requested By','Amount (KES)','Status','Approved By','Rejection Reason'],...data.rows.map(e=>[e.expense_date,e.expense_no,e.category,e.description,e.payment_method,e.payment_reference||'',data.staffMap[e.requested_by]||'',Number(e.amount||0),e.status,data.staffMap[e.approved_by]||'',e.rejection_reason||''])];
+  const ws=XLSX.utils.aoa_to_sheet(aoa);ws['!cols']=[{wch:13},{wch:20},{wch:24},{wch:45},{wch:12},{wch:22},{wch:24},{wch:16},{wch:13},{wch:24},{wch:35}];ws['!autofilter']={ref:`A4:K${4+data.rows.length}`};
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Expenses');XLSX.writeFile(wb,`PataFix_Expenses_${today()}.xlsx`);toast('Expenses exported.','success');
+}
+
 // ═══ ACCOUNTING ═══
 async function renderAccounting() {
   const main=$('#mainContent');
   if(!currentUser?.business_id) return;
+  if(!hasFinancePermission('view_accounting',['admin'])){
+    main.innerHTML='<div class="empty-state"><h3>Restricted</h3><p>You do not have permission to view Accounting &amp; P&amp;L.</p></div>';
+    return;
+  }
   // Ensure filter is initialized
   if(!appFilters.accounting) appFilters.accounting = { type: 'this_month', start: '', end: '' };
   try{
@@ -7910,22 +8167,25 @@ async function renderAccounting() {
     }
     const qEndFull = qEnd + 'T23:59:59+00:00'; // inclusive end of day in UTC
 
-    const[loansR,repR,cliR,penR,allLoansMapR]=await Promise.all([
+    const[loansR,repR,cliR,penR,allLoansMapR,expensesR]=await Promise.all([
       sb('loans').select('id,client_id,loan_no,principal_amount,disbursed_amount,total_interest,total_payable,processing_fee,disbursement_date,status,loan_officer_id').eq('business_id',biz).gte('disbursement_date',qStart).lte('disbursement_date',qEndFull).order('disbursement_date', {ascending: false}).limit(100000),
       sb('loan_repayments').select('id,loan_id,amount,interest_portion,principal_portion,penalty_portion,payment_date,payment_method').eq('business_id',biz).gte('payment_date',qStart).lte('payment_date',qEndFull).order('payment_date', {ascending: false}).limit(100000),
       sb('loan_clients').select('id,created_at,notes').eq('business_id',biz).order('created_at', {ascending: false}).limit(100000),
       sb('loan_penalties').select('id,loan_id,penalty_amount,date_charged,is_waived').eq('business_id',biz).eq('is_waived',false).gte('date_charged',qStart).lte('date_charged',qEndFull).order('date_charged', {ascending: false}).limit(100000),
-      sb('loans').select('id,client_id,principal_amount,total_interest,total_payable,disbursement_date,loan_officer_id').eq('business_id',biz).order('disbursement_date', {ascending: true}).limit(100000)
+      sb('loans').select('id,client_id,principal_amount,total_interest,total_payable,disbursement_date,loan_officer_id').eq('business_id',biz).order('disbursement_date', {ascending: true}).limit(100000),
+      sb('patafix_expenses').select('id,expense_no,expense_date,category,description,amount,payment_method,payment_reference').eq('business_id',biz).eq('status','approved').gte('expense_date',qStart).lte('expense_date',qEnd).order('expense_date',{ascending:false}).limit(100000)
     ]);
     if(loansR.error) throw new Error('Loans fetch error: '+loansR.error.message);
     if(repR.error) throw new Error('Repayments fetch error: '+repR.error.message);
     if(cliR.error) throw new Error('Clients fetch error: '+cliR.error.message);
+    if(expensesR.error) throw new Error('Expenses fetch error: '+expensesR.error.message+'. Run patafix-expenses-and-wallet-actions.sql in Supabase first.');
 
     const allLoans = loansR.data||[];
     const allLoansForMapping = allLoansMapR.data||allLoans;
     const allReps = repR.data||[];
     const allClients = cliR.data||[];
     const allPenalties = penR.data||[];
+    const approvedExpenses = expensesR.data||[];
 
     // Build loan lookup map for fast interest ratio calculation
     const loanMap = {};
@@ -7985,8 +8245,14 @@ async function renderAccounting() {
     // NOT when the system charged them (which was the old broken behaviour).
     const penaltiesCollected = filteredReps.reduce((s,r)=>s+Number(r.penalty_portion||0),0);
 
-    // Net revenue = all income streams that are NOT principal return
-    const totalRevenue = processingFees + interestCollected + penaltiesCollected + registrationFees;
+    // Profit & Loss uses approved operational expenses only. Principal movement
+    // remains outside revenue and expenses because it is balance-sheet capital.
+    const grossRevenue = processingFees + interestCollected + penaltiesCollected + registrationFees;
+    const totalExpenses = approvedExpenses.reduce((s,e)=>s+Number(e.amount||0),0);
+    const netProfit = grossRevenue-totalExpenses;
+    const expenseByCategory={};
+    approvedExpenses.forEach(e=>expenseByCategory[e.category||'Other']=(expenseByCategory[e.category||'Other']||0)+Number(e.amount||0));
+    const expenseCategoryHtml=Object.entries(expenseByCategory).sort((a,b)=>b[1]-a[1]).map(([category,amount])=>`<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px"><span>${escapeHtml(category)}</span><strong style="color:var(--accent-red)">(${fmtMoney(amount)})</strong></div>`).join('');
 
     // Officer Revenue Breakdown — detailed by reg, proc, interest per officer
     const clientToOfficer = {};
@@ -8048,18 +8314,40 @@ async function renderAccounting() {
 
     main.innerHTML=`
       <div class="page-header" style="align-items:flex-start; flex-direction:column; margin-bottom:12px">
-        <h1 style="margin-bottom:12px">Accounting & Revenue</h1>
+        <h1 style="margin-bottom:12px">Accounting &amp; Profit/Loss</h1>
         ${getDateFilterHtml('accounting')}
       </div>
       
       <div class="kpi-grid">
-        <div class="kpi-card" style="border-top: 4px solid var(--accent-green)"><div class="kpi-label">Net Profit (Revenue)</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(totalRevenue)}</div><div class="kpi-sub">Registration + Processing + Interest + Penalties</div></div>
+        <div class="kpi-card" style="border-top:4px solid ${netProfit>=0?'var(--accent-green)':'var(--accent-red)'}"><div class="kpi-label">Net Profit</div><div class="kpi-value" style="color:${netProfit>=0?'var(--accent-green)':'var(--accent-red)'}">${fmtMoney(netProfit)}</div><div class="kpi-sub">Gross revenue less approved expenses</div></div>
+        <div class="kpi-card"><div class="kpi-label">Gross Revenue</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(grossRevenue)}</div><div class="kpi-sub">Fees + interest + penalties</div></div>
+        <div class="kpi-card" style="border-top:4px solid var(--accent-red)"><div class="kpi-label">Approved Expenses</div><div class="kpi-value" style="color:var(--accent-red)">${fmtMoney(totalExpenses)}</div><div class="kpi-sub">${approvedExpenses.length} approved expense(s)</div></div>
         <div class="kpi-card"><div class="kpi-label">Processing/Application Fees</div><div class="kpi-value">${fmtMoney(processingFees)}</div><div class="kpi-sub">Product-based upfront fees</div></div>
         <div class="kpi-card"><div class="kpi-label">Registration Fees</div><div class="kpi-value">${fmtMoney(registrationFees)}</div><div class="kpi-sub">${filteredClients.length} new client fee(s), product-based</div></div>
         <div class="kpi-card"><div class="kpi-label">Interest Collected</div><div class="kpi-value">${fmtMoney(interestCollected)}</div></div>
         <div class="kpi-card"><div class="kpi-label">Penalties Collected</div><div class="kpi-value">${fmtMoney(penaltiesCollected)}</div></div>
       </div>
-      
+
+      <div class="card" style="margin-top:24px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px"><h3 style="font-size:16px;color:var(--accent-purple)">Profit &amp; Loss Statement</h3><button class="btn btn-outline btn-sm" onclick="navigateTo('expenses')">View Expenses</button></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:24px">
+          <div>
+            <div style="font-size:12px;font-weight:800;color:var(--text-secondary);margin-bottom:5px">REVENUE</div>
+            <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px"><span>Processing/Application Fees</span><strong>${fmtMoney(processingFees)}</strong></div>
+            <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px"><span>Registration Fees</span><strong>${fmtMoney(registrationFees)}</strong></div>
+            <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px"><span>Interest Collected</span><strong>${fmtMoney(interestCollected)}</strong></div>
+            <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px"><span>Penalties Collected</span><strong>${fmtMoney(penaltiesCollected)}</strong></div>
+            <div style="display:flex;justify-content:space-between;padding:9px 0;font-size:14px"><strong>Gross Revenue</strong><strong style="color:var(--accent-green)">${fmtMoney(grossRevenue)}</strong></div>
+          </div>
+          <div>
+            <div style="font-size:12px;font-weight:800;color:var(--text-secondary);margin-bottom:5px">OPERATING EXPENSES</div>
+            ${expenseCategoryHtml||'<div style="font-size:13px;color:var(--text-secondary);padding:8px 0">No approved expenses for this period</div>'}
+            <div style="display:flex;justify-content:space-between;padding:9px 0;font-size:14px"><strong>Total Expenses</strong><strong style="color:var(--accent-red)">(${fmtMoney(totalExpenses)})</strong></div>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding-top:12px;margin-top:8px;border-top:2px solid var(--border);font-size:17px"><strong>NET PROFIT</strong><strong style="color:${netProfit>=0?'var(--accent-green)':'var(--accent-red)'}">${fmtMoney(netProfit)}</strong></div>
+      </div>
+
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:24px">
         <div class="card">
             <h3 style="font-size:16px;margin-bottom:16px;color:var(--accent-purple)">Officer Performance (Revenue)</h3>
@@ -8113,9 +8401,9 @@ async function renderStaff(){
             <tr>
               <td><span class="badge badge-blue">MANAGER</span></td>
               <td>Daily lending and branch operations</td>
-              <td>Dashboard, Clients, Products, Applications, Disbursement, Active Loans, Repayments, Arrears, Reports, Officer Performance, Accounting, Charges &amp; Excess, M-Pesa Transactions, Suspense and Calculator</td>
-              <td>Manage and transfer clients; approve or reject applications; disburse and edit loans; record repayments; review reports and accounting</td>
-              <td>Cannot manage staff, system settings or audit log; cannot delete clients or loans; loan products are view-only</td>
+              <td>Operational lending pages. Expenses and Accounting &amp; P&amp;L are shown only when granted by an administrator</td>
+              <td>Manage and transfer clients; approve or reject applications; disburse and edit loans; record repayments; initiate expenses when granted</td>
+              <td>Cannot manage staff, system settings or audit log. Expense approval and charge refunds/transfers require separate administrator permission</td>
             </tr>
             <tr>
               <td><span class="badge badge-blue">LOAN OFFICER</span></td>
@@ -8145,6 +8433,31 @@ async function renderStaff(){
   }catch(e){toast(e.message,'error')}
 }
 
+const STAFF_FINANCE_PERMISSIONS=[
+  {key:'view_accounting',label:'View Accounting & P&L'},
+  {key:'view_expenses',label:'View Expenses'},
+  {key:'create_expenses',label:'Initiate Expenses'},
+  {key:'approve_expenses',label:'Approve / Reject Expenses'},
+  {key:'manage_charge_adjustments',label:'Refund / Transfer Charges Balances'}
+];
+
+function staffPermissionValue(staff,key){
+  if(staff?.permissions && Object.prototype.hasOwnProperty.call(staff.permissions,key))return !!staff.permissions[key];
+  const roles=String(staff?.role||'').split(',').map(r=>r.trim());
+  if(roles.includes('admin'))return true;
+  return roles.includes('branch_manager')&&['view_expenses','create_expenses'].includes(key);
+}
+
+function applyStaffFinanceDefaults(){
+  const roles=Array.from(document.querySelectorAll('.st-role-cb:checked')).map(cb=>cb.value);
+  document.querySelectorAll('.st-finance-cb').forEach(cb=>{
+    cb.checked=roles.includes('admin')||(roles.includes('branch_manager')&&['view_expenses','create_expenses'].includes(cb.value));
+    cb.disabled=roles.includes('admin');
+  });
+  const note=document.getElementById('staffAdminPermissionNote');
+  if(note)note.style.display=roles.includes('admin')?'block':'none';
+}
+
 function openAddStaffModal(s){
   s=s||{};
   const currentRoles = (s.role || 'viewer').split(',');
@@ -8171,11 +8484,19 @@ function openAddStaffModal(s){
     <div class="form-group">
       <label>Roles (Select all that apply)</label>
       <div style="display:flex;gap:12px;flex-wrap:wrap;background:var(--bg-dark);padding:12px;border-radius:8px;border:1px solid var(--border)">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" class="st-role-cb" value="admin" ${isChecked('admin')}> Admin</label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" class="st-role-cb" value="branch_manager" ${isChecked('branch_manager')}> Manager</label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" class="st-role-cb" value="loan_officer" ${isChecked('loan_officer')}> Loan Officer</label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" class="st-role-cb" value="cashier" ${isChecked('cashier')}> Cashier</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" class="st-role-cb" value="admin" onchange="applyStaffFinanceDefaults()" ${isChecked('admin')}> Admin</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" class="st-role-cb" value="branch_manager" onchange="applyStaffFinanceDefaults()" ${isChecked('branch_manager')}> Manager</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" class="st-role-cb" value="loan_officer" onchange="applyStaffFinanceDefaults()" ${isChecked('loan_officer')}> Loan Officer</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" class="st-role-cb" value="cashier" onchange="applyStaffFinanceDefaults()" ${isChecked('cashier')}> Cashier</label>
       </div>
+    </div>
+
+    <div class="form-group">
+      <label>Finance Access</label>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;background:var(--bg-dark);padding:12px;border-radius:8px;border:1px solid var(--border)">
+        ${STAFF_FINANCE_PERMISSIONS.map(p=>`<label style="display:flex;align-items:flex-start;gap:7px;cursor:pointer;font-size:12px;line-height:1.35"><input type="checkbox" class="st-finance-cb" value="${p.key}" ${staffPermissionValue(s,p.key)?'checked':''}> <span>${p.label}</span></label>`).join('')}
+      </div>
+      <p id="staffAdminPermissionNote" style="display:${currentRoles.includes('admin')?'block':'none'};font-size:11px;color:var(--text-secondary);margin-top:6px">Administrators always have full finance access.</p>
     </div>
     
     ${s.id ? `
@@ -8191,6 +8512,7 @@ function openAddStaffModal(s){
       <button class="btn btn-primary" onclick="saveStaff('${s.id||''}')">${s.id?'Update':'Save'}</button>
     </div>
   `);
+  if(currentRoles.includes('admin'))document.querySelectorAll('.st-finance-cb').forEach(cb=>cb.disabled=true);
 }
 
 async function saveStaff(id){
@@ -8228,7 +8550,10 @@ async function saveStaff(id){
         }
     }
 
-    const rec={name,email,phone:$('#stPhone').value||null,role:selectedRoles,is_active:$('#stActive').value==='true'};
+    const selectedRoleList=selectedRoles.split(',');
+    const permissions={};
+    STAFF_FINANCE_PERMISSIONS.forEach(p=>permissions[p.key]=selectedRoleList.includes('admin')||!!document.querySelector(`.st-finance-cb[value="${p.key}"]`)?.checked);
+    const rec={name,email,phone:$('#stPhone').value||null,role:selectedRoles,permissions,is_active:$('#stActive').value==='true'};
     
     if(id){
       await sb('loan_staff').update(rec).eq('id',id);
