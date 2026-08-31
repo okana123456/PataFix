@@ -707,6 +707,51 @@ function paymentPhoneHtml(row){
   }
   return `<a href="tel:${escapeHtml(clean)}" style="color:var(--accent-blue);font-weight:700">${escapeHtml(clean)}</a>`;
 }
+function mpesaCreditParty(accountRef=''){
+  const paybill=(appSettings&&appSettings.mpesa_shortcode)||'PataFix PayBill';
+  return `${paybill}${accountRef?` / Acc: ${accountRef}`:''}`;
+}
+function repaymentDebitParty(r){
+  const c=r?.loans?.loan_clients||{};
+  const method=String(r?.payment_method||'').toLowerCase();
+  if(method.includes('mpesa')){
+    return `${c.full_name||'Client'} / ${c.phone||'phone unavailable'}`;
+  }
+  return `${r?.payment_method||'Cash'}${r?.payment_reference?` / Ref: ${r.payment_reference}`:''}`;
+}
+function repaymentCreditParty(r){
+  const loanNo=r?.loans?.loan_no||r?.loan_id||'-';
+  const ref=r?.payment_reference||r?.receipt_no||'';
+  return `Loan ${loanNo}${ref?` / Ref: ${ref}`:''}`;
+}
+function mpesaLedgerDebitParty(row){
+  const payer=row?.payerName&&row.payerName!=='-'?row.payerName:'Payer';
+  const phone=row?.payerPhone||'phone protected/unavailable';
+  return `${payer} / ${phone}`;
+}
+function mpesaLedgerCreditParty(row){
+  const destination=row?.destination||'PataFix';
+  return `${destination} / ${mpesaCreditParty(row?.accountReference||'')}`;
+}
+function suspenseDebitParty(row){
+  const payer=row?.payer_name||row?.first_name||'Payer';
+  const phone=row?.payer_phone||row?.msisdn||'phone protected/unavailable';
+  return `${payer} / ${phone}`;
+}
+function suspenseCreditParty(row){
+  const account=row?.account_number||row?.bill_ref_number||'unmatched account';
+  return `Suspense Account / Acc: ${account}`;
+}
+function journalPartyLabel(entry,side){
+  const account=entry?.[side]||'-';
+  const desc=String(entry?.description||'');
+  const clientMatch=desc.match(/for\s+([^|]+?)\s*\|/i)||desc.match(/by\s+([^|]+?)\s*\|/i);
+  const clientIdMatch=desc.match(/Client ID:\s*([^|\s]+)/i);
+  const loanMatch=desc.match(/Loan\s+([A-Z0-9-]+)/i);
+  const ref=entry?.ref?` / Ref: ${entry.ref}`:'';
+  const detail=clientMatch?` / ${clientMatch[1].trim()}`:clientIdMatch?` / Client ID: ${clientIdMatch[1]}`:loanMatch?` / Loan ${loanMatch[1]}`:'';
+  return `${account}${detail}${ref}`;
+}
 function updateCachedClientPhoto(clientId, photoPath){
   if(Array.isArray(cachedData.clients)){
     cachedData.clients = cachedData.clients.map(c => c.id === clientId ? {...c, photo_path: photoPath} : c);
@@ -4424,7 +4469,7 @@ async function renderRepayments(page=1){
         <div class="table-wrap"><table><thead><tr><th>Trans ID</th><th>Amount</th><th>Phone</th><th>Account Ref</th><th>Time</th><th>Actions</th></tr></thead><tbody>
         ${myQueue.map(q=>`<tr><td>${escapeHtml(q.trans_id||'-')}</td><td>${fmtMoney(q.trans_amount)}</td><td>${paymentPhoneHtml(q)}</td><td>${escapeHtml(q.bill_ref_number||'-')}</td><td>${fmtDateTime(q.created_at)}</td><td>${canPay?`<button class="btn btn-success btn-sm" onclick="confirmMpesaPayment('${q.id}','${q.bill_ref_number||q.msisdn||''}',${q.trans_amount},'${q.trans_id}')">Confirm</button> <button class="btn btn-outline btn-sm" onclick="dismissMpesaPayment('${q.id}')">Dismiss</button>`:''}</td></tr>`).join('')}
         </tbody></table></div></div>`:''}
-      <div class="table-wrap"><table><thead><tr><th>Receipt</th><th>Client</th><th>ID Number</th><th>Phone</th><th>Loan #</th><th>Type</th><th>Reference</th><th>Amount (KES)</th><th>Balance Remaining</th><th>Method</th><th>Date & Time</th><th>Actions</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Receipt</th><th>Client</th><th>ID Number</th><th>Phone</th><th>Debit Party</th><th>Credit Party</th><th>Loan #</th><th>Type</th><th>Reference</th><th>Amount (KES)</th><th>Balance Remaining</th><th>Method</th><th>Date & Time</th><th>Actions</th></tr></thead><tbody>
       ${p.items.map(r=>{
         // Balance AFTER this specific payment (running balance, not current balance)
         const balRem   = cachedData._balAfterMap?.[r.id] ?? Number(r.loans?.outstanding_balance ?? 0);
@@ -4458,12 +4503,16 @@ async function renderRepayments(page=1){
         const rmethod = r.payment_method||'-';
         const rdate   = fmtPaymentDateTime(r.payment_date||r.created_at);
         const ramt    = fmtMoney(r.amount);
+        const debitParty=escapeHtml(repaymentDebitParty(r));
+        const creditParty=escapeHtml(repaymentCreditParty(r));
         return [
           '<tr>',
           '<td><strong>',r.receipt_no,'</strong></td>',
           '<td>',rclient,'</td>',
           '<td>',ridNumber,'</td>',
           '<td>',rphone,'</td>',
+          '<td style="font-size:12px">',debitParty,'</td>',
+          '<td style="font-size:12px">',creditParty,'</td>',
           '<td>',rloan,'</td>',
           '<td>',payType,'</td>',
           '<td><span style="font-family:monospace">',rref,'</span></td>',
@@ -4474,7 +4523,7 @@ async function renderRepayments(page=1){
           '<td><button class="btn btn-outline btn-sm" data-repayment-id="',rid,'" onclick="printReceipt(this.dataset.repaymentId)">Print</button></td>',
           '</tr>'
         ].join('');
-      }).join('')||'<tr><td colspan="12" style="text-align:center;color:var(--text-secondary)">No repayments recorded for this period</td></tr>'}
+      }).join('')||'<tr><td colspan="14" style="text-align:center;color:var(--text-secondary)">No repayments recorded for this period</td></tr>'}
       </tbody></table></div>
       ${paginationHtml(p,'renderRepayments')}
     `;
@@ -4940,6 +4989,8 @@ function exportRepaymentsExcel(){
       'Client':            r.loans?.loan_clients?.full_name||'-',
       'ID Number':         r.loans?.loan_clients?.id_number||'-',
       'Phone':             r.loans?.loan_clients?.phone||'-',
+      'Debit Party':       repaymentDebitParty(r),
+      'Credit Party':      repaymentCreditParty(r),
       'Loan #':            r.loans?.loan_no||'-',
       'Payment Type':      payType,
       'Reference':         r.payment_reference||'-',
@@ -4952,7 +5003,7 @@ function exportRepaymentsExcel(){
     };
   });
   const ws=XLSX.utils.json_to_sheet(data);
-  ws['!cols']=[{wch:14},{wch:22},{wch:16},{wch:14},{wch:12},{wch:16},{wch:16},{wch:12},{wch:16},{wch:16},{wch:14},{wch:12},{wch:20}];
+  ws['!cols']=[{wch:14},{wch:22},{wch:16},{wch:14},{wch:28},{wch:28},{wch:12},{wch:16},{wch:16},{wch:12},{wch:16},{wch:16},{wch:14},{wch:12},{wch:20}];
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Repayments');
   XLSX.writeFile(wb,'PataFix_Repayments.xlsx');
@@ -6244,7 +6295,9 @@ async function loadChargesExcessAccountData(){
       _type:type,
       _amountIn:isCredit?amount:0,
       _amountUsed:isDebit?amount:0,
-      _net:isCredit?amount:-amount
+      _net:isCredit?amount:-amount,
+      _debitParty:isCredit?`${client?.full_name||'Client'} / ${client?.phone||'phone unavailable'}`:'Charges & Excess Account',
+      _creditParty:isCredit?'Charges & Excess Account':(tx.transaction_type==='loan_transfer_debit'?`Loan ${loan?.loan_no||tx.loan_id||'-'}`:`${client?.full_name||'Client'} / ${client?.phone||'phone unavailable'}`)
     };
   });
 
@@ -6287,17 +6340,19 @@ function renderClientProfileChargesAccount(clientId,data){
         </div>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Date</th><th>Description / Type</th><th>Loan</th><th>M-Pesa / Ref</th><th>Paid In</th><th>Used</th><th>Balance</th></tr></thead>
+        <thead><tr><th>Date</th><th>Description / Type</th><th>Debit Party</th><th>Credit Party</th><th>Loan</th><th>M-Pesa / Ref</th><th>Paid In</th><th>Used</th><th>Balance</th></tr></thead>
         <tbody>
           ${displayRows.map(r=>`<tr>
             <td>${fmtDate(r.date||r.created_at)}</td>
             <td>${chargesExcessTypeBadge(r._type)}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(r.description||'-')}</span></td>
+            <td style="font-size:12px">${escapeHtml(r._debitParty||'-')}</td>
+            <td style="font-size:12px">${escapeHtml(r._creditParty||'-')}</td>
             <td>${escapeHtml(r._loanNo||'-')}</td>
             <td><strong>${escapeHtml(r._refText||'-')}</strong></td>
             <td><strong style="color:var(--accent-green)">${r._amountIn?fmtMoney(r._amountIn):'-'}</strong></td>
             <td><strong style="color:${r._amountUsed?'var(--accent-red)':'var(--text-secondary)'}">${r._amountUsed?fmtMoney(r._amountUsed):'-'}</strong></td>
             <td><strong>${fmtMoney(r._balance||0)}</strong></td>
-          </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess transactions for this client</td></tr>'}
+          </tr>`).join('')||'<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess transactions for this client</td></tr>'}
         </tbody>
       </table></div>
     </div>
@@ -6388,12 +6443,12 @@ function downloadChargesExcessActivityExcel(){
 
   const exportRows=(data.rows||[]).filter(row=>{
     if(!chargesExcessDateMatches(row,range))return false;
-    const search=[row._clientName,row._clientPhone,row._refText,row._loanNo,row._type,row.description,row.ref].join(' ').toLowerCase();
+    const search=[row._clientName,row._clientPhone,row._refText,row._loanNo,row._type,row.description,row.ref,row._debitParty,row._creditParty].join(' ').toLowerCase();
     return !state.search||search.includes(state.search);
   }).sort((a,b)=>String(b.date||b.created_at||'').localeCompare(String(a.date||a.created_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||'')));
   if(!exportRows.length)return toast(`No charges or excess activity found for ${range.label}`,'info');
 
-  const headers=['Date','Client','ID Number','Phone','Transaction Type','Loan Number','M-Pesa / Reference','Amount Paid (KES)','Used as Charge (KES)','Client Balance After Entry (KES)','Description'];
+  const headers=['Date','Client','ID Number','Phone','Debit Party','Credit Party','Transaction Type','Loan Number','M-Pesa / Reference','Amount Paid (KES)','Used as Charge (KES)','Client Balance After Entry (KES)','Description'];
   const aoa=[
     ['PataFix - Charges & Excess Account Activity'],
     [`Period: ${range.label}`],
@@ -6401,16 +6456,16 @@ function downloadChargesExcessActivityExcel(){
     headers,
     ...exportRows.map(row=>{
       const client=data.clientById?.[row._clientId]||{};
-      return [chargesExcessRowDate(row),row._clientName||'Unknown Client',client.id_number||'',row._clientPhone||client.phone||'',row._type||'',row._loanNo||'',row._refText||'',Number(row._amountIn||0),Number(row._amountUsed||0),Number(row._balance||0),row.description||''];
+      return [chargesExcessRowDate(row),row._clientName||'Unknown Client',client.id_number||'',row._clientPhone||client.phone||'',row._debitParty||'',row._creditParty||'',row._type||'',row._loanNo||'',row._refText||'',Number(row._amountIn||0),Number(row._amountUsed||0),Number(row._balance||0),row.description||''];
     }),
-    ['TOTALS','','','','','','',
+    ['TOTALS','','','','','','','','',
       exportRows.reduce((sum,row)=>sum+Number(row._amountIn||0),0),
       exportRows.reduce((sum,row)=>sum+Number(row._amountUsed||0),0),'','']
   ];
   const ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!merges']=[XLSX.utils.decode_range('A1:K1'),XLSX.utils.decode_range('A2:K2'),XLSX.utils.decode_range('A3:K3')];
-  ws['!cols']=[{wch:13},{wch:27},{wch:15},{wch:16},{wch:28},{wch:15},{wch:22},{wch:20},{wch:23},{wch:29},{wch:42}];
-  ws['!autofilter']={ref:`A4:K${4+exportRows.length}`};
+  ws['!merges']=[XLSX.utils.decode_range('A1:M1'),XLSX.utils.decode_range('A2:M2'),XLSX.utils.decode_range('A3:M3')];
+  ws['!cols']=[{wch:13},{wch:27},{wch:15},{wch:16},{wch:28},{wch:28},{wch:28},{wch:15},{wch:22},{wch:20},{wch:23},{wch:29},{wch:42}];
+  ws['!autofilter']={ref:`A4:M${4+exportRows.length}`};
   ws['!freeze']={xSplit:0,ySplit:4,topLeftCell:'A5',activePane:'bottomLeft',state:'frozen'};
   const titleStyle={font:{bold:true,color:{rgb:'FFFFFF'},sz:16},fill:{fgColor:{rgb:'7C2DFF'}},alignment:{horizontal:'center'}};
   const metaStyle={font:{bold:true,color:{rgb:'2B174D'}},fill:{fgColor:{rgb:'FFF1A8'}},alignment:{horizontal:'left'}};
@@ -6421,7 +6476,7 @@ function downloadChargesExcessActivityExcel(){
   if(ws.A3)ws.A3.s=metaStyle;
   headers.forEach((_,col)=>{const cell=ws[XLSX.utils.encode_cell({r:3,c:col})];if(cell)cell.s=headerStyle;});
   for(let row=4;row<4+exportRows.length;row++){
-    for(let col=7;col<=9;col++){
+    for(let col=9;col<=11;col++){
       const cell=ws[XLSX.utils.encode_cell({r:row,c:col})];
       if(cell)cell.z='#,##0.00';
     }
@@ -6429,7 +6484,7 @@ function downloadChargesExcessActivityExcel(){
   const totalRow=4+exportRows.length;
   for(let col=0;col<headers.length;col++){
     const cell=ws[XLSX.utils.encode_cell({r:totalRow,c:col})];
-    if(cell){cell.s=totalStyle;if(col>=7&&col<=9)cell.z='#,##0.00';}
+    if(cell){cell.s=totalStyle;if(col>=9&&col<=11)cell.z='#,##0.00';}
   }
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Charges Activity');
@@ -6566,10 +6621,10 @@ async function renderChargesExcessAccount(){
       <div id="chargesFilterSummary" style="font-size:11px;color:var(--text-secondary);margin-bottom:10px"></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Date</th><th>Client</th><th>Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used / Transferred Out</th><th>Client Balance</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Date</th><th>Client</th><th>Debit Party</th><th>Credit Party</th><th>Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used / Transferred Out</th><th>Client Balance</th><th>Actions</th></tr></thead>
           <tbody>
             ${displayRows.length?displayRows.map(e=>{
-              const search=[e._clientName,e._clientPhone,e._refText,e._loanNo,e._type,e.description,e.ref].join(' ').toLowerCase();
+              const search=[e._clientName,e._clientPhone,e._refText,e._loanNo,e._type,e.description,e.ref,e._debitParty,e._creditParty].join(' ').toLowerCase();
               const currentBalance=Number(data.clientBalances?.[e._clientId]||0);
               const clientCell=e._clientId
                 ? `<button type="button" onclick="openChargesClientAccount('${e._clientId}','charges')" style="border:0;background:transparent;padding:0;color:var(--accent-blue);text-align:left;cursor:pointer"><strong>${escapeHtml(e._clientName)}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(e._clientPhone||'View account')}</span></button>`
@@ -6577,6 +6632,8 @@ async function renderChargesExcessAccount(){
               return `<tr class="charges-excess-row" data-search="${escapeHtml(search)}" data-date="${escapeHtml(chargesExcessRowDate(e))}" data-current-balance="${currentBalance}">
                 <td>${fmtDate(e.date||e.created_at)}</td>
                 <td>${clientCell}</td>
+                <td style="font-size:12px">${escapeHtml(e._debitParty||'-')}</td>
+                <td style="font-size:12px">${escapeHtml(e._creditParty||'-')}</td>
                 <td>${chargesExcessTypeBadge(e._type)}</td>
                 <td>${escapeHtml(e._loanNo||'-')}</td>
                 <td><strong>${escapeHtml(e._refText||'-')}</strong></td>
@@ -6585,7 +6642,7 @@ async function renderChargesExcessAccount(){
                 <td><strong>${fmtMoney(e._balance||0)}</strong></td>
                 <td>${e._clientId&&currentBalance>0.009&&hasFinancePermission('manage_charge_adjustments',['admin'])?`<button class="btn btn-outline btn-sm" onclick="openChargesClientAccount('${e._clientId}','charges')">Manage</button>`:'-'}</td>
               </tr>`;
-            }).join(''):'<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess deposits recorded yet</td></tr>'}
+            }).join(''):'<tr><td colspan="11" style="text-align:center;color:var(--text-secondary);padding:18px">No charges or excess deposits recorded yet</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -6636,17 +6693,19 @@ async function openChargesClientAccount(clientId,activeTab='charges'){
           <div class="kpi-card"><div class="kpi-label">Transactions</div><div class="kpi-value">${rows.length}</div><div class="kpi-sub">Charge and excess entries</div></div>
         </div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Date</th><th>Description / Type</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used / Out</th><th>Balance</th><th>Action</th></tr></thead>
+          <thead><tr><th>Date</th><th>Description / Type</th><th>Debit Party</th><th>Credit Party</th><th>Loan</th><th>M-Pesa / Ref Code</th><th>Amount Paid</th><th>Used / Out</th><th>Balance</th><th>Action</th></tr></thead>
           <tbody>${displayRows.map(r=>`<tr>
             <td>${fmtDate(r.date||r.created_at)}</td>
             <td>${chargesExcessTypeBadge(r._type)}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(r.description||'-')}</span></td>
+            <td style="font-size:12px">${escapeHtml(r._debitParty||'-')}</td>
+            <td style="font-size:12px">${escapeHtml(r._creditParty||'-')}</td>
             <td>${escapeHtml(r._loanNo||'-')}</td>
             <td><strong>${escapeHtml(r._refText||'-')}</strong></td>
             <td><strong style="color:var(--accent-green)">${fmtMoney(r._amountIn||0)}</strong></td>
             <td>${r._amountUsed?`<strong style="color:var(--accent-red)">${fmtMoney(r._amountUsed)}</strong>`:'-'}</td>
             <td><strong>${fmtMoney(r._balance||0)}</strong></td>
             <td>${r._amountIn>0&&availableBalance>0.009&&hasFinancePermission('manage_charge_adjustments',['admin'])?`<button class="btn btn-outline btn-sm" onclick="openClientWalletRefundModal('${clientId}',${Math.min(Number(r._amountIn||0),Math.max(0,availableBalance))})">Refund</button>`:'-'}</td>
-          </tr>`).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:20px">No charge or excess transactions for this client</td></tr>'}</tbody>
+          </tr>`).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);padding:20px">No charge or excess transactions for this client</td></tr>'}</tbody>
         </table></div>
       </div>
       <div id="clientLoansAccountPanel" style="display:${activeTab==='loans'?'block':'none'}">
@@ -7123,7 +7182,8 @@ function renderMpesaLedgerRows(){
     if(!query)return true;
     return[
       row.reference,row.accountReference,row.payerName,row.payerPhone,row.client?.full_name,
-      row.client?.id_number,row.client?.phone,row.loan?.loan_no,row.destination,row.status
+      row.client?.id_number,row.client?.phone,row.loan?.loan_no,row.destination,row.status,
+      mpesaLedgerDebitParty(row),mpesaLedgerCreditParty(row)
     ].some(value=>String(value||'').toLowerCase().includes(query));
   });
   const p=paginate(filtered,state.page,25);
@@ -7135,18 +7195,22 @@ function renderMpesaLedgerRows(){
     const suspenseAction=row.status==='suspense'?'<button class="btn btn-outline btn-sm" onclick="navigateTo(\'suspense\')">Open Suspense</button>':'';
     const duplicateBadge=row.duplicateCount?`<br><span class="badge badge-red">${row.deliveryCount} deliveries</span>`:'';
     const clientLabel=row.client?`${escapeHtml(row.client.full_name||'-')}<br><span style="font-size:10px;color:var(--text-secondary)">ID ${escapeHtml(row.client.id_number||'-')}${row.loan?.loan_no?' | Loan '+escapeHtml(row.loan.loan_no):''}</span>`:'<span style="color:var(--text-secondary)">Unmatched</span>';
+    const debitParty=escapeHtml(mpesaLedgerDebitParty(row));
+    const creditParty=escapeHtml(mpesaLedgerCreditParty(row));
     return `<tr>
       <td style="white-space:nowrap">${fmtPaymentDateTime(row.eventTime)}</td>
       <td><strong>${escapeHtml(row.reference||'-')}</strong>${duplicateBadge}</td>
       <td>${escapeHtml(row.accountReference||'-')}</td>
       <td>${escapeHtml(row.payerName||'-')}<br>${paymentPhoneHtml({phone:row.payerPhone})}</td>
+      <td style="font-size:12px">${debitParty}</td>
+      <td style="font-size:12px">${creditParty}</td>
       <td><strong>${fmtMoney(row.amount)}</strong></td>
       <td>${escapeHtml(row.destination)}</td>
       <td>${clientLabel}</td>
       <td>${mpesaLedgerStatusBadge(row.status)}${row.processingMessage?`<br><span style="font-size:10px;color:var(--text-secondary)">${escapeHtml(row.processingMessage)}</span>`:''}</td>
       <td>${suspenseAction}</td>
     </tr>`;
-  }).join(''):'<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:20px">No M-Pesa transactions match these filters</td></tr>';
+  }).join(''):'<tr><td colspan="11" style="text-align:center;color:var(--text-secondary);padding:20px">No M-Pesa transactions match these filters</td></tr>';
   const summary=document.getElementById('mpesaLedgerResultSummary');
   if(summary)summary.textContent=`${filtered.length.toLocaleString()} transaction${filtered.length===1?'':'s'} | 25 rows per page`;
   const pagination=document.getElementById('mpesaLedgerPagination');
@@ -7203,7 +7267,7 @@ async function renderMpesaTransactions(){
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
         <span id="mpesaLedgerResultSummary" style="font-size:12px;color:var(--text-secondary)"></span>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>Date</th><th>M-Pesa Code</th><th>Account No.</th><th>Payer</th><th>Amount</th><th>Destination</th><th>Client / Loan</th><th>Status</th><th>Action</th></tr></thead><tbody id="mpesaLedgerBody"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>M-Pesa Code</th><th>Account No.</th><th>Payer</th><th>Debit Party</th><th>Credit Party</th><th>Amount</th><th>Destination</th><th>Client / Loan</th><th>Status</th><th>Action</th></tr></thead><tbody id="mpesaLedgerBody"></tbody></table></div>
       <div id="mpesaLedgerPagination"></div>`;
     renderMpesaLedgerRows();
   }catch(e){
@@ -7251,7 +7315,7 @@ async function renderSuspense(){
       <h3 class="dash-h3">Unmatched M-Pesa (Daraja Queue)</h3>
       <div class="table-wrap" style="margin-bottom:14px">
         <table>
-          <thead><tr><th>Date</th><th>M-Pesa Ref</th><th>Payee Number</th><th>Account Ref</th><th>Amount</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Date</th><th>M-Pesa Ref</th><th>Payee Number</th><th>Account Ref</th><th>Debit Party</th><th>Credit Party</th><th>Amount</th><th>Actions</th></tr></thead>
           <tbody>
             ${queue.length?queue.map(q=>`
               <tr>
@@ -7259,13 +7323,15 @@ async function renderSuspense(){
                 <td><strong>${escapeHtml(q.trans_id||'-')}</strong></td>
                 <td>${paymentPhoneHtml(q)}</td>
                 <td>${escapeHtml(q.bill_ref_number||'-')}${q.loan_id?'<br><span class="badge badge-blue">Suggested loan found</span>':''}</td>
+                <td style="font-size:12px">${escapeHtml(suspenseDebitParty(q))}</td>
+                <td style="font-size:12px">${escapeHtml(suspenseCreditParty(q))}</td>
                 <td><strong style="color:var(--accent-green)">${fmtMoney(q.trans_amount)}</strong></td>
                 <td style="display:flex;gap:4px;flex-wrap:wrap">
                   <button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${q.id}','mpesa',${q.trans_amount},'${q.trans_id||''}','${q.loan_id||''}')">Match to Loan</button>
                   <button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${q.id}','mpesa',${q.trans_amount},'${q.trans_id||''}','${q.bill_ref_number||''}','${q.first_name||''}')">Match to Charges</button>
                   <button class="btn btn-outline btn-sm" onclick="dismissMpesaPayment('${q.id}')">Dismiss</button>
                 </td>
-              </tr>`).join(''):'<tr><td colspan="6"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No unmatched M-Pesa payments</div></td></tr>'}
+              </tr>`).join(''):'<tr><td colspan="8"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No unmatched M-Pesa payments</div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -7273,7 +7339,7 @@ async function renderSuspense(){
       <h3 class="dash-h3">Suspense Matching Records</h3>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Date</th><th>Reference</th><th>Payee</th><th>Payee Number</th><th>Account Ref</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Date</th><th>Reference</th><th>Payee</th><th>Payee Number</th><th>Account Ref</th><th>Debit Party</th><th>Credit Party</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>
             ${pendingManualSuspense.length?pendingManualSuspense.map(r=>`
               <tr>
@@ -7282,10 +7348,12 @@ async function renderSuspense(){
                 <td>${escapeHtml(r.payer_name||'-')}</td>
                 <td>${paymentPhoneHtml(r)}</td>
                 <td>${escapeHtml(r.account_number||'-')}</td>
+                <td style="font-size:12px">${escapeHtml(suspenseDebitParty(r))}</td>
+                <td style="font-size:12px">${escapeHtml(suspenseCreditParty(r))}</td>
                 <td><strong style="color:var(--accent-green)">${fmtMoney(r.amount)}</strong></td>
                 <td>${!r.resolved?'<span class="badge badge-yellow">Pending</span>':'<span class="badge badge-green">Matched</span>'}</td>
                 <td>${!r.resolved?`<div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}')">Match Loan</button><button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}','${r.account_number||''}','${r.payer_name||''}')">Match Charges</button></div>`:'<span style="font-size:11px;color:var(--text-secondary)">Done</span>'}</td>
-              </tr>`).join(''):'<tr><td colspan="8"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No suspense records waiting to be matched</div></td></tr>'}
+              </tr>`).join(''):'<tr><td colspan="10"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No suspense records waiting to be matched</div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -8167,18 +8235,20 @@ async function renderAccounting() {
     }
     const qEndFull = qEnd + 'T23:59:59+00:00'; // inclusive end of day in UTC
 
-    const[loansR,repR,cliR,penR,allLoansMapR,expensesR]=await Promise.all([
+    const[loansR,repR,cliR,penR,allLoansMapR,expensesR,journalR]=await Promise.all([
       sb('loans').select('id,client_id,loan_no,principal_amount,disbursed_amount,total_interest,total_payable,processing_fee,disbursement_date,status,loan_officer_id').eq('business_id',biz).gte('disbursement_date',qStart).lte('disbursement_date',qEndFull).order('disbursement_date', {ascending: false}).limit(100000),
       sb('loan_repayments').select('id,loan_id,amount,interest_portion,principal_portion,penalty_portion,payment_date,payment_method').eq('business_id',biz).gte('payment_date',qStart).lte('payment_date',qEndFull).order('payment_date', {ascending: false}).limit(100000),
       sb('loan_clients').select('id,created_at,notes').eq('business_id',biz).order('created_at', {ascending: false}).limit(100000),
       sb('loan_penalties').select('id,loan_id,penalty_amount,date_charged,is_waived').eq('business_id',biz).eq('is_waived',false).gte('date_charged',qStart).lte('date_charged',qEndFull).order('date_charged', {ascending: false}).limit(100000),
       sb('loans').select('id,client_id,principal_amount,total_interest,total_payable,disbursement_date,loan_officer_id').eq('business_id',biz).order('disbursement_date', {ascending: true}).limit(100000),
-      sb('patafix_expenses').select('id,expense_no,expense_date,category,description,amount,payment_method,payment_reference').eq('business_id',biz).eq('status','approved').gte('expense_date',qStart).lte('expense_date',qEnd).order('expense_date',{ascending:false}).limit(100000)
+      sb('patafix_expenses').select('id,expense_no,expense_date,category,description,amount,payment_method,payment_reference').eq('business_id',biz).eq('status','approved').gte('expense_date',qStart).lte('expense_date',qEnd).order('expense_date',{ascending:false}).limit(100000),
+      sb('journal_entries').select('id,date,ref,description,debit,credit,amount').eq('business_id',biz).gte('date',qStart).lte('date',qEnd).order('date',{ascending:false}).limit(100)
     ]);
     if(loansR.error) throw new Error('Loans fetch error: '+loansR.error.message);
     if(repR.error) throw new Error('Repayments fetch error: '+repR.error.message);
     if(cliR.error) throw new Error('Clients fetch error: '+cliR.error.message);
     if(expensesR.error) throw new Error('Expenses fetch error: '+expensesR.error.message+'. Run patafix-expenses-and-wallet-actions.sql in Supabase first.');
+    if(journalR.error) throw new Error('Journal fetch error: '+journalR.error.message);
 
     const allLoans = loansR.data||[];
     const allLoansForMapping = allLoansMapR.data||allLoans;
@@ -8186,6 +8256,7 @@ async function renderAccounting() {
     const allClients = cliR.data||[];
     const allPenalties = penR.data||[];
     const approvedExpenses = expensesR.data||[];
+    const journalEntries = journalR.data||[];
 
     // Build loan lookup map for fast interest ratio calculation
     const loanMap = {};
@@ -8365,6 +8436,24 @@ async function renderAccounting() {
                 <strong style="color:var(--accent-blue)">${fmtMoney(principalRecovered)}</strong>
             </div>
         </div>
+      </div>
+
+      <div class="card" style="margin-top:24px">
+        <h3 style="font-size:16px;margin-bottom:8px;color:var(--accent-purple)">Accounting Movement Trail</h3>
+        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:10px">Recent ledger entries for the selected period, including the debit and credit party credentials available from each transaction reference.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Date</th><th>Reference</th><th>Debit Party</th><th>Credit Party</th><th>Description</th><th>Amount</th></tr></thead>
+          <tbody>
+            ${journalEntries.length?journalEntries.map(j=>`<tr>
+              <td>${fmtDate(j.date)}</td>
+              <td><strong>${escapeHtml(j.ref||'-')}</strong></td>
+              <td style="font-size:12px">${escapeHtml(journalPartyLabel(j,'debit'))}</td>
+              <td style="font-size:12px">${escapeHtml(journalPartyLabel(j,'credit'))}</td>
+              <td style="font-size:12px">${escapeHtml(j.description||'-')}</td>
+              <td><strong>${fmtMoney(j.amount)}</strong></td>
+            </tr>`).join(''):'<tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:18px">No accounting movements for this period</td></tr>'}
+          </tbody>
+        </table></div>
       </div>
     `;
   } catch(e) { 
