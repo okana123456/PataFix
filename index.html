@@ -711,11 +711,20 @@ function mpesaCreditParty(accountRef=''){
   const paybill=(appSettings&&appSettings.mpesa_shortcode)||'PataFix PayBill';
   return `${paybill}${accountRef?` / Acc: ${accountRef}`:''}`;
 }
+function partyPhoneText(value){
+  const clean=String(value||'').trim();
+  if(!clean)return 'phone unavailable';
+  const digits=clean.replace(/\D/g,'');
+  const hasMask=/[xX*•]/.test(clean);
+  const plausiblePhone=/^[+\d\s()-]+$/.test(clean)&&digits.length>=9&&digits.length<=15;
+  if(hasMask)return clean;
+  return plausiblePhone?clean:'Protected/unavailable';
+}
 function repaymentDebitParty(r){
   const c=r?.loans?.loan_clients||{};
   const method=String(r?.payment_method||'').toLowerCase();
   if(method.includes('mpesa')){
-    return `${c.full_name||'Client'} / ${c.phone||'phone unavailable'}`;
+    return `${c.full_name||'Client'} / ${partyPhoneText(c.phone)}`;
   }
   return `${r?.payment_method||'Cash'}${r?.payment_reference?` / Ref: ${r.payment_reference}`:''}`;
 }
@@ -726,8 +735,7 @@ function repaymentCreditParty(r){
 }
 function mpesaLedgerDebitParty(row){
   const payer=row?.payerName&&row.payerName!=='-'?row.payerName:'Payer';
-  const phone=row?.payerPhone||'phone protected/unavailable';
-  return `${payer} / ${phone}`;
+  return `${payer} / ${partyPhoneText(row?.payerPhone)}`;
 }
 function mpesaLedgerCreditParty(row){
   const destination=row?.destination||'PataFix';
@@ -735,8 +743,7 @@ function mpesaLedgerCreditParty(row){
 }
 function suspenseDebitParty(row){
   const payer=row?.payer_name||row?.first_name||'Payer';
-  const phone=row?.payer_phone||row?.msisdn||'phone protected/unavailable';
-  return `${payer} / ${phone}`;
+  return `${payer} / ${partyPhoneText(row?.payer_phone||row?.msisdn)}`;
 }
 function suspenseCreditParty(row){
   const account=row?.account_number||row?.bill_ref_number||'unmatched account';
@@ -7202,8 +7209,8 @@ function renderMpesaLedgerRows(){
       <td><strong>${escapeHtml(row.reference||'-')}</strong>${duplicateBadge}</td>
       <td>${escapeHtml(row.accountReference||'-')}</td>
       <td>${escapeHtml(row.payerName||'-')}<br>${paymentPhoneHtml({phone:row.payerPhone})}</td>
-      <td style="font-size:12px">${debitParty}</td>
-      <td style="font-size:12px">${creditParty}</td>
+      <td style="font-size:12px;max-width:170px;overflow-wrap:anywhere">${debitParty}</td>
+      <td style="font-size:12px;max-width:170px;overflow-wrap:anywhere">${creditParty}</td>
       <td><strong>${fmtMoney(row.amount)}</strong></td>
       <td>${escapeHtml(row.destination)}</td>
       <td>${clientLabel}</td>
@@ -7323,8 +7330,8 @@ async function renderSuspense(){
                 <td><strong>${escapeHtml(q.trans_id||'-')}</strong></td>
                 <td>${paymentPhoneHtml(q)}</td>
                 <td>${escapeHtml(q.bill_ref_number||'-')}${q.loan_id?'<br><span class="badge badge-blue">Suggested loan found</span>':''}</td>
-                <td style="font-size:12px">${escapeHtml(suspenseDebitParty(q))}</td>
-                <td style="font-size:12px">${escapeHtml(suspenseCreditParty(q))}</td>
+                <td style="font-size:12px;max-width:170px;overflow-wrap:anywhere">${escapeHtml(suspenseDebitParty(q))}</td>
+                <td style="font-size:12px;max-width:170px;overflow-wrap:anywhere">${escapeHtml(suspenseCreditParty(q))}</td>
                 <td><strong style="color:var(--accent-green)">${fmtMoney(q.trans_amount)}</strong></td>
                 <td style="display:flex;gap:4px;flex-wrap:wrap">
                   <button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${q.id}','mpesa',${q.trans_amount},'${q.trans_id||''}','${q.loan_id||''}')">Match to Loan</button>
@@ -7348,8 +7355,8 @@ async function renderSuspense(){
                 <td>${escapeHtml(r.payer_name||'-')}</td>
                 <td>${paymentPhoneHtml(r)}</td>
                 <td>${escapeHtml(r.account_number||'-')}</td>
-                <td style="font-size:12px">${escapeHtml(suspenseDebitParty(r))}</td>
-                <td style="font-size:12px">${escapeHtml(suspenseCreditParty(r))}</td>
+                <td style="font-size:12px;max-width:170px;overflow-wrap:anywhere">${escapeHtml(suspenseDebitParty(r))}</td>
+                <td style="font-size:12px;max-width:170px;overflow-wrap:anywhere">${escapeHtml(suspenseCreditParty(r))}</td>
                 <td><strong style="color:var(--accent-green)">${fmtMoney(r.amount)}</strong></td>
                 <td>${!r.resolved?'<span class="badge badge-yellow">Pending</span>':'<span class="badge badge-green">Matched</span>'}</td>
                 <td>${!r.resolved?`<div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}')">Match Loan</button><button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}','${r.account_number||''}','${r.payer_name||''}')">Match Charges</button></div>`:'<span style="font-size:11px;color:var(--text-secondary)">Done</span>'}</td>
