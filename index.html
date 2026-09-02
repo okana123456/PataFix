@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-09-02-staff-confirmation-v1';
+const APP_VERSION = 'patafix-2026-09-02-staff-actions-menu-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -8483,18 +8483,26 @@ async function renderStaff(){
         <p style="font-size:12px;color:var(--text-secondary)">New staff will show as Pending Email until they confirm the invitation sent to their inbox. Administrators can resend the confirmation email or delete the staff login completely if the wrong email was used.</p>
       </div>
       <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email/Phone</th><th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th></tr></thead><tbody>
-      ${(staff||[]).map(s=>`<tr>
+      ${(staff||[]).map(s=>{
+        const menuId=`staffActions_${String(s.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
+        return `<tr>
         <td><strong>${escapeHtml(s.name||'-')}</strong></td>
         <td>${escapeHtml(s.email||s.phone||'-')}</td>
         <td><span class="badge badge-blue" style="max-width:150px;white-space:normal;display:inline-block">${escapeHtml((s.role||'').replace(/_/g,' ').toUpperCase())}</span></td>
         <td>${staffStatusBadge(s)}</td>
         <td>${fmtDateTime(s.last_login)}</td>
-        <td style="white-space:nowrap">
-          <button class="btn btn-outline btn-sm" onclick="editStaff('${s.id}')">Edit</button>
-          ${s.invite_status==='pending_email'?`<button class="btn btn-primary btn-sm" onclick="resendStaffConfirmation('${s.id}')">Resend Email</button>`:''}
-          ${s.id!==currentUser.id?`<button class="btn btn-danger btn-sm" onclick="deleteStaff('${s.id}')">Delete</button>`:''}
+        <td>
+          <div class="row-action-menu" id="${menuId}">
+            <button class="row-action-toggle" type="button" aria-label="Staff actions" onclick="toggleRowActionMenu('${menuId}',event)">...</button>
+            <div class="row-action-panel">
+              <button onclick="closeRowActionMenus();editStaff('${s.id}')">Edit Staff</button>
+              ${s.invite_status==='pending_email'?`<button class="success" onclick="closeRowActionMenus();resendStaffConfirmation('${s.id}')">Resend Email</button>`:''}
+              ${s.id!==currentUser.id?`<button class="danger" onclick="closeRowActionMenus();deleteStaff('${s.id}')">Delete Staff</button>`:''}
+            </div>
+          </div>
         </td>
-      </tr>`).join('')}
+      </tr>`;
+      }).join('')}
       </tbody></table></div>
       <div class="card" style="margin-top:20px">
         <h3 style="font-size:14px;margin-bottom:4px">Role Access Guide</h3>
