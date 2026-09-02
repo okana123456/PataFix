@@ -24,18 +24,14 @@ serve(async (req) => {
 
   try {
     const supabaseUrl = Deno.env.get("PATAFIX_PROJECT_URL") || "";
-    const anonKey = Deno.env.get("PATAFIX_ANON_KEY") || "";
     const serviceRoleKey = Deno.env.get("PATAFIX_SERVICE_ROLE_KEY") || "";
-    if (!supabaseUrl || !anonKey || !serviceRoleKey) {
+    if (!supabaseUrl || !serviceRoleKey) {
       return json({ ok: false, message: "PataFix Supabase secrets are incomplete." }, 500);
     }
 
     const authHeader = req.headers.get("Authorization") || "";
     const jwt = authHeader.replace("Bearer ", "");
     const admin = createClient(supabaseUrl, serviceRoleKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-    const publicAuth = createClient(supabaseUrl, anonKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
@@ -53,7 +49,17 @@ serve(async (req) => {
       return json({ ok: false, message: "Only administrators can manage staff login access." }, 403);
     }
 
-    const { action, staff_id: staffId, email } = await req.json();
+    const {
+      action,
+      staff_id: staffId,
+      name,
+      email,
+      phone,
+      password,
+      role,
+      permissions,
+      is_active: isActive,
+    } = await req.json();
 
     if (action === "list") {
       const { data: staff, error: staffError } = await admin
@@ -83,6 +89,69 @@ serve(async (req) => {
       return json({ ok: true, staff: enriched });
     }
 
+    if (action === "create_staff") {
+      const cleanName = String(name || "").trim();
+      const cleanEmail = String(email || "").trim().toLowerCase();
+      const cleanPassword = String(password || "");
+      const cleanRole = String(role || "").trim();
+      if (!cleanName || !cleanEmail || !cleanPassword || !cleanRole) {
+        return json({ ok: false, message: "Name, email, password and role are required." }, 400);
+      }
+      if (cleanPassword.length < 6) {
+        return json({ ok: false, message: "Password must be at least 6 characters." }, 400);
+      }
+
+      const { data: existingStaff } = await admin
+        .from("loan_staff")
+        .select("id")
+        .eq("business_id", requester.business_id)
+        .ilike("email", cleanEmail)
+        .limit(1);
+      if (existingStaff?.length) {
+        return json({ ok: false, message: "This email is already listed under staff." }, 409);
+      }
+
+      const { data: authData, error: createAuthError } = await admin.auth.admin.createUser({
+        email: cleanEmail,
+        password: cleanPassword,
+        email_confirm: true,
+        user_metadata: { full_name: cleanName, patafix_business_id: requester.business_id },
+      });
+      if (createAuthError) return json({ ok: false, message: createAuthError.message }, 400);
+      const authUser = authData?.user;
+      if (!authUser) return json({ ok: false, message: "Could not create staff login." }, 500);
+
+      const { data: insertedStaff, error: insertStaffError } = await admin
+        .from("loan_staff")
+        .insert({
+          business_id: requester.business_id,
+          auth_user_id: authUser.id,
+          name: cleanName,
+          email: cleanEmail,
+          phone: String(phone || "").trim() || null,
+          role: cleanRole,
+          permissions: permissions && typeof permissions === "object" ? permissions : {},
+          is_active: isActive !== false,
+        })
+        .select("id")
+        .single();
+      if (insertStaffError) {
+        await admin.auth.admin.deleteUser(authUser.id).catch(() => undefined);
+        return json({ ok: false, message: insertStaffError.message }, 500);
+      }
+
+      await admin.from("loan_audit_log").insert({
+        business_id: requester.business_id,
+        user_id: requester.id,
+        action: "staff_created_with_confirmed_login",
+        table_name: "loan_staff",
+        record_id: insertedStaff.id,
+        new_value: { email: cleanEmail, name: cleanName, role: cleanRole },
+      }).catch(() => undefined);
+
+      return json({ ok: true, message: "Staff created. They can sign in immediately.", staff_id: insertedStaff.id });
+    }
+
     const { data: staffRecord, error: staffError } = await admin
       .from("loan_staff")
       .select("id,business_id,auth_user_id,email,name")
@@ -92,16 +161,24 @@ serve(async (req) => {
     if (staffError) return json({ ok: false, message: staffError.message }, 500);
     if (!staffRecord) return json({ ok: false, message: "Staff member was not found." }, 404);
 
-    if (action === "resend_confirmation") {
-      const staffEmail = String(staffRecord.email || email || "").trim().toLowerCase();
-      if (!staffEmail) return json({ ok: false, message: "This staff member has no email address." }, 400);
-      const { error: resendError } = await publicAuth.auth.resend({
-        type: "signup",
-        email: staffEmail,
-        options: { emailRedirectTo: Deno.env.get("PATAFIX_APP_URL") || undefined },
+    if (action === "reset_password") {
+      const cleanPassword = String(password || "");
+      if (!staffRecord.auth_user_id) return json({ ok: false, message: "This staff member has no linked login account." }, 400);
+      if (cleanPassword.length < 6) return json({ ok: false, message: "Password must be at least 6 characters." }, 400);
+      const { error: resetError } = await admin.auth.admin.updateUserById(staffRecord.auth_user_id, {
+        password: cleanPassword,
+        email_confirm: true,
       });
-      if (resendError) return json({ ok: false, message: resendError.message }, 400);
-      return json({ ok: true, message: `Confirmation email resent to ${staffEmail}.` });
+      if (resetError) return json({ ok: false, message: resetError.message }, 400);
+      await admin.from("loan_audit_log").insert({
+        business_id: requester.business_id,
+        user_id: requester.id,
+        action: "staff_password_reset_by_admin",
+        table_name: "loan_staff",
+        record_id: staffRecord.id,
+        new_value: { email: staffRecord.email, name: staffRecord.name },
+      }).catch(() => undefined);
+      return json({ ok: true, message: "Password updated. Staff can sign in immediately." });
     }
 
     if (action === "delete") {

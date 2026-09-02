@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-09-02-staff-actions-menu-v1';
+const APP_VERSION = 'patafix-2026-09-02-staff-direct-login-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -8479,8 +8479,8 @@ async function renderStaff(){
     main.innerHTML=`
       <div class="page-header"><h1>Staff Management</h1><button class="btn btn-primary" onclick="openAddStaffModal()">+ Add Staff</button></div>
       <div class="card" style="margin-bottom:16px">
-        <h3 style="font-size:14px;margin-bottom:4px">Email Confirmation</h3>
-        <p style="font-size:12px;color:var(--text-secondary)">New staff will show as Pending Email until they confirm the invitation sent to their inbox. Administrators can resend the confirmation email or delete the staff login completely if the wrong email was used.</p>
+        <h3 style="font-size:14px;margin-bottom:4px">Staff Login Access</h3>
+        <p style="font-size:12px;color:var(--text-secondary)">When an administrator creates a staff account, the staff member can sign in immediately using the email and password set here. If they forget the password, the administrator can set a new one from the action menu.</p>
       </div>
       <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email/Phone</th><th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th></tr></thead><tbody>
       ${(staff||[]).map(s=>{
@@ -8496,7 +8496,7 @@ async function renderStaff(){
             <button class="row-action-toggle" type="button" aria-label="Staff actions" onclick="toggleRowActionMenu('${menuId}',event)">...</button>
             <div class="row-action-panel">
               <button onclick="closeRowActionMenus();editStaff('${s.id}')">Edit Staff</button>
-              ${s.invite_status==='pending_email'?`<button class="success" onclick="closeRowActionMenus();resendStaffConfirmation('${s.id}')">Resend Email</button>`:''}
+              <button class="success" onclick="closeRowActionMenus();openStaffPasswordModal('${s.id}')">Set Password</button>
               ${s.id!==currentUser.id?`<button class="danger" onclick="closeRowActionMenus();deleteStaff('${s.id}')">Delete Staff</button>`:''}
             </div>
           </div>
@@ -8563,7 +8563,7 @@ async function loadStaffWithAuthStatus(){
 
 function staffStatusBadge(staff){
   if(staff.invite_status==='pending_email'){
-    return '<span class="badge badge-yellow">Pending Email</span><div style="font-size:11px;color:var(--text-secondary);margin-top:3px">Waiting for confirmation</div>';
+    return '<span class="badge badge-yellow">Needs Password Reset</span><div style="font-size:11px;color:var(--text-secondary);margin-top:3px">Set password to activate login</div>';
   }
   if(staff.is_active)return '<span class="badge badge-green">Active</span>';
   return '<span class="badge badge-gray">Inactive</span>';
@@ -8638,8 +8638,8 @@ function openAddStaffModal(s){
     ${s.id ? `
     <div style="margin: 16px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-dark);">
       <strong style="font-size: 13px; display: block; margin-bottom: 8px;">Security</strong>
-      <button class="btn btn-outline btn-sm" onclick="sendStaffReset('${s.email}')">Send Password Reset Link</button>
-      <p style="font-size: 11px; color: var(--text-secondary); margin-top: 6px;">Passwords are encrypted and cannot be viewed. If they forgot their password, send them a reset link.</p>
+      <button class="btn btn-outline btn-sm" onclick="openStaffPasswordModal('${s.id}')">Set New Password</button>
+      <p style="font-size: 11px; color: var(--text-secondary); margin-top: 6px;">Passwords are encrypted and cannot be viewed. If they forget their password, set a new one here.</p>
     </div>
     ` : ''}
     <div class="modal-actions">
@@ -8663,29 +8663,6 @@ async function saveStaff(id){
   if(btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
 
   try{
-    let authUserId = null;
-    
-    if (!id) {
-        const pwd = $('#stPwd').value;
-        if (!pwd || pwd.length < 6) throw new Error('Password must be at least 6 characters');
-        
-        const { data: authData, error: authErr } = await adminAuthClient.auth.signUp({
-            email: email,
-            password: pwd,
-            options: { data: { full_name: name } }
-        });
-        
-        if (authErr) {
-            if (authErr.message.includes('already registered')) {
-                toast('Note: This email is already registered in the system. The password you just typed was ignored; they must use their existing password.', 'warning');
-            } else {
-                throw authErr;
-            }
-        } else {
-            authUserId = authData.user?.id;
-        }
-    }
-
     const selectedRoleList=selectedRoles.split(',');
     const permissions={};
     STAFF_FINANCE_PERMISSIONS.forEach(p=>permissions[p.key]=selectedRoleList.includes('admin')||!!document.querySelector(`.st-finance-cb[value="${p.key}"]`)?.checked);
@@ -8694,37 +8671,55 @@ async function saveStaff(id){
     if(id){
       await sb('loan_staff').update(rec).eq('id',id);
     }else{
-      rec.business_id=currentUser?.business_id;
-      if (authUserId) rec.auth_user_id = authUserId;
-      await sb('loan_staff').insert(rec);
+      const pwd = $('#stPwd').value;
+      if (!pwd || pwd.length < 6) throw new Error('Password must be at least 6 characters');
+      const {data,error}=await supabaseClient.functions.invoke('patafix-staff-auth-management',{body:{action:'create_staff',...rec,password:pwd}});
+      if(error || !data?.ok) throw new Error(data?.message || error?.message || 'Could not create staff login.');
     }
-    await audit(id?'staff_updated':'staff_created','loan_staff',id||null,null,{name,email:rec.email});
-    toast(id?'Staff updated successfully':'Staff saved. Ask them to confirm the email before signing in.','success');closeModal();renderStaff();
+    if(id) await audit('staff_updated','loan_staff',id,null,{name,email:rec.email});
+    toast(id?'Staff updated successfully':'Staff saved. They can sign in immediately.','success');closeModal();renderStaff();
   }catch(e){
     toast(e.message,'error');
     if(btn) { btn.disabled = false; btn.textContent = id ? 'Update' : 'Save'; }
   }
 }
 
-async function sendStaffReset(email) {
-    if(!await confirm_('Send a password reset link to ' + email + '?')) return;
-    try {
-        const {error} = await supabaseClient.auth.resetPasswordForEmail(email, {
-            redirectTo: window.location.origin + window.location.pathname
-        });
-        if(error) throw error;
-        toast('Reset link sent to ' + email, 'success');
-    } catch(e) { toast(e.message, 'error'); }
+function openStaffPasswordModal(id){
+    openModal(`
+      <h2>Set Staff Password</h2>
+      <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Set a new password for this staff member. They can sign in immediately after this.</p>
+      <div class="form-group">
+        <label>New Password *</label>
+        <input class="input" type="password" id="staffNewPassword" placeholder="Min 6 characters">
+      </div>
+      <div class="form-group">
+        <label>Confirm Password *</label>
+        <input class="input" type="password" id="staffConfirmPassword" placeholder="Repeat password">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="resetStaffPassword('${id}')">Save Password</button>
+      </div>
+    `);
 }
 
-async function resendStaffConfirmation(id) {
-    if(!await confirm_('Resend the email confirmation link to this staff member?')) return;
+async function resetStaffPassword(id) {
+    const password = ($('#staffNewPassword')?.value || '').trim();
+    const confirmPassword = ($('#staffConfirmPassword')?.value || '').trim();
+    if(!password || password.length < 6) return toast('Password must be at least 6 characters', 'warning');
+    if(password !== confirmPassword) return toast('Passwords do not match', 'warning');
+    const btn = document.querySelector('.modal-actions .btn-primary');
+    if(btn){ btn.disabled=true; btn.textContent='Saving...'; }
     try {
-        const {data,error}=await supabaseClient.functions.invoke('patafix-staff-auth-management',{body:{action:'resend_confirmation',staff_id:id}});
-        if(error || !data?.ok) throw new Error(data?.message || error?.message || 'Could not resend confirmation email.');
-        toast(data.message || 'Confirmation email resent.', 'success');
+        const {data,error}=await supabaseClient.functions.invoke('patafix-staff-auth-management',{body:{action:'reset_password',staff_id:id,password}});
+        if(error || !data?.ok) throw new Error(data?.message || error?.message || 'Could not update staff password.');
+        toast(data.message || 'Password updated.', 'success');
+        closeModal();
         renderStaff();
-    } catch(e) { toast(e.message, 'error'); }
+    } catch(e) {
+        toast(e.message, 'error');
+        if(btn){ btn.disabled=false; btn.textContent='Save Password'; }
+    }
 }
 
 async function deleteStaff(id) {
