@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-09-02-staff-direct-login-v1';
+const APP_VERSION = 'patafix-2026-09-02-capital-assets-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -7289,7 +7289,7 @@ async function renderSuspense(){
   try{
     // Unconfirmed M-Pesa queue entries — these are unmatched payments
     const[queueR,loansR,suspR,clientsR]=await Promise.all([
-      sb('mpesa_callback_queue').select('*').eq('confirmed',false).order('created_at',{ascending:false}),
+      sb('mpesa_callback_queue').select('*').eq('business_id',currentUser.business_id).eq('confirmed',false).order('created_at',{ascending:false}),
       sb('loans').select('id,loan_no,outstanding_balance,status,client_id,loan_clients(full_name,phone,id_number)')
         .eq('business_id',currentUser.business_id).eq('status','active').gt('outstanding_balance',0),
       sb('unmatched_payments').select('*').eq('business_id',currentUser.business_id).order('created_at',{ascending:false}),
@@ -7336,6 +7336,7 @@ async function renderSuspense(){
                 <td style="display:flex;gap:4px;flex-wrap:wrap">
                   <button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${q.id}','mpesa',${q.trans_amount},'${q.trans_id||''}','${q.loan_id||''}')">Match to Loan</button>
                   <button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${q.id}','mpesa',${q.trans_amount},'${q.trans_id||''}','${q.bill_ref_number||''}','${q.first_name||''}')">Match to Charges</button>
+                  <button class="btn btn-warning btn-sm" onclick='openSuspenseCapitalModal(${JSON.stringify(q.id)},"mpesa",${Number(q.trans_amount)||0},${JSON.stringify(q.trans_id||'')},${JSON.stringify(q.bill_ref_number||'')},${JSON.stringify(q.first_name||'')})'>Move Capital</button>
                   <button class="btn btn-outline btn-sm" onclick="dismissMpesaPayment('${q.id}')">Dismiss</button>
                 </td>
               </tr>`).join(''):'<tr><td colspan="8"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No unmatched M-Pesa payments</div></td></tr>'}
@@ -7359,7 +7360,7 @@ async function renderSuspense(){
                 <td style="font-size:12px;max-width:170px;overflow-wrap:anywhere">${escapeHtml(suspenseCreditParty(r))}</td>
                 <td><strong style="color:var(--accent-green)">${fmtMoney(r.amount)}</strong></td>
                 <td>${!r.resolved?'<span class="badge badge-yellow">Pending</span>':'<span class="badge badge-green">Matched</span>'}</td>
-                <td>${!r.resolved?`<div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}')">Match Loan</button><button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}','${r.account_number||''}','${r.payer_name||''}')">Match Charges</button></div>`:'<span style="font-size:11px;color:var(--text-secondary)">Done</span>'}</td>
+                <td>${!r.resolved?`<div style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn btn-success btn-sm" onclick="openSuspenseMatchModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}')">Match Loan</button><button class="btn btn-primary btn-sm" onclick="openSuspenseChargeModal('${r.id}','unmatched',${r.amount},'${r.mpesa_reference||r.invoice_id||''}','${r.account_number||''}','${r.payer_name||''}')">Match Charges</button><button class="btn btn-warning btn-sm" onclick='openSuspenseCapitalModal(${JSON.stringify(r.id)},"unmatched",${Number(r.amount)||0},${JSON.stringify(r.mpesa_reference||r.invoice_id||'')},${JSON.stringify(r.account_number||'')},${JSON.stringify(r.payer_name||'')})'>Move Capital</button></div>`:'<span style="font-size:11px;color:var(--text-secondary)">Done</span>'}</td>
               </tr>`).join(''):'<tr><td colspan="10"><div style="padding:18px;text-align:center;color:var(--text-secondary);font-size:13px">No suspense records waiting to be matched</div></td></tr>'}
           </tbody>
         </table>
@@ -7569,6 +7570,49 @@ async function confirmSuspenseChargeMatch(entryId, entryType, amount, ref=''){
     toast(e.message,'error');
     if(btn){ btn.disabled=false; btn.textContent='Move to Charges Account'; }
   }
+}
+
+function openSuspenseCapitalModal(entryId, entryType, amount, ref='', account='', payer=''){
+  if(!hasFinancePermission('view_accounting',['admin']))return toast('Accounting access is restricted.','warning');
+  openModal(`
+    <h2>Move Suspense to Owner Capital</h2>
+    <div class="card" style="margin-bottom:12px;background:rgba(217,119,6,0.08);border-color:rgba(217,119,6,0.3)">
+      <p><strong>Ref:</strong> ${escapeHtml(ref||'-')} &nbsp;|&nbsp; <strong>Amount:</strong> ${fmtMoney(amount)}</p>
+      <p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Account: ${escapeHtml(account||'-')} ${payer?`&nbsp;|&nbsp; Payer: ${escapeHtml(payer)}`:''}</p>
+    </div>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Use this only for money that belongs to the business owner or investor, not client repayments or charges.</p>
+    <div class="form-row">
+      <div class="form-group"><label>Amount to Move *</label><input class="input" id="suspCapitalAmount" type="number" min="0.01" step="0.01" value="${Number(amount)||0}" readonly></div>
+      <div class="form-group"><label>Reference</label><input class="input" id="suspCapitalRef" value="${escapeHtml(ref||'')}"></div>
+    </div>
+    <div class="form-group"><label>Description</label><textarea class="textarea" id="suspCapitalDesc" placeholder="e.g. Owner investment capital from suspense"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-warning" id="btnSuspCapital" onclick='confirmSuspenseCapitalMove(${JSON.stringify(entryId)},${JSON.stringify(entryType)},${Number(amount)||0})'>Move to Capital</button>
+    </div>
+  `);
+}
+
+async function confirmSuspenseCapitalMove(entryId, entryType, originalAmount){
+  const amount=Number(document.getElementById('suspCapitalAmount')?.value||0);
+  const reference=(document.getElementById('suspCapitalRef')?.value||'').trim();
+  const description=(document.getElementById('suspCapitalDesc')?.value||'').trim();
+  if(amount<=0)return toast('Enter a valid amount.','warning');
+  if(Math.abs(amount-Number(originalAmount||0))>0.01)return toast('Move the full suspense amount to keep the suspense balance correct.','warning');
+  const btn=document.getElementById('btnSuspCapital');if(btn){btn.disabled=true;btn.textContent='Moving...';}
+  try{
+    const{data,error}=await supabaseClient.rpc('patafix_move_suspense_to_capital',{
+      p_entry_id:entryId,
+      p_entry_type:entryType,
+      p_amount:amount,
+      p_reference:reference||null,
+      p_description:description||null
+    });
+    if(error)throw error;
+    toast(`Moved ${fmtMoney(amount)} to Owner Capital / Equity.`,'success');
+    closeModal();
+    renderSuspense();
+  }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Move to Capital';}}
 }
 
 async function openSuspenseMatchModal(entryId, entryType, amount, ref, suggestedLoanId=''){
@@ -8242,20 +8286,22 @@ async function renderAccounting() {
     }
     const qEndFull = qEnd + 'T23:59:59+00:00'; // inclusive end of day in UTC
 
-    const[loansR,repR,cliR,penR,allLoansMapR,expensesR,journalR]=await Promise.all([
+    const[loansR,repR,cliR,penR,allLoansMapR,expensesR,journalR,assetsR]=await Promise.all([
       sb('loans').select('id,client_id,loan_no,principal_amount,disbursed_amount,total_interest,total_payable,processing_fee,disbursement_date,status,loan_officer_id').eq('business_id',biz).gte('disbursement_date',qStart).lte('disbursement_date',qEndFull).order('disbursement_date', {ascending: false}).limit(100000),
       sb('loan_repayments').select('id,loan_id,amount,interest_portion,principal_portion,penalty_portion,payment_date,payment_method').eq('business_id',biz).gte('payment_date',qStart).lte('payment_date',qEndFull).order('payment_date', {ascending: false}).limit(100000),
       sb('loan_clients').select('id,created_at,notes').eq('business_id',biz).order('created_at', {ascending: false}).limit(100000),
       sb('loan_penalties').select('id,loan_id,penalty_amount,date_charged,is_waived').eq('business_id',biz).eq('is_waived',false).gte('date_charged',qStart).lte('date_charged',qEndFull).order('date_charged', {ascending: false}).limit(100000),
       sb('loans').select('id,client_id,principal_amount,total_interest,total_payable,disbursement_date,loan_officer_id').eq('business_id',biz).order('disbursement_date', {ascending: true}).limit(100000),
       sb('patafix_expenses').select('id,expense_no,expense_date,category,description,amount,payment_method,payment_reference').eq('business_id',biz).eq('status','approved').gte('expense_date',qStart).lte('expense_date',qEnd).order('expense_date',{ascending:false}).limit(100000),
-      sb('journal_entries').select('id,date,ref,description,debit,credit,amount').eq('business_id',biz).gte('date',qStart).lte('date',qEnd).order('date',{ascending:false}).limit(100)
+      sb('journal_entries').select('id,date,ref,description,debit,credit,amount').eq('business_id',biz).gte('date',qStart).lte('date',qEnd).order('date',{ascending:false}).limit(100000),
+      sb('patafix_company_assets').select('*').eq('business_id',biz).order('asset_date',{ascending:false}).limit(100000)
     ]);
     if(loansR.error) throw new Error('Loans fetch error: '+loansR.error.message);
     if(repR.error) throw new Error('Repayments fetch error: '+repR.error.message);
     if(cliR.error) throw new Error('Clients fetch error: '+cliR.error.message);
     if(expensesR.error) throw new Error('Expenses fetch error: '+expensesR.error.message+'. Run patafix-expenses-and-wallet-actions.sql in Supabase first.');
     if(journalR.error) throw new Error('Journal fetch error: '+journalR.error.message);
+    if(assetsR.error) throw new Error('Assets fetch error: '+assetsR.error.message+'. Run patafix-capital-and-assets.sql in Supabase first.');
 
     const allLoans = loansR.data||[];
     const allLoansForMapping = allLoansMapR.data||allLoans;
@@ -8264,6 +8310,7 @@ async function renderAccounting() {
     const allPenalties = penR.data||[];
     const approvedExpenses = expensesR.data||[];
     const journalEntries = journalR.data||[];
+    const allCompanyAssets = assetsR.data||[];
 
     // Build loan lookup map for fast interest ratio calculation
     const loanMap = {};
@@ -8331,6 +8378,13 @@ async function renderAccounting() {
     const expenseByCategory={};
     approvedExpenses.forEach(e=>expenseByCategory[e.category||'Other']=(expenseByCategory[e.category||'Other']||0)+Number(e.amount||0));
     const expenseCategoryHtml=Object.entries(expenseByCategory).sort((a,b)=>b[1]-a[1]).map(([category,amount])=>`<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px"><span>${escapeHtml(category)}</span><strong style="color:var(--accent-red)">(${fmtMoney(amount)})</strong></div>`).join('');
+    const accountIncludes=(value,term)=>String(value||'').toLowerCase().includes(term);
+    const capitalCredits=journalEntries.filter(j=>accountIncludes(j.credit,'owner capital')||accountIncludes(j.credit,'equity')).reduce((s,j)=>s+Number(j.amount||0),0);
+    const capitalDebits=journalEntries.filter(j=>accountIncludes(j.debit,'owner capital')||accountIncludes(j.debit,'equity')).reduce((s,j)=>s+Number(j.amount||0),0);
+    const netOwnerCapital=capitalCredits-capitalDebits;
+    const periodAssetPurchases=allCompanyAssets.filter(a=>dateInSelectedRange(a.asset_date)).reduce((s,a)=>s+Number(a.purchase_amount||0),0);
+    const activeAssetValue=allCompanyAssets.filter(a=>a.status==='active').reduce((s,a)=>s+Number(a.current_value||a.purchase_amount||0),0);
+    const assetRowsHtml=allCompanyAssets.slice(0,8).map(a=>`<tr><td>${fmtDate(a.asset_date)}</td><td><strong>${escapeHtml(a.asset_no||'-')}</strong></td><td>${escapeHtml(a.asset_name||'-')}</td><td><span class="badge badge-blue">${escapeHtml(a.category||'Other')}</span></td><td>${fmtMoney(a.purchase_amount)}</td><td>${fmtMoney(a.current_value)}</td><td>${escapeHtml((a.payment_method||'cash').toUpperCase())}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(a.payment_reference||'-')}</span></td><td>${statusBadge(a.status)}</td></tr>`).join('');
 
     // Officer Revenue Breakdown — detailed by reg, proc, interest per officer
     const clientToOfficer = {};
@@ -8392,7 +8446,13 @@ async function renderAccounting() {
 
     main.innerHTML=`
       <div class="page-header" style="align-items:flex-start; flex-direction:column; margin-bottom:12px">
-        <h1 style="margin-bottom:12px">Accounting &amp; Profit/Loss</h1>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;flex-wrap:wrap">
+          <h1 style="margin-bottom:12px">Accounting &amp; Profit/Loss</h1>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-outline btn-sm" onclick="openOwnerCapitalModal()">+ Owner Capital</button>
+            <button class="btn btn-outline btn-sm" onclick="openCompanyAssetModal()">+ Company Asset</button>
+          </div>
+        </div>
         ${getDateFilterHtml('accounting')}
       </div>
       
@@ -8404,6 +8464,8 @@ async function renderAccounting() {
         <div class="kpi-card"><div class="kpi-label">Registration Fees</div><div class="kpi-value">${fmtMoney(registrationFees)}</div><div class="kpi-sub">${filteredClients.length} new client fee(s), product-based</div></div>
         <div class="kpi-card"><div class="kpi-label">Interest Collected</div><div class="kpi-value">${fmtMoney(interestCollected)}</div></div>
         <div class="kpi-card"><div class="kpi-label">Penalties Collected</div><div class="kpi-value">${fmtMoney(penaltiesCollected)}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Owner Capital / Equity</div><div class="kpi-value" style="color:var(--accent-blue)">${fmtMoney(netOwnerCapital)}</div><div class="kpi-sub">Selected period movement</div></div>
+        <div class="kpi-card"><div class="kpi-label">Company Assets</div><div class="kpi-value" style="color:var(--accent-purple)">${fmtMoney(activeAssetValue)}</div><div class="kpi-sub">${fmtMoney(periodAssetPurchases)} purchased in period</div></div>
       </div>
 
       <div class="card" style="margin-top:24px">
@@ -8424,6 +8486,30 @@ async function renderAccounting() {
           </div>
         </div>
         <div style="display:flex;justify-content:space-between;padding-top:12px;margin-top:8px;border-top:2px solid var(--border);font-size:17px"><strong>NET PROFIT</strong><strong style="color:${netProfit>=0?'var(--accent-green)':'var(--accent-red)'}">${fmtMoney(netProfit)}</strong></div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:24px">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px"><h3 style="font-size:16px;color:var(--accent-purple)">Owner Capital / Equity</h3><button class="btn btn-outline btn-sm" onclick="openOwnerCapitalModal()">Add Capital</button></div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px"><span>Capital Added</span><strong style="color:var(--accent-green)">${fmtMoney(capitalCredits)}</strong></div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px"><span>Capital Drawings / Reversals</span><strong style="color:var(--accent-red)">${fmtMoney(capitalDebits)}</strong></div>
+          <div style="display:flex;justify-content:space-between;padding-top:10px;font-size:15px"><strong>Net Capital Movement</strong><strong style="color:var(--accent-blue)">${fmtMoney(netOwnerCapital)}</strong></div>
+          <p style="font-size:11px;color:var(--text-secondary);margin-top:8px">Suspense entries moved to capital also appear here as Owner Capital / Equity.</p>
+        </div>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px"><h3 style="font-size:16px;color:var(--accent-purple)">Company Assets Account</h3><button class="btn btn-outline btn-sm" onclick="openCompanyAssetModal()">Add Asset</button></div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px"><span>Active Asset Value</span><strong style="color:var(--accent-purple)">${fmtMoney(activeAssetValue)}</strong></div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px"><span>Asset Purchases in Period</span><strong>${fmtMoney(periodAssetPurchases)}</strong></div>
+          <p style="font-size:11px;color:var(--text-secondary);margin-top:8px">Use this for company assets such as laptops, furniture, phones, equipment or office fittings.</p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:24px">
+        <h3 style="font-size:16px;margin-bottom:8px;color:var(--accent-purple)">Company Asset Register</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Date</th><th>Asset #</th><th>Asset Name</th><th>Category</th><th>Purchase Amount</th><th>Current Value</th><th>Method / Ref</th><th>Status</th></tr></thead>
+          <tbody>${assetRowsHtml||'<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:18px">No company assets recorded yet</td></tr>'}</tbody>
+        </table></div>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:24px">
@@ -8468,6 +8554,98 @@ async function renderAccounting() {
     main.innerHTML=`<div class="card" style="border-color:var(--accent-red)"><h3 style="color:var(--accent-red)">Accounting Error</h3><p style="font-size:13px;color:var(--text-secondary)">${e.message}</p></div>`;
     toast(e.message,'error'); 
   }
+}
+
+function openOwnerCapitalModal(){
+  if(!hasFinancePermission('view_accounting',['admin']))return toast('Accounting access is restricted.','warning');
+  openModal(`
+    <h2>Record Owner Capital / Equity</h2>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Use this for owner contributions, investor capital or money introduced into the business.</p>
+    <div class="form-row">
+      <div class="form-group"><label>Date *</label><input class="input" id="capitalDate" type="date" value="${today()}"></div>
+      <div class="form-group"><label>Amount (KES) *</label><input class="input" id="capitalAmount" type="number" min="0.01" step="0.01"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Payment Method *</label><select class="select" id="capitalMethod"><option value="cash">Cash</option><option value="mpesa">M-Pesa</option><option value="bank">Bank</option><option value="imprest">Imprest</option></select></div>
+      <div class="form-group"><label>Reference</label><input class="input" id="capitalReference" placeholder="Receipt, M-Pesa code or bank ref"></div>
+    </div>
+    <div class="form-group"><label>Description</label><textarea class="textarea" id="capitalDescription" placeholder="e.g. Owner introduced capital for lending operations"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="btnSaveCapital" onclick="saveOwnerCapital()">Save Capital</button>
+    </div>
+  `);
+}
+
+async function saveOwnerCapital(){
+  const amount=Number(document.getElementById('capitalAmount')?.value||0);
+  if(amount<=0)return toast('Enter a valid capital amount.','warning');
+  const btn=document.getElementById('btnSaveCapital');if(btn){btn.disabled=true;btn.textContent='Saving...';}
+  try{
+    const{error}=await supabaseClient.rpc('patafix_record_owner_capital',{
+      p_capital_date:document.getElementById('capitalDate')?.value||today(),
+      p_amount:amount,
+      p_payment_method:document.getElementById('capitalMethod')?.value||'cash',
+      p_reference:(document.getElementById('capitalReference')?.value||'').trim()||null,
+      p_description:(document.getElementById('capitalDescription')?.value||'').trim()||null
+    });
+    if(error)throw error;
+    toast('Owner capital recorded in accounting.','success');
+    closeModal();
+    renderAccounting();
+  }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Save Capital';}}
+}
+
+function openCompanyAssetModal(){
+  if(!hasFinancePermission('view_accounting',['admin']))return toast('Accounting access is restricted.','warning');
+  const categories=['Computer & IT','Furniture','Office Equipment','Motor Vehicle','Phone','Fixtures & Fittings','Other'];
+  openModal(`
+    <h2>Record Company Asset</h2>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Use this for company-owned assets. This posts to the Company Assets account, not to operating expenses.</p>
+    <div class="form-row">
+      <div class="form-group"><label>Date *</label><input class="input" id="assetDate" type="date" value="${today()}"></div>
+      <div class="form-group"><label>Category *</label><select class="select" id="assetCategory">${categories.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select></div>
+    </div>
+    <div class="form-group"><label>Asset Name *</label><input class="input" id="assetName" placeholder="e.g. Office laptop"></div>
+    <div class="form-group"><label>Description</label><textarea class="textarea" id="assetDescription" placeholder="Optional asset details"></textarea></div>
+    <div class="form-row">
+      <div class="form-group"><label>Purchase Amount (KES) *</label><input class="input" id="assetPurchaseAmount" type="number" min="0.01" step="0.01"></div>
+      <div class="form-group"><label>Current Value (KES)</label><input class="input" id="assetCurrentValue" type="number" min="0" step="0.01" placeholder="Leave blank if same as purchase"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Payment Method *</label><select class="select" id="assetMethod"><option value="cash">Cash</option><option value="mpesa">M-Pesa</option><option value="bank">Bank</option><option value="imprest">Imprest</option></select></div>
+      <div class="form-group"><label>Reference</label><input class="input" id="assetReference" placeholder="Receipt, M-Pesa code or bank ref"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="btnSaveAsset" onclick="saveCompanyAsset()">Save Asset</button>
+    </div>
+  `);
+}
+
+async function saveCompanyAsset(){
+  const amount=Number(document.getElementById('assetPurchaseAmount')?.value||0);
+  const currentValueRaw=(document.getElementById('assetCurrentValue')?.value||'').trim();
+  const assetName=(document.getElementById('assetName')?.value||'').trim();
+  if(!assetName)return toast('Enter the asset name.','warning');
+  if(amount<=0)return toast('Enter a valid purchase amount.','warning');
+  const btn=document.getElementById('btnSaveAsset');if(btn){btn.disabled=true;btn.textContent='Saving...';}
+  try{
+    const{error}=await supabaseClient.rpc('patafix_record_company_asset',{
+      p_asset_date:document.getElementById('assetDate')?.value||today(),
+      p_category:document.getElementById('assetCategory')?.value||'Other',
+      p_asset_name:assetName,
+      p_description:(document.getElementById('assetDescription')?.value||'').trim()||null,
+      p_purchase_amount:amount,
+      p_current_value:currentValueRaw?Number(currentValueRaw):null,
+      p_payment_method:document.getElementById('assetMethod')?.value||'cash',
+      p_reference:(document.getElementById('assetReference')?.value||'').trim()||null
+    });
+    if(error)throw error;
+    toast('Company asset recorded in accounting.','success');
+    closeModal();
+    renderAccounting();
+  }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Save Asset';}}
 }
 
 // ═══ STAFF ═══
