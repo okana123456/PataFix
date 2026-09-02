@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-08-22-disbursement-export-v1';
+const APP_VERSION = 'patafix-2026-09-02-staff-confirmation-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -8475,11 +8475,26 @@ async function renderStaff(){
   if(!hasRole('admin'))return toast('Admin access required','warning');
   const main=$('#mainContent');
   try{
-    const{data:staff}=await sb('loan_staff').select('*').eq('business_id', currentUser.business_id).order('name');
+    const staff=await loadStaffWithAuthStatus();
     main.innerHTML=`
       <div class="page-header"><h1>Staff Management</h1><button class="btn btn-primary" onclick="openAddStaffModal()">+ Add Staff</button></div>
+      <div class="card" style="margin-bottom:16px">
+        <h3 style="font-size:14px;margin-bottom:4px">Email Confirmation</h3>
+        <p style="font-size:12px;color:var(--text-secondary)">New staff will show as Pending Email until they confirm the invitation sent to their inbox. Administrators can resend the confirmation email or delete the staff login completely if the wrong email was used.</p>
+      </div>
       <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email/Phone</th><th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th></tr></thead><tbody>
-      ${(staff||[]).map(s=>`<tr><td><strong>${s.name}</strong></td><td>${s.email||s.phone||'-'}</td><td><span class="badge badge-blue" style="max-width:150px;white-space:normal;display:inline-block">${(s.role||'').replace(/_/g,' ').toUpperCase()}</span></td><td>${s.is_active?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>'}</td><td>${fmtDateTime(s.last_login)}</td><td><button class="btn btn-outline btn-sm" onclick="editStaff('${s.id}')">Edit</button></td></tr>`).join('')}
+      ${(staff||[]).map(s=>`<tr>
+        <td><strong>${escapeHtml(s.name||'-')}</strong></td>
+        <td>${escapeHtml(s.email||s.phone||'-')}</td>
+        <td><span class="badge badge-blue" style="max-width:150px;white-space:normal;display:inline-block">${escapeHtml((s.role||'').replace(/_/g,' ').toUpperCase())}</span></td>
+        <td>${staffStatusBadge(s)}</td>
+        <td>${fmtDateTime(s.last_login)}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-outline btn-sm" onclick="editStaff('${s.id}')">Edit</button>
+          ${s.invite_status==='pending_email'?`<button class="btn btn-primary btn-sm" onclick="resendStaffConfirmation('${s.id}')">Resend Email</button>`:''}
+          ${s.id!==currentUser.id?`<button class="btn btn-danger btn-sm" onclick="deleteStaff('${s.id}')">Delete</button>`:''}
+        </td>
+      </tr>`).join('')}
       </tbody></table></div>
       <div class="card" style="margin-top:20px">
         <h3 style="font-size:14px;margin-bottom:4px">Role Access Guide</h3>
@@ -8527,6 +8542,23 @@ async function renderStaff(){
       </div>
     `;
   }catch(e){toast(e.message,'error')}
+}
+
+async function loadStaffWithAuthStatus(){
+  const {data,error}=await supabaseClient.functions.invoke('patafix-staff-auth-management',{body:{action:'list'}});
+  if(!error && data?.ok)return data.staff||[];
+  console.warn('PataFix staff auth status fallback:', error?.message||data?.message);
+  const{data:staff, error:staffError}=await sb('loan_staff').select('*').eq('business_id', currentUser.business_id).order('name');
+  if(staffError)throw staffError;
+  return (staff||[]).map(row=>({...row,invite_status:row.is_active?'active':'inactive'}));
+}
+
+function staffStatusBadge(staff){
+  if(staff.invite_status==='pending_email'){
+    return '<span class="badge badge-yellow">Pending Email</span><div style="font-size:11px;color:var(--text-secondary);margin-top:3px">Waiting for confirmation</div>';
+  }
+  if(staff.is_active)return '<span class="badge badge-green">Active</span>';
+  return '<span class="badge badge-gray">Inactive</span>';
 }
 
 const STAFF_FINANCE_PERMISSIONS=[
@@ -8659,7 +8691,7 @@ async function saveStaff(id){
       await sb('loan_staff').insert(rec);
     }
     await audit(id?'staff_updated':'staff_created','loan_staff',id||null,null,{name,email:rec.email});
-    toast('Staff saved successfully','success');closeModal();renderStaff();
+    toast(id?'Staff updated successfully':'Staff saved. Ask them to confirm the email before signing in.','success');closeModal();renderStaff();
   }catch(e){
     toast(e.message,'error');
     if(btn) { btn.disabled = false; btn.textContent = id ? 'Update' : 'Save'; }
@@ -8677,12 +8709,22 @@ async function sendStaffReset(email) {
     } catch(e) { toast(e.message, 'error'); }
 }
 
+async function resendStaffConfirmation(id) {
+    if(!await confirm_('Resend the email confirmation link to this staff member?')) return;
+    try {
+        const {data,error}=await supabaseClient.functions.invoke('patafix-staff-auth-management',{body:{action:'resend_confirmation',staff_id:id}});
+        if(error || !data?.ok) throw new Error(data?.message || error?.message || 'Could not resend confirmation email.');
+        toast(data.message || 'Confirmation email resent.', 'success');
+        renderStaff();
+    } catch(e) { toast(e.message, 'error'); }
+}
+
 async function deleteStaff(id) {
     if(!await confirm_('Are you sure you want to permanently delete this staff member? They will lose all access.')) return;
     try {
-        await sb('loan_staff').delete().eq('id', id);
-        await audit('staff_deleted', 'loan_staff', id, null, null);
-        toast('Staff member deleted', 'success');
+        const {data,error}=await supabaseClient.functions.invoke('patafix-staff-auth-management',{body:{action:'delete',staff_id:id}});
+        if(error || !data?.ok) throw new Error(data?.message || error?.message || 'Could not delete staff member.');
+        toast(data.message || 'Staff member deleted', 'success');
         closeModal();
         renderStaff();
     } catch(e) { toast(e.message, 'error'); }
