@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-09-03-gold-billing-v1';
+const APP_VERSION = 'patafix-2026-09-03-multibranch-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -459,10 +459,21 @@ const $ = (sel) => document.querySelector(sel);
 
 // Date Filter State
 let appFilters = {
-    dashboard: { type: 'this_month', start: '', end: '' },
+    dashboard: { type: 'this_month', start: '', end: '', branch: 'all' },
+    clients: { type: 'all', start: '', end: '', branch: 'all' },
+    applications: { type: 'all', start: '', end: '', branch: 'all' },
+    disbursement: { type: 'all', start: '', end: '', branch: 'all' },
+    loans: { type: 'all', start: '', end: '', branch: 'all' },
+    repayments: { type: 'this_month', start: '', end: '', branch: 'all' },
+    overdue: { type: 'all', start: '', end: '', branch: 'all' },
+    reports: { type: 'this_month', start: '', end: '', branch: 'all' },
+    officer_performance: { type: 'this_month', start: '', end: '', branch: 'all' },
+    charges_excess: { type: 'all', start: '', end: '', branch: 'all' },
+    mpesa_transactions: { type: 'this_month', start: '', end: '', branch: 'all' },
+    suspense: { type: 'all', start: '', end: '', branch: 'all' },
     accounting: { type: 'this_month', start: '', end: '', branch: 'all' },
     expenses: { type: 'this_month', start: '', end: '', branch: 'all' },
-    repayments: { type: 'this_month', start: '', end: '' }
+    company_assets: { type: 'all', start: '', end: '', branch: 'all' }
 };
 
 function getDateFilterHtml(section) {
@@ -494,6 +505,7 @@ function updateDateFilter(section, type) {
         if(section==='accounting') renderAccounting();
         if(section==='expenses') renderExpenses();
         if(section==='repayments') renderRepayments(1);
+        if(section==='company_assets') renderCompanyAssets();
     } else {
         document.getElementById(section+'CustomDates').style.display = 'flex';
     }
@@ -506,6 +518,7 @@ function applyCustomDate(section) {
     if(section==='accounting') renderAccounting();
     if(section==='expenses') renderExpenses();
     if(section==='repayments') renderRepayments(1);
+    if(section==='company_assets') renderCompanyAssets();
 }
 
 function filterByDate(data, dateField, filterState) {
@@ -1587,6 +1600,7 @@ function showApp(){
   setupMobileProtections();
   $('#loginScreen').style.display='none';
   $('#appShell').style.display='flex';
+  loadPataFixBranches();
   const displayRole = (currentUser.role||'viewer').split(',').map(r => r.replace(/_/g, ' ').toUpperCase()).join(', ');
   $('#sidebarUser').innerHTML=`<strong>${currentUser.name}</strong><br><span class="badge badge-blue" style="max-width:200px;white-space:normal;display:inline-block">${displayRole}</span>`;
   buildSidebar();
@@ -1635,6 +1649,8 @@ function buildSidebar() {
     { id: 'officer_dashboard', icon: '◉', label: 'My Dashboard', roles: ['loan_officer'] },
     { id: 'accounting', icon: '%', label: 'Accounting & P&L', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier'], permission: 'view_accounting', permissionDefaults: ['admin'] },
     { id: 'expenses', icon: 'E', label: 'Expenses', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier'], permission: 'view_expenses', permissionDefaults: ['admin'] },
+    { id: 'company_assets', icon: 'A', label: 'Company Assets', roles: ['admin', 'branch_manager'], permission: 'view_accounting', permissionDefaults: ['admin'] },
+    { id: 'branches', icon: 'B', label: 'Branches', roles: ['admin'] },
     { id: 'charges_excess', icon: '+', label: 'Charges & Excess', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'mpesa_transactions', icon: 'M', label: 'M-Pesa Transactions', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'suspense', icon: '?', label: 'Suspense Account', roles: ['admin', 'branch_manager', 'cashier'] },
@@ -1790,6 +1806,7 @@ function navigateTo(section){
     dashboard:renderDashboard,clients:renderClients,products:renderProducts,
     applications:renderApplications,disbursement:renderDisbursement,loans:renderLoans,
     repayments:renderRepayments,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,charges_excess:renderChargesExcessAccount,mpesa_transactions:renderMpesaTransactions,suspense:renderSuspense,
+    branches:renderBranches,company_assets:renderCompanyAssets,
     accounting:renderAccounting,expenses:renderExpenses,staff:renderStaff,calculator:renderCalculator,
     settings:renderSettings,auditlog:renderAuditLog
   };
@@ -2043,21 +2060,23 @@ async function renderDashboard(){
   const main=$('#mainContent');
   if(!currentUser?.business_id) return;
   try{
+    await loadPataFixBranches();
     const todayFetch=today();
     const[loansR,schedR,todaySchedR,repR,appsR,clientsR]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name,phone,id_number,address),loan_applications(loan_products(name))').eq('business_id', currentUser.business_id),
+      sb('loans').select('*,loan_clients(full_name,phone,id_number,address,branch_name),loan_applications(loan_products(name))').eq('business_id', currentUser.business_id),
       sb('loan_schedules').select('*').eq('business_id', currentUser.business_id).limit(50000),
       sb('loan_schedules').select('*').eq('business_id', currentUser.business_id).eq('due_date', todayFetch),
       sb('loan_repayments').select('*').eq('business_id', currentUser.business_id),
       sb('loan_applications').select('*').eq('business_id', currentUser.business_id),
-      sb('loan_clients').select('id,created_at,notes').eq('business_id', currentUser.business_id)
+      sb('loan_clients').select('id,created_at,notes,branch_name').eq('business_id', currentUser.business_id)
     ]);
-    const allLoans=loansR.data||[];
-    const allScheds=(schedR.data||[]).filter(isCurrentSchedule);
-    const todayScheds=(todaySchedR.data||[]).filter(isCurrentSchedule);
-    const allReps=repR.data||[];
-    const allApps=appsR.data||[];
-    const allClients=clientsR.data||[];
+    const allLoans=filterByBranch(loansR.data||[],'dashboard');
+    const visibleLoanIds=new Set(allLoans.map(l=>l.id));
+    const allScheds=(schedR.data||[]).filter(isCurrentSchedule).filter(s=>!s.loan_id||visibleLoanIds.has(s.loan_id)||recordBranchName(s)===effectiveBranchFilter('dashboard')||effectiveBranchFilter('dashboard')==='all');
+    const todayScheds=(todaySchedR.data||[]).filter(isCurrentSchedule).filter(s=>!s.loan_id||visibleLoanIds.has(s.loan_id)||recordBranchName(s)===effectiveBranchFilter('dashboard')||effectiveBranchFilter('dashboard')==='all');
+    const allReps=(repR.data||[]).filter(r=>!r.loan_id||visibleLoanIds.has(r.loan_id)||recordBranchName(r)===effectiveBranchFilter('dashboard')||effectiveBranchFilter('dashboard')==='all');
+    const allApps=filterByBranch(appsR.data||[],'dashboard');
+    const allClients=filterByBranch(clientsR.data||[],'dashboard');
     cachedData={loans:allLoans,schedules:allScheds,repayments:allReps,applications:allApps,clients:allClients};
     const f = appFilters.dashboard;
     const todayStr = today();
@@ -2163,6 +2182,7 @@ async function renderDashboard(){
             <button class="btn btn-outline" onclick="navigateTo('dashboard')">Refresh</button>
         </div>
         ${getDateFilterHtml('dashboard')}
+        ${getBranchFilterHtml('dashboard',loansR.data||[])}
       </div>
       <h3 class="dash-h3">Clients (Selected Period)</h3>
       <div class="kpi-grid">
@@ -2304,6 +2324,7 @@ async function renderClients(page=1){
   clientPage=page;const main=$('#mainContent');
   if(!currentUser?.business_id) return;
   try{
+    await loadPataFixBranches();
     const{data:clients,error}=await sb('loan_clients').select('*').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
     if(error)throw error;
 
@@ -2328,7 +2349,7 @@ async function renderClients(page=1){
       }
     });
 
-    let finalClients = clients || [];
+    let finalClients = filterByBranch(clients || [], 'clients');
     const isOnlyOfficer = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     if (isOnlyOfficer) {
         finalClients = finalClients.filter(c => window._clientOffMap[c.id] === currentUser.id);
@@ -2337,6 +2358,7 @@ async function renderClients(page=1){
 
     main.innerHTML=`
       <div class="page-header"><h1>Clients</h1><div id="clientsHeaderBtns"><button class="btn btn-outline btn-sm" id="btnBulkTransfer" onclick="openBulkTransferModal()" style="display:none;background:rgba(124,58,237,0.1);border-color:var(--accent-purple);color:var(--accent-purple)">⇄ Transfer Selected (<span id="bulkCount">0</span>)</button> <button class="btn btn-outline btn-sm" onclick="exportClientsExcel()">Export Excel</button> <button class="btn btn-primary" onclick="openAddClientModal()">+ Add Client</button></div></div>
+      ${getBranchFilterHtml('clients',clients||[])}
       <div class="search-bar" style="background:var(--card);padding:14px;border:1px solid var(--border);border-radius:10px;margin-bottom:14px;display:flex;gap:10px;align-items:center;box-shadow:0 1px 2px rgba(0,0,0,0.04)">
         <span style="font-size:18px">🔎</span>
         <input class="input" id="clientSearchInput" placeholder="Search clients by Name, Phone, or ID Number..." oninput="filterClients(this.value)" style="flex:1;font-size:14px;padding:10px 12px">
@@ -2344,7 +2366,7 @@ async function renderClients(page=1){
         <button class="btn btn-primary btn-sm" id="btnViewAllClients" onclick="showAllClients(true)">View All Clients (${cachedData.clients.length})</button>
       </div>
       <div id="clientsTableWrap" style="display:none">
-        <div class="table-wrap"><table><thead><tr>${hasRole('admin','branch_manager')?'<th style="width:32px"><input type="checkbox" id="chkAllClients" title="Select all" onchange="toggleAllClientCheckboxes(this.checked)"></th>':''}<th>Name</th><th>ID No</th><th>Phone</th><th>Officer</th><th>Location</th><th>Onboarded</th><th>Status</th><th>Actions</th></tr></thead>
+        <div class="table-wrap"><table><thead><tr>${hasRole('admin','branch_manager')?'<th style="width:32px"><input type="checkbox" id="chkAllClients" title="Select all" onchange="toggleAllClientCheckboxes(this.checked)"></th>':''}<th>Name</th><th>ID No</th><th>Phone</th><th>Branch</th><th>Officer</th><th>Location</th><th>Onboarded</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody id="clientsBody"></tbody></table></div>
         <div id="clientsPagination"></div>
       </div>
@@ -2383,6 +2405,7 @@ function renderClientRows(clients){
     return`<tr>
       ${chkCell}
       <td><div class="client-name-cell">${clientAvatarHtml(c)}<strong>${escapeHtml(c.full_name)}</strong></div></td><td>${escapeHtml(c.id_number||'-')}</td><td>${escapeHtml(c.phone||'-')}</td>
+      <td>${escapeHtml(recordBranchName(c))}</td>
       <td><span class="badge badge-gray" style="text-transform:capitalize">${offName}</span></td>
       <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${c.address||''}">${c.address||'-'}</td>
       <td style="white-space:nowrap">${c.created_at?c.created_at.slice(0,10):'-'}</td>
@@ -2474,6 +2497,7 @@ function filterClients(q){
 }
 
 async function openAddClientModal(){
+  await loadPataFixBranches();
   // Fetch staff for officer assignment dropdown
   const {data:staffList} = await sb('loan_staff').select('id,name,role').eq('business_id', currentUser.business_id).eq('is_active', true);
   const officers = (staffList||[]).filter(s=>{ const roles=(s.role||'').split(','); return roles.some(r=>['loan_officer','admin','branch_manager'].includes(r.trim())); });
@@ -2492,6 +2516,7 @@ async function openAddClientModal(){
     <div class="form-row"><div class="form-group"><label>Phone *</label><input class="input" id="cPhone"></div><div class="form-group"><label>Email</label><input class="input" id="cEmail"></div></div>
     <div class="form-row"><div class="form-group"><label>Gender</label><select class="select" id="cGender"><option value="">Select</option><option>Male</option><option>Female</option><option>Other</option></select></div><div class="form-group"><label>Date of Birth</label><input class="input" type="date" id="cDob"></div></div>
     <div class="form-group"><label>Client Onboarding Date</label><input class="input" type="date" id="cOnboardDate" value="${today()}"><div style="font-size:11px;color:var(--text-secondary);margin-top:3px">Use this when entering an existing client manually.</div></div>
+    <div class="form-group"><label>Branch *</label><select class="select" id="cBranch">${branchOptionsHtml()}</select></div>
     <div class="form-group"><label>Address</label><input class="input" id="cAddress"></div>
     <div class="form-row"><div class="form-group"><label>Occupation</label><input class="input" id="cOccupation"></div><div class="form-group"><label>Employer</label><input class="input" id="cEmployer"></div></div>
     <div class="form-group"><label>Daily Income (KES)</label><input class="input" type="number" id="cIncome" placeholder="e.g. 500"></div>
@@ -2535,7 +2560,7 @@ async function saveClient(){
     const assignedOfficerId = ($('#cAssignedOfficer')?.value || currentUser?.id || '').trim();
     const officerTag = assignedOfficerId ? ` [OFFICER:${assignedOfficerId}]` : '';
     const taggedNotes=(userNotes?userNotes+' ':'')+regFeePendingTag(todayStr)+officerTag;
-    const rec={full_name:name,id_number:idNo,phone,email:$('#cEmail').value,gender:$('#cGender').value,dob:$('#cDob').value||null,address:$('#cAddress').value,occupation:$('#cOccupation').value,employer:$('#cEmployer').value,monthly_income:Number($('#cIncome').value)||0,next_of_kin_name:$('#cNokName').value,next_of_kin_phone:$('#cNokPhone').value,next_of_kin_relation:$('#cNokRel').value,notes:taggedNotes,business_id:currentUser?.business_id,created_by:currentUser?.id,created_at:dateInputToLocalDateTime(todayStr)};
+    const rec={full_name:name,id_number:idNo,phone,email:$('#cEmail').value,gender:$('#cGender').value,dob:$('#cDob').value||null,address:$('#cAddress').value,occupation:$('#cOccupation').value,employer:$('#cEmployer').value,monthly_income:Number($('#cIncome').value)||0,next_of_kin_name:$('#cNokName').value,next_of_kin_phone:$('#cNokPhone').value,next_of_kin_relation:$('#cNokRel').value,notes:taggedNotes,branch_name:normalizeBranchName($('#cBranch')?.value),business_id:currentUser?.business_id,created_by:currentUser?.id,created_at:dateInputToLocalDateTime(todayStr)};
     const{data,error}=await sb('loan_clients').insert(rec).select().single();
     if(error)throw error;
     // Store officer assignment in caches
@@ -2650,6 +2675,7 @@ async function viewClient(id){
 
 async function editClient(id){
   if(!hasRole('admin','branch_manager')) return toast('Admin/Manager access required','warning');
+  await loadPataFixBranches();
   const{data:c}=await sb('loan_clients').select('*').eq('id',id).single();
   if(!c)return toast('Client not found','error');
   openModal(`
@@ -2683,6 +2709,7 @@ async function editClient(id){
       <div class="form-group"><label>Address</label><input class="input" id="ecAddress" value="${(c.address||'').replace(/"/g,'&quot;')}"></div>
       <div class="form-group"><label>Date of Birth</label><input class="input" type="date" id="ecDob" value="${c.dob||''}"></div>
     </div>
+    <div class="form-group"><label>Branch *</label><select class="select" id="ecBranch">${branchOptionsHtml(c.branch_name)}</select></div>
     <div class="form-row">
       <div class="form-group"><label>Next of Kin Name</label><input class="input" id="ecNokName" value="${(c.next_of_kin_name||'').replace(/"/g,'&quot;')}"></div>
       <div class="form-group"><label>Next of Kin Phone</label><input class="input" id="ecNokPhone" value="${(c.next_of_kin_phone||'').replace(/"/g,'&quot;')}"></div>
@@ -2714,7 +2741,7 @@ async function updateClient(id){
         return toast('Another client already has this ID number','error');
       }
     }
-    const upd={full_name:($('#ecName').value||'').trim(),id_number:idNo||null,phone:normPhone||null,alternative_phone:($('#ecAltPhone')?.value||'').trim()||null,email:($('#ecEmail')?.value||'').trim()||null,gender:$('#ecGender')?.value||null,occupation:($('#ecOccupation')?.value||'').trim()||null,monthly_income:Number($('#ecIncome')?.value)||null,address:($('#ecAddress')?.value||'').trim()||null,dob:$('#ecDob')?.value||null,next_of_kin_name:($('#ecNokName')?.value||'').trim()||null,next_of_kin_phone:($('#ecNokPhone')?.value||'').trim()||null,next_of_kin_relation:($('#ecNokRelation')?.value||'').trim()||null};
+    const upd={full_name:($('#ecName').value||'').trim(),id_number:idNo||null,phone:normPhone||null,alternative_phone:($('#ecAltPhone')?.value||'').trim()||null,email:($('#ecEmail')?.value||'').trim()||null,gender:$('#ecGender')?.value||null,occupation:($('#ecOccupation')?.value||'').trim()||null,monthly_income:Number($('#ecIncome')?.value)||null,address:($('#ecAddress')?.value||'').trim()||null,dob:$('#ecDob')?.value||null,next_of_kin_name:($('#ecNokName')?.value||'').trim()||null,next_of_kin_phone:($('#ecNokPhone')?.value||'').trim()||null,next_of_kin_relation:($('#ecNokRelation')?.value||'').trim()||null,branch_name:normalizeBranchName($('#ecBranch')?.value)};
     // Remove undefined/null keys that might cause schema errors
     Object.keys(upd).forEach(k=>{if(upd[k]===null||upd[k]===undefined)delete upd[k];});
     const{error}=await sb('loan_clients').update(upd).eq('id',id);
@@ -2975,13 +3002,15 @@ let appPage=1;
 async function renderApplications(page=1){
   appPage=page;const main=$('#mainContent');
   try{
-    const{data:apps}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,asset_photo_paths),loan_products(name)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
-    cachedData.applications=apps||[];
+    await loadPataFixBranches();
+    const{data:apps}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,asset_photo_paths,branch_name),loan_products(name)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
+    cachedData.applications=filterByBranch(apps||[],'applications');
     const isOnlyOfficer = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     if(isOnlyOfficer) cachedData.applications = cachedData.applications.filter(a => a.loan_officer_id === currentUser.id);
     const p=paginate(cachedData.applications,page);
     main.innerHTML=`
       <div class="page-header"><h1>Loan Applications</h1><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" id="btnBulkApproveApps" onclick="openBulkApproveApplicationsModal()" style="display:none">Approve Selected (<span id="bulkApproveAppsCount">0</span>)</button><button class="btn btn-primary" onclick="openNewApplication()">+ New Application</button></div></div>
+      ${getBranchFilterHtml('applications',apps||[])}
       <div class="search-bar"><input class="input" placeholder="Search application or client..." oninput="filterApps(this.value)"><select class="select" onchange="filterAppStatus(this.value)"><option value="">All Status</option><option value="draft">Draft</option><option value="submitted">Submitted</option><option value="under_review">Under Review</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="disbursed">Disbursed</option></select></div>
       <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager')?'<input type="checkbox" id="bulkApproveAllApps" onchange="toggleBulkApproveApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
       <tbody id="appsBody">${renderAppRows(p.items)}</tbody></table></div>
@@ -3072,12 +3101,14 @@ function toggleBulkApproveApplications(checked){
 }
 
 async function openNewApplication(){
-  const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number').eq('business_id', currentUser.business_id).order('full_name');
+  await loadPataFixBranches();
+  const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number,branch_name').eq('business_id', currentUser.business_id).order('full_name');
+  const branchClients=filterByBranch(clients||[],'applications');
   const products=(await ensurePataFixProducts()).filter(p=>p.is_active!==false);
   const productOptions=products.map(p=>`<option value="${p.id}" data-name="${escapeHtml(p.name)}">${escapeHtml(p.name)} - ${escapeHtml(patafixProductByName(p.name)?.description||p.description||'')}</option>`).join('');
   // Build datalist; encode id in option's data-id via a hidden lookup map
   window._appClientLookup = {};
-  const optionsHtml = (clients||[]).map(c=>{
+  const optionsHtml = (branchClients||[]).map(c=>{
     const label = `${c.full_name} — ${c.phone||''}${c.id_number?(' — ID '+c.id_number):''}`;
     window._appClientLookup[label] = c.id;
     // Also index by phone & name for fuzzy resolution
@@ -3112,7 +3143,7 @@ async function openNewApplication(){
     <div id="appStep3" style="display:none"><div id="appReview"></div></div>
     <div class="modal-actions"><button class="btn btn-outline" id="appPrevBtn" onclick="appStepNav(-1)" style="display:none">Back</button><button class="btn btn-primary" id="appNextBtn" onclick="appStepNav(1)">Next</button></div>
   `,true);
-  window._appStep=1;window._appProducts=products||[];window._appClients=clients||[];
+  window._appStep=1;window._appProducts=products||[];window._appClients=branchClients||[];
 }
 
 function onAppClientPick(val){
@@ -3265,7 +3296,8 @@ async function submitApplication(){
       if(btn){ btn.disabled=false; btn.textContent='Submit Application'; }
       return;
     }
-    const rec={application_no:appNo,client_id:selectedClientId,product_id:productId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRel')?.value||'').trim(),status:'submitted',application_date:appDate,created_at:dateInputToLocalDateTime(appDate),loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType};
+    const selectedClient=(window._appClients||[]).find(c=>c.id===selectedClientId);
+    const rec={application_no:appNo,client_id:selectedClientId,product_id:productId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRel')?.value||'').trim(),status:'submitted',application_date:appDate,created_at:dateInputToLocalDateTime(appDate),loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType,branch_name:recordBranchName(selectedClient)};
     
     // Try with product_id first; if Supabase rejects (column may not exist), retry without
     let insertedApp=null;
@@ -3463,7 +3495,8 @@ async function rejectApp(id){
 async function renderDisbursement(){
   const main=$('#mainContent');
   try{
-    const{data:apps,error:appsError}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number),loan_products(name)').eq('business_id', currentUser.business_id).in('status',['approved','disbursed']).order('approved_at',{ascending:false});
+    await loadPataFixBranches();
+    const{data:apps,error:appsError}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,branch_name),loan_products(name)').eq('business_id', currentUser.business_id).in('status',['approved','disbursed']).order('approved_at',{ascending:false});
     if(appsError)throw appsError;
     const appIds=(apps||[]).map(a=>a.id).filter(Boolean);
     let loansByApp={};
@@ -3472,7 +3505,7 @@ async function renderDisbursement(){
       if(loansError)throw loansError;
       loansByApp=Object.fromEntries((loans||[]).map(l=>[l.application_id,l]));
     }
-    cachedData.disbursements=(apps||[]).map(a=>({...a,loan_record:loansByApp[a.id]||null}));
+    cachedData.disbursements=filterByBranch((apps||[]).map(a=>({...a,loan_record:loansByApp[a.id]||null})),'disbursement');
     main.innerHTML=`
       <div class="page-header">
         <h1>Disbursement</h1>
@@ -3481,6 +3514,7 @@ async function renderDisbursement(){
           <button class="btn btn-primary btn-sm" id="btnBulkDisburseApps" onclick="openBulkDisbursementModal()" style="display:none">Disburse Selected (<span id="bulkDisburseAppsCount">0</span>)</button>
         </div>
       </div>
+      ${getBranchFilterHtml('disbursement',apps||[])}
       <div class="search-bar">
         <input class="input" id="disbursementSearch" placeholder="Search client, ID, phone, app or loan no..." oninput="applyDisbursementFilters()">
         <select class="select" id="disbursementStatusFilter" onchange="applyDisbursementFilters()">
@@ -3742,7 +3776,7 @@ function updateDisbursementFirstRepayment(intervalWeeks=1){
 
 async function disburseApprovedApplication(options){
     const{appId,clientId,termWeeks}=options;
-    const {data: appCheck} = await sb('loan_applications').select('status,loan_products(name)').eq('id', appId).single();
+    const {data: appCheck} = await sb('loan_applications').select('status,branch_name,loan_clients(branch_name),loan_products(name)').eq('id', appId).single();
     if(appCheck?.status === 'disbursed') {
         throw new Error('This application has already been disbursed.');
     }
@@ -3787,7 +3821,8 @@ async function disburseApprovedApplication(options){
     if(openingBalance>c.totalPayable) throw new Error('Current remaining balance cannot be more than total payable.');
     const openingPaid=Number(Math.max(0,c.totalPayable-openingBalance).toFixed(2));
     const loanStatus=openingBalance<=0?'completed':'active';
-    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:c.periodRate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:netDisbursement,disbursement_method:options.method,disbursement_reference:options.reference,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:loanStatus,outstanding_balance:openingBalance,total_paid:openingPaid,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType,created_at:dateInputToLocalDateTime(disbDate)};
+    const loanBranch=normalizeBranchName(appCheck?.branch_name||appCheck?.loan_clients?.branch_name||currentStaffBranchName());
+    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:c.periodRate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:netDisbursement,disbursement_method:options.method,disbursement_reference:options.reference,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:loanStatus,outstanding_balance:openingBalance,total_paid:openingPaid,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType,branch_name:loanBranch,created_at:dateInputToLocalDateTime(disbDate)};
 
     // Guard: if loan_type column doesn't exist yet in DB, retry without it
     let{data:loan,error:lErr}=await sb('loans').insert(loanRec).select().single();
@@ -3831,7 +3866,7 @@ async function disburseApprovedApplication(options){
       const paidHere=Math.min(alreadyPaidForSchedules, Number(s.total||0));
       alreadyPaidForSchedules=Number(Math.max(0,alreadyPaidForSchedules-paidHere).toFixed(2));
       const scheduleStatus=paidHere>=Number(s.total||0)?'paid':paidHere>0?'partial':'pending';
-      return{loan_id:loan.id,business_id:currentUser?.business_id,installment_no:s.no,due_date:localISODate(due),principal_due:s.principal,interest_due:s.interest,total_due:s.total,principal_paid:0,interest_paid:0,total_paid:paidHere,penalty_charged:0,status:scheduleStatus,paid_at:scheduleStatus==='paid'?dateInputToLocalDateTime(disbDate):null};
+      return{loan_id:loan.id,business_id:currentUser?.business_id,branch_name:loanBranch,installment_no:s.no,due_date:localISODate(due),principal_due:s.principal,interest_due:s.interest,total_due:s.total,principal_paid:0,interest_paid:0,total_paid:paidHere,penalty_charged:0,status:scheduleStatus,paid_at:scheduleStatus==='paid'?dateInputToLocalDateTime(disbDate):null};
     });
     
     const{error:sErr}=await sb('loan_schedules').insert(schedules);
@@ -3887,13 +3922,14 @@ let loanPage=1;
 async function renderLoans(page=1){
   loanPage=page;const main=$('#mainContent');
   try{
-    const{data:loans}=await sb('loans').select('*,loan_clients(full_name,phone,id_number)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
+    await loadPataFixBranches();
+    const{data:loans}=await sb('loans').select('*,loan_clients(full_name,phone,id_number,branch_name)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
 
     const {data:staffData}=await sb('loan_staff').select('id,name').eq('business_id', currentUser.business_id);
     window._staffMap = {};
     (staffData||[]).forEach(s=>window._staffMap[s.id]=s.name);
 
-    let finalLoans = loans || [];
+    let finalLoans = filterByBranch(loans || [], 'loans');
     const isOnlyOfficer = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     if (isOnlyOfficer) finalLoans = finalLoans.filter(l => l.loan_officer_id === currentUser.id);
 
@@ -3901,6 +3937,7 @@ async function renderLoans(page=1){
     const openActiveLoans = finalLoans.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01);
     main.innerHTML=`
       <div class="page-header"><h1>Active Loans</h1></div>
+      ${getBranchFilterHtml('loans',loans||[])}
       <div class="search-bar">
         <input class="input" id="loanSearchInput" placeholder="Search by loan no, client name, phone or ID..." oninput="filterLoans(this.value)">
         <select class="select" id="loanStatusSelect" onchange="filterLoanStatus(this.value)"><option value="">All Status</option><option value="active">Active</option><option value="completed">Completed</option><option value="defaulted">Defaulted</option><option value="written_off">Written Off</option></select>
@@ -4264,8 +4301,24 @@ function normalizeBranchName(branch){
     return String(branch||'').trim() || 'Head Office';
 }
 
+function canViewAllBranches(){
+    return hasRole('admin');
+}
+
+function effectiveBranchFilter(section){
+    if(!canViewAllBranches()) return currentStaffBranchName();
+    return appFilters[section]?.branch || 'all';
+}
+
+function recordBranchName(row){
+    return normalizeBranchName(row?.branch_name || row?.branch || row?.loan_clients?.branch_name || row?.loan_record?.branch_name || '');
+}
+
 function branchOptionsFromRows(rows){
-    return [...new Set((rows||[]).map(r=>normalizeBranchName(r.branch_name)).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+    const branchSet = new Set((window._patafixBranches||[]).map(b=>normalizeBranchName(b.name||b.branch_name)));
+    (rows||[]).forEach(r=>branchSet.add(recordBranchName(r)));
+    branchSet.add('Head Office');
+    return [...branchSet].filter(Boolean).sort((a,b)=>a.localeCompare(b));
 }
 
 function getBranchFilterHtml(section, rows){
@@ -4273,7 +4326,14 @@ function getBranchFilterHtml(section, rows){
     if(!f) return '';
     const branches = branchOptionsFromRows(rows);
     if(!branches.length) branches.push('Head Office');
-    const current = f.branch || 'all';
+    const current = effectiveBranchFilter(section);
+    if(!canViewAllBranches()){
+      return `
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:-8px 0 16px">
+        <span style="font-size:12px;color:var(--text-secondary);font-weight:700">Branch</span>
+        <span class="badge badge-blue">${escapeHtml(current)}</span>
+      </div>`;
+    }
     return `
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:-8px 0 16px">
         <span style="font-size:12px;color:var(--text-secondary);font-weight:700">Branch</span>
@@ -4287,18 +4347,48 @@ function getBranchFilterHtml(section, rows){
 function updateBranchFilter(section, branch){
     if(!appFilters[section]) appFilters[section]={type:'this_month',start:'',end:''};
     appFilters[section].branch = branch || 'all';
+    if(section==='dashboard') renderDashboard();
+    if(section==='clients') renderClients();
+    if(section==='applications') renderApplications();
+    if(section==='disbursement') renderDisbursement();
+    if(section==='loans') renderLoans();
+    if(section==='repayments') renderRepayments(1);
+    if(section==='overdue') renderOverdue();
+    if(section==='reports') renderReports();
+    if(section==='officer_performance') renderOfficerPerformance();
+    if(section==='charges_excess') renderChargesExcessAccount();
+    if(section==='mpesa_transactions') renderMpesaTransactions();
+    if(section==='suspense') renderSuspense();
+    if(section==='company_assets') renderCompanyAssets();
     if(section==='accounting') renderAccounting();
     if(section==='expenses') renderExpenses();
 }
 
 function filterByBranch(rows, section){
-    const branch = appFilters[section]?.branch || 'all';
+    const branch = effectiveBranchFilter(section);
     if(branch === 'all') return rows || [];
-    return (rows||[]).filter(r=>normalizeBranchName(r.branch_name) === branch);
+    return (rows||[]).filter(r=>recordBranchName(r) === branch);
 }
 
 function currentStaffBranchName(){
     return normalizeBranchName(currentUser?.branch_name || currentUser?.branch || currentUser?.branch_code || '');
+}
+
+async function loadPataFixBranches(){
+    try{
+      const {data,error}=await sb('patafix_branches').select('*').eq('business_id',currentUser.business_id).order('name');
+      if(error) throw error;
+      window._patafixBranches=data||[];
+    }catch(e){
+      window._patafixBranches=[{name:'Head Office',branch_code:'HO',status:'active'}];
+    }
+    return window._patafixBranches;
+}
+
+function branchOptionsHtml(selectedBranch){
+    const current=normalizeBranchName(selectedBranch||currentStaffBranchName());
+    const branches=branchOptionsFromRows([]);
+    return branches.map(b=>`<option value="${escapeHtml(b)}" ${normalizeBranchName(b)===current?'selected':''}>${escapeHtml(b)}</option>`).join('');
 }
 
 async function saveLoanRestructure(id){
@@ -8248,7 +8338,7 @@ function openExpenseModal(){
   openModal(`
     <h2>Initiate Operational Expense</h2>
     <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">The expense remains pending and does not affect Profit & Loss until approved.</p>
-    <div class="form-group"><label>Branch *</label><input class="input" id="expenseBranch" value="${escapeHtml(currentStaffBranchName())}" placeholder="e.g. Kilifi Branch"></div>
+    <div class="form-group"><label>Branch *</label><select class="select" id="expenseBranch">${branchOptionsHtml()}</select></div>
     <div class="form-row"><div class="form-group"><label>Expense Date *</label><input class="input" id="expenseDate" type="date" value="${today()}"></div><div class="form-group"><label>Category *</label><select class="select" id="expenseCategory">${PATAFIX_EXPENSE_CATEGORIES.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select></div></div>
     <div class="form-group"><label>Description *</label><textarea class="input" id="expenseDescription" rows="3" placeholder="What was purchased or paid for, and why?"></textarea></div>
     <div class="form-row"><div class="form-group"><label>Amount (KES) *</label><input class="input" id="expenseAmount" type="number" min="0.01" step="0.01"></div><div class="form-group"><label>Payment Method *</label><select class="select" id="expenseMethod"><option value="cash">Cash</option><option value="mpesa">M-Pesa</option><option value="bank">Bank</option><option value="imprest">Imprest</option></select></div></div>
@@ -8659,7 +8749,7 @@ function openCompanyAssetModal(assetId=null){
   openModal(`
     <h2>${asset?'View / Amend Company Asset':'Record Company Asset'}</h2>
     <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Use this for company-owned assets. This posts to the Company Assets account, not to operating expenses.</p>
-    <div class="form-group"><label>Branch *</label><input class="input" id="assetBranch" value="${escapeHtml(normalizeBranchName(asset?.branch_name || currentStaffBranchName()))}" placeholder="e.g. Kilifi Branch"></div>
+    <div class="form-group"><label>Branch *</label><select class="select" id="assetBranch">${branchOptionsHtml(asset?.branch_name)}</select></div>
     <div class="form-row">
       <div class="form-group"><label>Date of Purchase *</label><input class="input" id="assetDate" type="date" value="${asset?.asset_date||today()}"></div>
       <div class="form-group"><label>Category *</label><select class="select" id="assetCategory">${categories.map(c=>`<option value="${escapeHtml(c)}" ${selected(asset?.category,c)}>${escapeHtml(c)}</option>`).join('')}</select></div>
@@ -8718,11 +8808,148 @@ async function saveCompanyAsset(assetId=null){
   }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Save Asset';}}
 }
 
+async function renderCompanyAssets(){
+  if(!hasFinancePermission('view_accounting',['admin']))return toast('Company asset access is restricted.','warning');
+  const main=$('#mainContent');
+  try{
+    await loadPataFixBranches();
+    const{data,error}=await sb('patafix_company_assets').select('*').eq('business_id',currentUser.business_id).order('asset_date',{ascending:false}).limit(100000);
+    if(error)throw new Error('Assets fetch error: '+error.message+'. Run patafix-multibranch-setup.sql and patafix-capital-and-assets.sql in Supabase first.');
+    window._patafixAccountingAssets=data||[];
+    const rows=filterByBranch(filterByDate(data||[],'asset_date',appFilters.company_assets),'company_assets');
+    const activeValue=rows.filter(a=>a.status==='active').reduce((s,a)=>s+Number(a.current_value||a.purchase_amount||0),0);
+    const purchaseValue=rows.reduce((s,a)=>s+Number(a.purchase_amount||0),0);
+    main.innerHTML=`
+      <div class="page-header" style="align-items:flex-start;flex-direction:column">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;flex-wrap:wrap">
+          <h1>Company Assets</h1>
+          <button class="btn btn-primary" onclick="openCompanyAssetModal()">+ Add Asset</button>
+        </div>
+        ${getDateFilterHtml('company_assets')}
+        ${getBranchFilterHtml('company_assets',data||[])}
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="kpi-label">Assets Listed</div><div class="kpi-value" style="color:var(--accent-blue)">${rows.length}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Initial Cost</div><div class="kpi-value" style="color:var(--accent-purple)">${fmtMoney(purchaseValue)}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Current Active Value</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(activeValue)}</div></div>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Date of Purchase</th><th>Branch</th><th>Asset #</th><th>Asset</th><th>Model / Type</th><th>Category</th><th>Initial Price</th><th>Current Value</th><th>Method / Ref</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${rows.map(a=>`<tr>
+          <td>${fmtDate(a.asset_date)}</td>
+          <td>${escapeHtml(recordBranchName(a))}</td>
+          <td><strong>${escapeHtml(a.asset_no||'-')}</strong></td>
+          <td>${escapeHtml(a.asset_name||'-')}</td>
+          <td>${escapeHtml(a.model_type||a.description||'-')}</td>
+          <td><span class="badge badge-blue">${escapeHtml(a.category||'Other')}</span></td>
+          <td>${fmtMoney(a.purchase_amount)}</td>
+          <td>${fmtMoney(a.current_value)}</td>
+          <td>${escapeHtml((a.payment_method||'cash').toUpperCase())}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(a.payment_reference||'-')}</span></td>
+          <td>${statusBadge(a.status)}</td>
+          <td><button class="btn btn-outline btn-sm" onclick="openCompanyAssetModal('${a.id}')">View / Edit</button></td>
+        </tr>`).join('')||'<tr><td colspan="11" style="text-align:center;color:var(--text-secondary);padding:18px">No company assets found</td></tr>'}</tbody>
+      </table></div>
+    `;
+  }catch(e){main.innerHTML=`<div class="empty-state"><p>${escapeHtml(e.message)}</p></div>`;toast(e.message,'error');}
+}
+
+async function renderBranches(){
+  if(!hasRole('admin'))return toast('Only admins can manage branches.','warning');
+  const main=$('#mainContent');
+  try{
+    const[branchesR,staffR,clientsR,loansR]=await Promise.all([
+      sb('patafix_branches').select('*').eq('business_id',currentUser.business_id).order('name'),
+      sb('loan_staff').select('id,branch_name').eq('business_id',currentUser.business_id),
+      sb('loan_clients').select('id,branch_name').eq('business_id',currentUser.business_id),
+      sb('loans').select('id,branch_name,status,outstanding_balance').eq('business_id',currentUser.business_id)
+    ]);
+    if(branchesR.error)throw new Error('Branches are not ready yet. Run patafix-multibranch-setup.sql in Supabase first.');
+    window._patafixBranches=branchesR.data||[];
+    const branches=window._patafixBranches.length?window._patafixBranches:[{name:'Head Office',branch_code:'HO',status:'active'}];
+    const staff=staffR.data||[],clients=clientsR.data||[],loans=loansR.data||[];
+    const metric=(rows,b)=>rows.filter(r=>recordBranchName(r)===b).length;
+    main.innerHTML=`
+      <div class="page-header"><h1>Branches</h1><button class="btn btn-primary" onclick="openBranchModal()">+ Add Branch</button></div>
+      <div class="card" style="margin-bottom:14px">
+        <h3 style="font-size:14px;margin-bottom:4px">Multi-Branch Control</h3>
+        <p style="font-size:12px;color:var(--text-secondary)">Admins can view all branches. Branch managers and staff are automatically limited to the branch assigned on their staff profile.</p>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Branch</th><th>Code</th><th>Manager</th><th>Phone</th><th>Staff</th><th>Clients</th><th>Active Loans</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${branches.map(b=>{
+          const name=normalizeBranchName(b.name||b.branch_name);
+          const activeLoans=loans.filter(l=>recordBranchName(l)===name&&l.status==='active'&&Number(l.outstanding_balance||0)>0.01).length;
+          return `<tr>
+            <td><strong>${escapeHtml(name)}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(b.location||b.address||'-')}</span></td>
+            <td>${escapeHtml(b.branch_code||'-')}</td>
+            <td>${escapeHtml(b.manager_name||'-')}</td>
+            <td>${escapeHtml(b.phone||'-')}</td>
+            <td>${metric(staff,name)}</td>
+            <td>${metric(clients,name)}</td>
+            <td>${activeLoans}</td>
+            <td>${statusBadge(b.status||'active')}</td>
+            <td><button class="btn btn-outline btn-sm" onclick="openBranchModal('${b.id}')">Edit</button></td>
+          </tr>`;
+        }).join('')||'<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:18px">No branches created yet</td></tr>'}</tbody>
+      </table></div>
+    `;
+  }catch(e){main.innerHTML=`<div class="empty-state"><p>${escapeHtml(e.message)}</p></div>`;toast(e.message,'error');}
+}
+
+function openBranchModal(branchId=null){
+  const branch=(window._patafixBranches||[]).find(b=>String(b.id)===String(branchId))||{};
+  const selected=(value,option)=>String(value||'active')===option?'selected':'';
+  openModal(`
+    <h2>${branchId?'Edit Branch':'Add Branch'}</h2>
+    <div class="form-row">
+      <div class="form-group"><label>Branch Name *</label><input class="input" id="brName" value="${escapeHtml(branch.name||branch.branch_name||'')}" placeholder="e.g. Kilifi Branch"></div>
+      <div class="form-group"><label>Branch Code</label><input class="input" id="brCode" value="${escapeHtml(branch.branch_code||'')}" placeholder="e.g. PataFix001"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Manager Name</label><input class="input" id="brManager" value="${escapeHtml(branch.manager_name||'')}"></div>
+      <div class="form-group"><label>Phone</label><input class="input" id="brPhone" value="${escapeHtml(branch.phone||'')}"></div>
+    </div>
+    <div class="form-group"><label>Location / Address</label><input class="input" id="brLocation" value="${escapeHtml(branch.location||branch.address||'')}"></div>
+    <div class="form-group"><label>Status</label><select class="select" id="brStatus"><option value="active" ${selected(branch.status,'active')}>Active</option><option value="inactive" ${selected(branch.status,'inactive')}>Inactive</option></select></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="btnSaveBranch" onclick="saveBranch('${branchId||''}')">Save Branch</button>
+    </div>
+  `);
+}
+
+async function saveBranch(branchId=''){
+  const name=normalizeBranchName(document.getElementById('brName')?.value);
+  if(!name)return toast('Enter branch name.','warning');
+  const rec={
+    business_id:currentUser.business_id,
+    name,
+    branch_code:(document.getElementById('brCode')?.value||'').trim()||null,
+    manager_name:(document.getElementById('brManager')?.value||'').trim()||null,
+    phone:(document.getElementById('brPhone')?.value||'').trim()||null,
+    location:(document.getElementById('brLocation')?.value||'').trim()||null,
+    status:document.getElementById('brStatus')?.value||'active'
+  };
+  const btn=document.getElementById('btnSaveBranch');if(btn){btn.disabled=true;btn.textContent='Saving...';}
+  try{
+    const res=branchId
+      ? await sb('patafix_branches').update(rec).eq('id',branchId).eq('business_id',currentUser.business_id)
+      : await sb('patafix_branches').insert(rec);
+    if(res.error)throw res.error;
+    await audit(branchId?'branch_updated':'branch_created','patafix_branches',branchId||null,null,rec);
+    await loadPataFixBranches();
+    toast('Branch saved.','success');
+    closeModal();
+    renderBranches();
+  }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Save Branch';}}
+}
+
 // ═══ STAFF ═══
 async function renderStaff(){
   if(!hasRole('admin'))return toast('Admin access required','warning');
   const main=$('#mainContent');
   try{
+    await loadPataFixBranches();
     const staff=await loadStaffWithAuthStatus();
     main.innerHTML=`
       <div class="page-header"><h1>Staff Management</h1><button class="btn btn-primary" onclick="openAddStaffModal()">+ Add Staff</button></div>
@@ -8730,12 +8957,13 @@ async function renderStaff(){
         <h3 style="font-size:14px;margin-bottom:4px">Staff Login Access</h3>
         <p style="font-size:12px;color:var(--text-secondary)">When an administrator creates a staff account, the staff member can sign in immediately using the email and password set here. If they forget the password, the administrator can set a new one from the action menu.</p>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email/Phone</th><th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email/Phone</th><th>Branch</th><th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th></tr></thead><tbody>
       ${(staff||[]).map(s=>{
         const menuId=`staffActions_${String(s.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
         return `<tr>
         <td><strong>${escapeHtml(s.name||'-')}</strong></td>
         <td>${escapeHtml(s.email||s.phone||'-')}</td>
+        <td>${escapeHtml(recordBranchName(s))}</td>
         <td><span class="badge badge-blue" style="max-width:150px;white-space:normal;display:inline-block">${escapeHtml((s.role||'').replace(/_/g,' ').toUpperCase())}</span></td>
         <td>${staffStatusBadge(s)}</td>
         <td>${fmtDateTime(s.last_login)}</td>
@@ -8857,6 +9085,7 @@ function openAddStaffModal(s){
       <div class="form-group"><label>Phone</label><input class="input" id="stPhone" value="${s.phone||''}"></div>
       <div class="form-group"><label>Active</label><select class="select" id="stActive"><option value="true" ${s.is_active!==false?'selected':''}>Yes</option><option value="false" ${s.is_active===false?'selected':''}>No</option></select></div>
     </div>
+    <div class="form-group"><label>Branch *</label><select class="select" id="stBranch">${branchOptionsHtml(s.branch_name)}</select></div>
     
     ${!s.id ? `
     <div class="form-group">
@@ -8914,7 +9143,7 @@ async function saveStaff(id){
     const selectedRoleList=selectedRoles.split(',');
     const permissions={};
     STAFF_FINANCE_PERMISSIONS.forEach(p=>permissions[p.key]=selectedRoleList.includes('admin')||!!document.querySelector(`.st-finance-cb[value="${p.key}"]`)?.checked);
-    const rec={name,email,phone:$('#stPhone').value||null,role:selectedRoles,permissions,is_active:$('#stActive').value==='true'};
+    const rec={name,email,phone:$('#stPhone').value||null,branch_name:normalizeBranchName($('#stBranch')?.value),role:selectedRoles,permissions,is_active:$('#stActive').value==='true'};
     
     if(id){
       await sb('loan_staff').update(rec).eq('id',id);
