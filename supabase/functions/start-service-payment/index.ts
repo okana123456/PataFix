@@ -36,6 +36,15 @@ function billingMonth() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 }
 
+function serviceBillingAmount(month: string) {
+  const effectiveMonth = String(Deno.env.get("SERVICE_BILLING_GOLD_EFFECTIVE_MONTH") || "2026-10-01").trim();
+  const baseAmount = Number(Deno.env.get("SERVICE_BILLING_BASE_AMOUNT") || 3000);
+  const legacyAmount = Number(Deno.env.get("SERVICE_BILLING_AMOUNT") || 0);
+  const goldAmount = Number(Deno.env.get("SERVICE_BILLING_GOLD_AMOUNT") || (legacyAmount >= 7500 ? legacyAmount : 7500));
+  const selected = month >= effectiveMonth ? goldAmount : baseAmount;
+  return Math.max(1, Number(selected || 0));
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, message: "Use POST" }, 405);
@@ -68,7 +77,8 @@ serve(async (req) => {
       return json({ ok: false, message: "Only admins can renew the system subscription." }, 403);
     }
 
-    const amount = Math.max(1, Number(Deno.env.get("SERVICE_BILLING_AMOUNT") || 3000));
+    const month = billingMonth();
+    const amount = serviceBillingAmount(month);
     const shortcode = env("SERVICE_SHORTCODE");
     const consumerKey = env("SERVICE_CONSUMER_KEY");
     const consumerSecret = env("SERVICE_CONSUMER_SECRET");
@@ -125,7 +135,7 @@ serve(async (req) => {
 
     const cycle = {
       business_id: staff.business_id,
-      billing_month: billingMonth(),
+      billing_month: month,
       amount,
       status: "initiated",
       phone: cleanPhone,

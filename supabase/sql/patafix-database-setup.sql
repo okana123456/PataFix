@@ -272,7 +272,7 @@ create table if not exists public.loan_billing_cycles (
   id uuid primary key default gen_random_uuid(),
   business_id text not null,
   billing_month date not null,
-  amount numeric(14,2) not null default 3000,
+  amount numeric(14,2) not null default 7500,
   status text not null default 'pending',
   phone text,
   merchant_request_id text,
