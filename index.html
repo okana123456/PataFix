@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-09-03-multibranch-v1';
+const APP_VERSION = 'patafix-2026-09-03-portfolio-transfer-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -2357,7 +2357,7 @@ async function renderClients(page=1){
     cachedData.clients = finalClients;
 
     main.innerHTML=`
-      <div class="page-header"><h1>Clients</h1><div id="clientsHeaderBtns"><button class="btn btn-outline btn-sm" id="btnBulkTransfer" onclick="openBulkTransferModal()" style="display:none;background:rgba(124,58,237,0.1);border-color:var(--accent-purple);color:var(--accent-purple)">⇄ Transfer Selected (<span id="bulkCount">0</span>)</button> <button class="btn btn-outline btn-sm" onclick="exportClientsExcel()">Export Excel</button> <button class="btn btn-primary" onclick="openAddClientModal()">+ Add Client</button></div></div>
+      <div class="page-header"><h1>Clients</h1><div id="clientsHeaderBtns"><button class="btn btn-outline btn-sm" id="btnBulkTransfer" onclick="openBulkTransferModal()" style="display:none;background:rgba(124,58,237,0.1);border-color:var(--accent-purple);color:var(--accent-purple)">Transfer Selected (<span id="bulkCount">0</span>)</button> <button class="btn btn-outline btn-sm" onclick="exportClientsExcel()">Export Excel</button> <button class="btn btn-primary" onclick="openAddClientModal()">+ Add Client</button></div></div>
       ${getBranchFilterHtml('clients',clients||[])}
       <div class="search-bar" style="background:var(--card);padding:14px;border:1px solid var(--border);border-radius:10px;margin-bottom:14px;display:flex;gap:10px;align-items:center;box-shadow:0 1px 2px rgba(0,0,0,0.04)">
         <span style="font-size:18px">🔎</span>
@@ -2430,7 +2430,7 @@ function toggleAllClientCheckboxes(checked){
 async function openBulkTransferModal(){
   const checked=[...document.querySelectorAll('.client-chk:checked')];
   if(!checked.length)return toast('Select at least one client','warning');
-  const{data:staff}=await sb('loan_staff').select('id,name,role').eq('business_id',currentUser.business_id).eq('is_active',true);
+  const{data:staff}=await sb('loan_staff').select('id,name,role,branch_name').eq('business_id',currentUser.business_id).eq('is_active',true);
   const officers=(staff||[]).filter(s=>{const roles=(s.role||'').split(',');return roles.some(r=>['loan_officer','admin','branch_manager'].includes(r));});
   const names=checked.slice(0,5).map(c=>c.dataset.name).join(', ')+(checked.length>5?` +${checked.length-5} more`:'');
   openModal(`
@@ -2441,9 +2441,10 @@ async function openBulkTransferModal(){
       <label>Assign to Loan Officer *</label>
       <select class="select" id="bulkTransferOfficerSel">
         <option value="">— Select Officer —</option>
-        ${officers.map(o=>`<option value="${o.id}">${o.name} (${(o.role||'').replace(/,/g,', ')})</option>`).join('')}
+        ${officers.map(o=>`<option value="${o.id}">${escapeHtml(o.name)} - ${escapeHtml(recordBranchName(o))} (${escapeHtml((o.role||'').replace(/,/g,', '))})</option>`).join('')}
       </select>
     </div>
+    <label style="display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:10px"><input type="checkbox" id="bulkTransferMoveBranch" checked> Move selected clients, active loans, schedules and repayments to the receiving officer's branch.</label>
     <div class="form-group"><label>Reason for Transfer</label><textarea class="textarea" id="bulkTransferReason" placeholder="e.g. Officer reassignment, area reallocation..."></textarea></div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -2455,26 +2456,17 @@ async function openBulkTransferModal(){
 async function confirmBulkTransfer(){
   const officerId=document.getElementById('bulkTransferOfficerSel')?.value;
   const reason=document.getElementById('bulkTransferReason')?.value||'';
+  const moveBranch=!!document.getElementById('bulkTransferMoveBranch')?.checked;
   if(!officerId)return toast('Please select an officer','warning');
   const checked=[...document.querySelectorAll('.client-chk:checked')];
   if(!checked.length)return toast('No clients selected','warning');
   const btn=document.getElementById('btnConfirmBulkTransfer');
   if(btn){btn.disabled=true;btn.textContent='Transferring...';}
   const clientIds=checked.map(c=>c.value);
-  let done=0,failed=0;
-  for(const clientId of clientIds){
-    try{
-      await sb('loans').update({loan_officer_id:officerId}).eq('client_id',clientId).eq('business_id',currentUser.business_id).eq('status','active');
-      await sb('loan_applications').update({loan_officer_id:officerId}).eq('client_id',clientId).eq('business_id',currentUser.business_id);
-      await audit('client_transferred','loan_clients',clientId,null,{new_officer_id:officerId,reason,bulk:true});
-      // Update local cache immediately
-      if(window._clientOffMap) window._clientOffMap[clientId] = officerId;
-      done++;
-    }catch(e){ failed++; console.error('Bulk transfer failed for',clientId,e); }
-  }
+  const result=await transferClientPortfolioRecords({clientIds,officerId,reason,moveBranch,bulk:true});
   closeModal();
-  if(failed>0) toast(`${done} transferred, ${failed} failed. Check console for details.`,'warning');
-  else toast(`${done} client${done>1?'s':''} transferred successfully`,'success');
+  if(result.failed>0) toast(`${result.done} transferred, ${result.failed} failed. Check console for details.`,'warning');
+  else toast(`${result.done} client${result.done>1?'s':''} transferred successfully`,'success');
   renderClients();
 }
 
@@ -2770,7 +2762,7 @@ async function deleteClient(id){
 // ─── TRANSFER CLIENT ───
 async function openTransferClientModal(clientId, clientName){
   if(!hasRole('admin','branch_manager'))return toast('Admin/Manager access required','warning');
-  const{data:staff}=await sb('loan_staff').select('id,name,role,email').eq('business_id',currentUser.business_id).eq('is_active',true);
+  const{data:staff}=await sb('loan_staff').select('id,name,role,email,branch_name').eq('business_id',currentUser.business_id).eq('is_active',true);
   const officers=(staff||[]).filter(s=>{const roles=(s.role||'').split(',');return roles.some(r=>['loan_officer','admin','branch_manager'].includes(r));});
   window._transferClientContext={clientId,clientName};
   openModal(`
@@ -2780,9 +2772,10 @@ async function openTransferClientModal(clientId, clientName){
       <label>Assign to Loan Officer *</label>
       <select class="select" id="transferOfficerSel">
         <option value="">— Select Officer —</option>
-        ${officers.map(o=>`<option value="${o.id}">${o.name} (${(o.role||'').replace(/,/g,', ')})</option>`).join('')}
+        ${officers.map(o=>`<option value="${o.id}">${escapeHtml(o.name)} - ${escapeHtml(recordBranchName(o))} (${escapeHtml((o.role||'').replace(/,/g,', '))})</option>`).join('')}
       </select>
     </div>
+    <label style="display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:10px"><input type="checkbox" id="transferMoveBranch" checked> Move this client, active loans, schedules and repayments to the receiving officer's branch.</label>
     <div class="form-group"><label>Reason for Transfer</label><textarea class="textarea" id="transferReason" placeholder="e.g. Officer reassignment, area change..."></textarea></div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -2797,6 +2790,7 @@ async function confirmTransferClient(){
   if(!clientId)return toast('Client transfer details are missing. Close this window and try again.','error');
   const officerId=document.getElementById('transferOfficerSel')?.value;
   const reason=document.getElementById('transferReason')?.value||'';
+  const moveBranch=!!document.getElementById('transferMoveBranch')?.checked;
   if(!officerId)return toast('Please select an officer','warning');
   const btn=document.getElementById('btnConfirmTransfer');
   if(btn){btn.disabled=true;btn.textContent='Transferring...';}
@@ -2812,15 +2806,8 @@ async function confirmTransferClient(){
     const newOfficerName=(window._staffMap&&officerId)?window._staffMap[officerId]:officerId;
     const transferStamp=`[TRANSFER ${today()}: ${prevOfficerName} → ${newOfficerName}${reason?'. Reason: '+reason:''}]`;
     const updatedNotes=((curClient?.notes||'')+' '+transferStamp).trim();
-    // Update all active loans for this client to new officer
-    const{error:loanUpdateError}=await sb('loans').update({loan_officer_id:officerId}).eq('client_id',clientId).eq('business_id',currentUser.business_id).eq('status','active');
-    if(loanUpdateError)throw loanUpdateError;
-    // Update all applications too
-    const{error:applicationUpdateError}=await sb('loan_applications').update({loan_officer_id:officerId}).eq('client_id',clientId).eq('business_id',currentUser.business_id);
-    if(applicationUpdateError)throw applicationUpdateError;
-    // Keep the client-level assignment and transfer history in sync.
-    const{error:clientUpdateError}=await sb('loan_clients').update({loan_officer_id:officerId,notes:updatedNotes}).eq('id',clientId).eq('business_id',currentUser.business_id);
-    if(clientUpdateError)throw clientUpdateError;
+    const result=await transferClientPortfolioRecords({clientIds:[clientId],officerId,reason,moveBranch,notes:updatedNotes,bulk:false});
+    if(result.failed)throw new Error('Client transfer failed.');
     if(window._clientOffMap)window._clientOffMap[clientId]=officerId;
     await audit('client_transferred','loan_clients',clientId,null,{client_name:clientName,prev_officer_id:prevOfficerId,new_officer_id:officerId,reason});
     toast(`${clientName} transferred successfully`,'success');
@@ -2831,6 +2818,62 @@ async function confirmTransferClient(){
     if(btn){btn.disabled=false;btn.textContent='Confirm Transfer';}
     toast(e.message,'error');
   }
+}
+
+async function transferClientPortfolioRecords({clientIds,officerId,reason='',moveBranch=true,notes=null,bulk=false}){
+  const ids=(clientIds||[]).filter(Boolean);
+  if(!ids.length)return{done:0,failed:0};
+  const{data:officer,error:officerError}=await sb('loan_staff')
+    .select('id,name,branch_name')
+    .eq('id',officerId)
+    .eq('business_id',currentUser.business_id)
+    .single();
+  if(officerError)throw officerError;
+  const targetBranch=recordBranchName(officer);
+  let done=0,failed=0;
+  for(const clientId of ids){
+    try{
+      const clientUpdate={loan_officer_id:officerId};
+      if(notes!==null)clientUpdate.notes=notes;
+      if(moveBranch)clientUpdate.branch_name=targetBranch;
+      const{error:clientUpdateError}=await sb('loan_clients').update(clientUpdate).eq('id',clientId).eq('business_id',currentUser.business_id);
+      if(clientUpdateError)throw clientUpdateError;
+
+      const appUpdate={loan_officer_id:officerId};
+      if(moveBranch)appUpdate.branch_name=targetBranch;
+      const{error:applicationUpdateError}=await sb('loan_applications').update(appUpdate).eq('client_id',clientId).eq('business_id',currentUser.business_id);
+      if(applicationUpdateError)throw applicationUpdateError;
+
+      const loanUpdate={loan_officer_id:officerId};
+      if(moveBranch)loanUpdate.branch_name=targetBranch;
+      const{data:movedLoans,error:loanUpdateError}=await sb('loans')
+        .update(loanUpdate)
+        .eq('client_id',clientId)
+        .eq('business_id',currentUser.business_id)
+        .eq('status','active')
+        .select('id');
+      if(loanUpdateError)throw loanUpdateError;
+
+      if(moveBranch && movedLoans?.length){
+        const loanIds=movedLoans.map(l=>l.id);
+        const moveResults=await Promise.all([
+          sb('loan_schedules').update({branch_name:targetBranch}).eq('business_id',currentUser.business_id).in('loan_id',loanIds),
+          sb('loan_repayments').update({branch_name:targetBranch}).eq('business_id',currentUser.business_id).in('loan_id',loanIds),
+          sb('loan_penalties').update({branch_name:targetBranch}).eq('business_id',currentUser.business_id).in('loan_id',loanIds)
+        ]);
+        const moveError=moveResults.find(r=>r.error)?.error;
+        if(moveError)throw moveError;
+      }
+
+      await audit('portfolio_transferred','loan_clients',clientId,null,{new_officer_id:officerId,new_branch:moveBranch?targetBranch:null,reason,bulk});
+      if(window._clientOffMap) window._clientOffMap[clientId]=officerId;
+      done++;
+    }catch(e){
+      failed++;
+      console.error('Portfolio transfer failed for client',clientId,e);
+    }
+  }
+  return{done,failed,targetBranch};
 }
 
 async function exportClientsExcel(){
@@ -8952,10 +8995,14 @@ async function renderStaff(){
     await loadPataFixBranches();
     const staff=await loadStaffWithAuthStatus();
     main.innerHTML=`
-      <div class="page-header"><h1>Staff Management</h1><button class="btn btn-primary" onclick="openAddStaffModal()">+ Add Staff</button></div>
+      <div class="page-header"><h1>Staff Management</h1><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" onclick="openPortfolioTransferModal()">Transfer Portfolio</button><button class="btn btn-primary" onclick="openAddStaffModal()">+ Add Staff</button></div></div>
       <div class="card" style="margin-bottom:16px">
         <h3 style="font-size:14px;margin-bottom:4px">Staff Login Access</h3>
         <p style="font-size:12px;color:var(--text-secondary)">When an administrator creates a staff account, the staff member can sign in immediately using the email and password set here. If they forget the password, the administrator can set a new one from the action menu.</p>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <h3 style="font-size:14px;margin-bottom:4px">Admin Portfolio Control</h3>
+        <p style="font-size:12px;color:var(--text-secondary)">Use this when an officer leaves, changes branch, or hands over clients. The admin can move selected clients from the Clients tab, move one staff member to another branch, or transfer an officer's whole active portfolio to another officer.</p>
       </div>
       <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email/Phone</th><th>Branch</th><th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th></tr></thead><tbody>
       ${(staff||[]).map(s=>{
@@ -8972,6 +9019,8 @@ async function renderStaff(){
             <button class="row-action-toggle" type="button" aria-label="Staff actions" onclick="toggleRowActionMenu('${menuId}',event)">...</button>
             <div class="row-action-panel">
               <button onclick="closeRowActionMenus();editStaff('${s.id}')">Edit Staff</button>
+              <button onclick="closeRowActionMenus();openMoveStaffBranchModal('${s.id}')">Move Branch</button>
+              <button onclick="closeRowActionMenus();openPortfolioTransferModal('${s.id}')">Transfer Portfolio</button>
               <button class="success" onclick="closeRowActionMenus();openStaffPasswordModal('${s.id}')">Set Password</button>
               ${s.id!==currentUser.id?`<button class="danger" onclick="closeRowActionMenus();deleteStaff('${s.id}')">Delete Staff</button>`:''}
             </div>
@@ -8989,8 +9038,8 @@ async function renderStaff(){
             <tr>
               <td><span class="badge badge-blue">ADMIN</span></td>
               <td>System owner and overall controller</td>
-              <td>Every PataFix page, including Staff, Settings and Audit Log</td>
-              <td>Manage staff and products; approve, reject and disburse loans; record repayments; review all M-Pesa transactions; manage clients, accounting, reports, charges and suspense; delete clients and loans</td>
+              <td>Every PataFix page, including Branches, Staff, Settings and Audit Log</td>
+              <td>Create branches; move staff between branches; transfer full officer portfolios; manage staff and products; approve, reject and disburse loans; record repayments; review all M-Pesa transactions; manage clients, accounting, reports, charges and suspense; delete clients and loans</td>
               <td>No operational restrictions within the business account</td>
             </tr>
             <tr>
@@ -9035,6 +9084,133 @@ async function loadStaffWithAuthStatus(){
   const{data:staff, error:staffError}=await sb('loan_staff').select('*').eq('business_id', currentUser.business_id).order('name');
   if(staffError)throw staffError;
   return (staff||[]).map(row=>({...row,invite_status:row.is_active?'active':'inactive'}));
+}
+
+async function openMoveStaffBranchModal(staffId){
+  if(!hasRole('admin'))return toast('Only admins can move staff between branches.','warning');
+  await loadPataFixBranches();
+  const{data:staff,error}=await sb('loan_staff').select('*').eq('id',staffId).eq('business_id',currentUser.business_id).single();
+  if(error||!staff)return toast(error?.message||'Staff member not found','error');
+  openModal(`
+    <h2>Move Staff Branch</h2>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Move <strong>${escapeHtml(staff.name||'Staff')}</strong> to another branch. This changes their branch access; it does not move their existing clients unless you choose portfolio transfer separately.</p>
+    <div class="form-group"><label>New Branch *</label><select class="select" id="moveStaffBranch">${branchOptionsHtml(staff.branch_name)}</select></div>
+    <label style="display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:10px"><input type="checkbox" id="moveStaffPortfolioToo"> Also move this staff member's active client portfolio to this new branch.</label>
+    <div class="form-group"><label>Reason</label><textarea class="textarea" id="moveStaffReason" placeholder="e.g. Staff transferred to another branch"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="btnMoveStaffBranch" onclick="saveMoveStaffBranch('${staff.id}')">Move Staff</button>
+    </div>
+  `);
+}
+
+async function saveMoveStaffBranch(staffId){
+  const branch=normalizeBranchName(document.getElementById('moveStaffBranch')?.value);
+  const movePortfolio=!!document.getElementById('moveStaffPortfolioToo')?.checked;
+  const reason=(document.getElementById('moveStaffReason')?.value||'').trim();
+  const btn=document.getElementById('btnMoveStaffBranch');if(btn){btn.disabled=true;btn.textContent='Moving...';}
+  try{
+    const{error}=await sb('loan_staff').update({branch_name:branch}).eq('id',staffId).eq('business_id',currentUser.business_id);
+    if(error)throw error;
+    let portfolioMoved=0;
+    if(movePortfolio){
+      const{data:clients,error:clientError}=await sb('loan_clients').select('id').eq('business_id',currentUser.business_id).eq('loan_officer_id',staffId);
+      if(clientError)throw clientError;
+      const clientIds=(clients||[]).map(c=>c.id);
+      if(clientIds.length){
+        const branchMoveResults=await Promise.all([
+          sb('loan_clients').update({branch_name:branch}).eq('business_id',currentUser.business_id).in('id',clientIds),
+          sb('loan_applications').update({branch_name:branch}).eq('business_id',currentUser.business_id).eq('loan_officer_id',staffId),
+          sb('loans').update({branch_name:branch}).eq('business_id',currentUser.business_id).eq('loan_officer_id',staffId).eq('status','active')
+        ]);
+        const branchMoveError=branchMoveResults.find(r=>r.error)?.error;
+        if(branchMoveError)throw branchMoveError;
+        const{data:loanRows}=await sb('loans').select('id').eq('business_id',currentUser.business_id).eq('loan_officer_id',staffId).eq('branch_name',branch).eq('status','active');
+        const loanIds=(loanRows||[]).map(l=>l.id);
+        if(loanIds.length){
+          const childMoveResults=await Promise.all([
+            sb('loan_schedules').update({branch_name:branch}).eq('business_id',currentUser.business_id).in('loan_id',loanIds),
+            sb('loan_repayments').update({branch_name:branch}).eq('business_id',currentUser.business_id).in('loan_id',loanIds),
+            sb('loan_penalties').update({branch_name:branch}).eq('business_id',currentUser.business_id).in('loan_id',loanIds)
+          ]);
+          const childMoveError=childMoveResults.find(r=>r.error)?.error;
+          if(childMoveError)throw childMoveError;
+        }
+        portfolioMoved=clientIds.length;
+      }
+    }
+    await audit('staff_branch_transferred','loan_staff',staffId,null,{branch_name:branch,portfolio_moved:portfolioMoved,reason});
+    toast(movePortfolio?`Staff moved. ${portfolioMoved} client${portfolioMoved===1?'':'s'} also moved to ${branch}.`:`Staff moved to ${branch}.`,'success');
+    closeModal();
+    renderStaff();
+  }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Move Staff';}}
+}
+
+async function openPortfolioTransferModal(fromStaffId=''){
+  if(!hasRole('admin'))return toast('Only admins can transfer full staff portfolios.','warning');
+  await loadPataFixBranches();
+  const[{data:staff,error:staffError},{data:loans,error:loansError}]=await Promise.all([
+    sb('loan_staff').select('id,name,role,branch_name,is_active').eq('business_id',currentUser.business_id).order('name'),
+    sb('loans').select('id,client_id,loan_officer_id,status,outstanding_balance').eq('business_id',currentUser.business_id).eq('status','active')
+  ]);
+  if(staffError)throw staffError;
+  if(loansError)throw loansError;
+  const officers=(staff||[]).filter(s=>String(s.role||'').split(',').some(r=>['loan_officer','branch_manager','admin'].includes(r.trim())) && s.is_active!==false);
+  const counts={};
+  (loans||[]).forEach(l=>{ if(Number(l.outstanding_balance||0)>0.01) counts[l.loan_officer_id]=(counts[l.loan_officer_id]||new Set()).add(l.client_id); });
+  const optionFor=o=>`<option value="${o.id}" ${String(o.id)===String(fromStaffId)?'selected':''}>${escapeHtml(o.name)} - ${escapeHtml(recordBranchName(o))} (${(counts[o.id]?.size||0)} active clients)</option>`;
+  openModal(`
+    <h2>Transfer Officer Portfolio</h2>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Use this when an officer leaves or hands over their portfolio. It moves all active clients and active loans from one officer to another in one action.</p>
+    <div class="form-row">
+      <div class="form-group"><label>From Officer *</label><select class="select" id="portfolioFromOfficer" onchange="previewPortfolioTransfer()"><option value="">Select officer</option>${officers.map(optionFor).join('')}</select></div>
+      <div class="form-group"><label>To Officer *</label><select class="select" id="portfolioToOfficer" onchange="previewPortfolioTransfer()"><option value="">Select receiving officer</option>${officers.map(o=>`<option value="${o.id}">${escapeHtml(o.name)} - ${escapeHtml(recordBranchName(o))}</option>`).join('')}</select></div>
+    </div>
+    <label style="display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:10px"><input type="checkbox" id="portfolioMoveBranch" checked> Move transferred clients and active loan records to the receiving officer's branch.</label>
+    <div class="form-group"><label>Reason *</label><textarea class="textarea" id="portfolioReason" placeholder="e.g. Officer left, leave cover, branch reassignment"></textarea></div>
+    <div id="portfolioTransferPreview" class="card" style="margin-bottom:12px;font-size:12px;color:var(--text-secondary)">Select both officers to preview the transfer.</div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="btnPortfolioTransfer" onclick="savePortfolioTransfer()">Transfer Portfolio</button>
+    </div>
+  `,true);
+  previewPortfolioTransfer();
+}
+
+async function previewPortfolioTransfer(){
+  const fromId=document.getElementById('portfolioFromOfficer')?.value;
+  const toId=document.getElementById('portfolioToOfficer')?.value;
+  const wrap=document.getElementById('portfolioTransferPreview');
+  if(!wrap)return;
+  if(!fromId||!toId){wrap.innerHTML='Select both officers to preview the transfer.';return;}
+  if(fromId===toId){wrap.innerHTML='<span style="color:var(--accent-red)">Choose two different officers.</span>';return;}
+  const{data:loans,error}=await sb('loans').select('client_id,outstanding_balance').eq('business_id',currentUser.business_id).eq('loan_officer_id',fromId).eq('status','active');
+  if(error){wrap.innerHTML=escapeHtml(error.message);return;}
+  const clientIds=[...new Set((loans||[]).filter(l=>Number(l.outstanding_balance||0)>0.01).map(l=>l.client_id))];
+  wrap.innerHTML=`This will transfer <strong>${clientIds.length}</strong> active client${clientIds.length===1?'':'s'} from the selected officer to the receiving officer.`;
+}
+
+async function savePortfolioTransfer(){
+  const fromId=document.getElementById('portfolioFromOfficer')?.value;
+  const toId=document.getElementById('portfolioToOfficer')?.value;
+  const moveBranch=!!document.getElementById('portfolioMoveBranch')?.checked;
+  const reason=(document.getElementById('portfolioReason')?.value||'').trim();
+  if(!fromId||!toId)return toast('Select both officers.','warning');
+  if(fromId===toId)return toast('Select two different officers.','warning');
+  if(reason.length<3)return toast('Enter the reason for this portfolio transfer.','warning');
+  const{data:loans,error}=await sb('loans').select('client_id').eq('business_id',currentUser.business_id).eq('loan_officer_id',fromId).eq('status','active');
+  if(error)return toast(error.message,'error');
+  const clientIds=[...new Set((loans||[]).map(l=>l.client_id).filter(Boolean))];
+  if(!clientIds.length)return toast('No active clients found under the selected officer.','warning');
+  if(!await confirm_(`Transfer ${clientIds.length} active client portfolio record${clientIds.length===1?'':'s'} to the receiving officer?`))return;
+  const btn=document.getElementById('btnPortfolioTransfer');if(btn){btn.disabled=true;btn.textContent='Transferring...';}
+  try{
+    const result=await transferClientPortfolioRecords({clientIds,officerId:toId,reason,moveBranch,bulk:true});
+    await audit('staff_portfolio_transferred','loan_staff',fromId,null,{from_officer_id:fromId,to_officer_id:toId,client_count:result.done,failed:result.failed,target_branch:result.targetBranch,reason});
+    closeModal();
+    toast(`${result.done} client portfolio record${result.done===1?'':'s'} transferred${result.failed?`, ${result.failed} failed`:''}.`,result.failed?'warning':'success');
+    renderStaff();
+  }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Transfer Portfolio';}}
 }
 
 function staffStatusBadge(staff){
