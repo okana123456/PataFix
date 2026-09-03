@@ -988,6 +988,9 @@ function serviceBillingDueDate(){
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(SERVICE_BILLING_LOCK_DAY).padStart(2,'0')}`;
 }
+function serviceBillingDateOnly(value){
+  return value ? String(value).slice(0,10) : '';
+}
 function isBeforeServiceBillingStart(){
   return localISODate() < SERVICE_BILLING_FIRST_REMINDER_DATE;
 }
@@ -1029,24 +1032,47 @@ async function loadServiceBillingStatus({silent=false}={}){
   }
   const day = new Date().getDate();
   try{
-    const { data, error } = await sb('loan_billing_cycles')
-      .select('status,paid_at,paid_until,receipt_number,phone')
-      .eq('business_id', currentUser.business_id)
-      .eq('billing_month', month)
-      .maybeSingle();
+    const [{ data, error }, { data: activePaidRows, error: activePaidError }] = await Promise.all([
+      sb('loan_billing_cycles')
+        .select('status,paid_at,paid_until,receipt_number,phone,billing_month,amount')
+        .eq('business_id', currentUser.business_id)
+        .eq('billing_month', month)
+        .maybeSingle(),
+      sb('loan_billing_cycles')
+        .select('status,paid_at,paid_until,receipt_number,phone,billing_month,amount')
+        .eq('business_id', currentUser.business_id)
+        .eq('status', 'paid')
+        .gte('paid_until', todayStr)
+        .order('paid_until', { ascending:false })
+        .limit(1)
+    ]);
     if(error) throw error;
-    const paid = !!data && data.status === 'paid' && (!data.paid_until || data.paid_until >= todayStr);
+    if(activePaidError) throw activePaidError;
+    const activePaid = (activePaidRows || [])[0] || null;
+    const row = activePaid || data || null;
+    const paid = !!row && row.status === 'paid' && (!row.paid_until || serviceBillingDateOnly(row.paid_until) >= todayStr);
+    if(paid){
+      localStorage.removeItem(serviceBillingMinKey());
+    }
     setServiceBillingState({
-      status: data?.status || 'pending',
+      status: row?.status || 'pending',
       paid,
       locked: !paid && day >= SERVICE_BILLING_LOCK_DAY,
       reminder: !paid && day >= SERVICE_BILLING_REMINDER_DAY,
-      pending: data?.status === 'initiated',
-      cycleMonth: month,
-      row: data || null
+      pending: row?.status === 'initiated',
+      cycleMonth: row?.billing_month || month,
+      row: row || null
     });
   }catch(e){
     loadCachedServiceBilling();
+    const cachedPaidUntil = serviceBillingDateOnly(serviceBilling.row?.paid_until);
+    if(serviceBilling.status === 'paid' && (!cachedPaidUntil || cachedPaidUntil >= todayStr)){
+      serviceBilling.paid = true;
+      serviceBilling.locked = false;
+      serviceBilling.reminder = false;
+      serviceBilling.pending = false;
+      localStorage.removeItem(serviceBillingMinKey());
+    }
     const dayNow = new Date().getDate();
     if(!serviceBilling.paid){
       serviceBilling.locked = dayNow >= SERVICE_BILLING_LOCK_DAY;
