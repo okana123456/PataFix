@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-09-02-capital-assets-v1';
+const APP_VERSION = 'patafix-2026-09-03-branch-assets-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -458,8 +458,8 @@ const $ = (sel) => document.querySelector(sel);
 // Date Filter State
 let appFilters = {
     dashboard: { type: 'this_month', start: '', end: '' },
-    accounting: { type: 'this_month', start: '', end: '' },
-    expenses: { type: 'this_month', start: '', end: '' },
+    accounting: { type: 'this_month', start: '', end: '', branch: 'all' },
+    expenses: { type: 'this_month', start: '', end: '', branch: 'all' },
     repayments: { type: 'this_month', start: '', end: '' }
 };
 
@@ -4252,6 +4252,47 @@ function updateRestructurePreview(){
       <div><strong>${maturity?fmtDate(localISODate(maturity)):'-'}</strong><br><span style="color:var(--text-secondary)">new maturity</span></div>
       <div><strong>${periodRate}%</strong><br><span style="color:var(--text-secondary)">rate per period</span></div>
     </div>`;
+}
+
+function normalizeBranchName(branch){
+    return String(branch||'').trim() || 'Head Office';
+}
+
+function branchOptionsFromRows(rows){
+    return [...new Set((rows||[]).map(r=>normalizeBranchName(r.branch_name)).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+}
+
+function getBranchFilterHtml(section, rows){
+    const f = appFilters[section];
+    if(!f) return '';
+    const branches = branchOptionsFromRows(rows);
+    if(!branches.length) branches.push('Head Office');
+    const current = f.branch || 'all';
+    return `
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:-8px 0 16px">
+        <span style="font-size:12px;color:var(--text-secondary);font-weight:700">Branch</span>
+        <select class="select" style="max-width:220px;padding:8px 12px;font-size:13px" onchange="updateBranchFilter('${section}',this.value)">
+          <option value="all" ${current==='all'?'selected':''}>All Branches</option>
+          ${branches.map(b=>`<option value="${escapeHtml(b)}" ${current===b?'selected':''}>${escapeHtml(b)}</option>`).join('')}
+        </select>
+      </div>`;
+}
+
+function updateBranchFilter(section, branch){
+    if(!appFilters[section]) appFilters[section]={type:'this_month',start:'',end:''};
+    appFilters[section].branch = branch || 'all';
+    if(section==='accounting') renderAccounting();
+    if(section==='expenses') renderExpenses();
+}
+
+function filterByBranch(rows, section){
+    const branch = appFilters[section]?.branch || 'all';
+    if(branch === 'all') return rows || [];
+    return (rows||[]).filter(r=>normalizeBranchName(r.branch_name) === branch);
+}
+
+function currentStaffBranchName(){
+    return normalizeBranchName(currentUser?.branch_name || currentUser?.branch || currentUser?.branch_code || '');
 }
 
 async function saveLoanRestructure(id){
@@ -8169,7 +8210,8 @@ async function renderExpenses(){
     if(expensesR.error)throw new Error(`${expensesR.error.message}. Run patafix-expenses-and-wallet-actions.sql in Supabase first.`);
     const staffMap={};(staffR.data||[]).forEach(s=>staffMap[s.id]=s.name);
     const all=expensesR.data||[];
-    const rows=filterByDate(all,'expense_date',appFilters.expenses);
+    const datedRows=filterByDate(all,'expense_date',appFilters.expenses);
+    const rows=filterByBranch(datedRows,'expenses');
     const pending=rows.filter(e=>e.status==='pending');
     const approved=rows.filter(e=>e.status==='approved');
     const rejected=rows.filter(e=>e.status==='rejected');
@@ -8183,13 +8225,14 @@ async function renderExpenses(){
         <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" onclick="downloadExpensesExcel()">Download Excel</button>${canCreate?'<button class="btn btn-primary btn-sm" onclick="openExpenseModal()">+ Initiate Expense</button>':''}</div>
       </div>
       ${getDateFilterHtml('expenses')}
+      ${getBranchFilterHtml('expenses',datedRows)}
       <div class="kpi-grid" style="margin-bottom:16px">
         <div class="kpi-card"><div class="kpi-label">Pending Approval</div><div class="kpi-value" style="color:var(--accent-yellow)">${pending.length}</div><div class="kpi-sub">${fmtMoney(pending.reduce((s,e)=>s+Number(e.amount||0),0))} awaiting decision</div></div>
         <div class="kpi-card" style="border-top:4px solid var(--accent-red)"><div class="kpi-label">Approved Expenses</div><div class="kpi-value" style="color:var(--accent-red)">${fmtMoney(approvedTotal)}</div><div class="kpi-sub">Included in Profit & Loss</div></div>
         <div class="kpi-card"><div class="kpi-label">Rejected</div><div class="kpi-value">${rejected.length}</div><div class="kpi-sub">Not included in Profit & Loss</div></div>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>Date</th><th>Expense #</th><th>Category</th><th>Description</th><th>Method / Reference</th><th>Requested By</th><th>Amount</th><th>Status</th><th>Approved By</th><th>Actions</th></tr></thead><tbody>
-        ${rows.map(e=>`<tr><td>${fmtDate(e.expense_date)}</td><td><strong>${escapeHtml(e.expense_no||'-')}</strong></td><td><span class="badge badge-blue">${escapeHtml(e.category||'Other')}</span></td><td>${escapeHtml(e.description||'-')}${e.rejection_reason?`<br><span style="font-size:11px;color:var(--accent-red)">Reason: ${escapeHtml(e.rejection_reason)}</span>`:''}</td><td>${escapeHtml((e.payment_method||'cash').toUpperCase())}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(e.payment_reference||'-')}</span></td><td>${escapeHtml(staffMap[e.requested_by]||'Unknown')}</td><td><strong>${fmtMoney(e.amount||0)}</strong></td><td>${statusBadge(e.status)}</td><td>${escapeHtml(staffMap[e.approved_by]||'-')}${e.approved_at?`<br><span style="font-size:11px;color:var(--text-secondary)">${fmtDateTime(e.approved_at)}</span>`:''}</td><td>${e.status==='pending'&&canApprove?`<div style="display:flex;gap:4px"><button class="btn btn-success btn-sm" onclick="approveExpense('${e.id}')">Approve</button><button class="btn btn-danger btn-sm" onclick="openRejectExpenseModal('${e.id}','${escapeHtml(e.expense_no||'Expense')}')">Reject</button></div>`:'-'}</td></tr>`).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);padding:20px">No expenses found for this period</td></tr>'}
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>Branch</th><th>Expense #</th><th>Category</th><th>Description</th><th>Method / Reference</th><th>Requested By</th><th>Amount</th><th>Status</th><th>Approved By</th><th>Actions</th></tr></thead><tbody>
+        ${rows.map(e=>`<tr><td>${fmtDate(e.expense_date)}</td><td>${escapeHtml(normalizeBranchName(e.branch_name))}</td><td><strong>${escapeHtml(e.expense_no||'-')}</strong></td><td><span class="badge badge-blue">${escapeHtml(e.category||'Other')}</span></td><td>${escapeHtml(e.description||'-')}${e.rejection_reason?`<br><span style="font-size:11px;color:var(--accent-red)">Reason: ${escapeHtml(e.rejection_reason)}</span>`:''}</td><td>${escapeHtml((e.payment_method||'cash').toUpperCase())}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(e.payment_reference||'-')}</span></td><td>${escapeHtml(staffMap[e.requested_by]||'Unknown')}</td><td><strong>${fmtMoney(e.amount||0)}</strong></td><td>${statusBadge(e.status)}</td><td>${escapeHtml(staffMap[e.approved_by]||'-')}${e.approved_at?`<br><span style="font-size:11px;color:var(--text-secondary)">${fmtDateTime(e.approved_at)}</span>`:''}</td><td>${e.status==='pending'&&canApprove?`<div style="display:flex;gap:4px"><button class="btn btn-success btn-sm" onclick="approveExpense('${e.id}')">Approve</button><button class="btn btn-danger btn-sm" onclick="openRejectExpenseModal('${e.id}','${escapeHtml(e.expense_no||'Expense')}')">Reject</button></div>`:'-'}</td></tr>`).join('')||'<tr><td colspan="11" style="text-align:center;color:var(--text-secondary);padding:20px">No expenses found for this period</td></tr>'}
       </tbody></table></div>`;
   }catch(e){main.innerHTML=`<div class="empty-state"><p>${escapeHtml(e.message)}</p></div>`;toast(e.message,'error');}
 }
@@ -8199,6 +8242,7 @@ function openExpenseModal(){
   openModal(`
     <h2>Initiate Operational Expense</h2>
     <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">The expense remains pending and does not affect Profit & Loss until approved.</p>
+    <div class="form-group"><label>Branch *</label><input class="input" id="expenseBranch" value="${escapeHtml(currentStaffBranchName())}" placeholder="e.g. Kilifi Branch"></div>
     <div class="form-row"><div class="form-group"><label>Expense Date *</label><input class="input" id="expenseDate" type="date" value="${today()}"></div><div class="form-group"><label>Category *</label><select class="select" id="expenseCategory">${PATAFIX_EXPENSE_CATEGORIES.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select></div></div>
     <div class="form-group"><label>Description *</label><textarea class="input" id="expenseDescription" rows="3" placeholder="What was purchased or paid for, and why?"></textarea></div>
     <div class="form-row"><div class="form-group"><label>Amount (KES) *</label><input class="input" id="expenseAmount" type="number" min="0.01" step="0.01"></div><div class="form-group"><label>Payment Method *</label><select class="select" id="expenseMethod"><option value="cash">Cash</option><option value="mpesa">M-Pesa</option><option value="bank">Bank</option><option value="imprest">Imprest</option></select></div></div>
@@ -8215,7 +8259,7 @@ async function saveExpense(){
   try{
     const{data,error}=await supabaseClient.rpc('patafix_create_expense',{
       p_expense_date:document.getElementById('expenseDate')?.value||today(),p_category:document.getElementById('expenseCategory')?.value||'Other',
-      p_description:description,p_amount:amount,p_payment_method:document.getElementById('expenseMethod')?.value||'cash',p_payment_reference:(document.getElementById('expenseReference')?.value||'').trim()||null
+      p_description:description,p_amount:amount,p_payment_method:document.getElementById('expenseMethod')?.value||'cash',p_payment_reference:(document.getElementById('expenseReference')?.value||'').trim()||null,p_branch_name:normalizeBranchName(document.getElementById('expenseBranch')?.value)
     });
     if(error)throw error;toast(`Expense ${data?.expense_no||''} submitted for approval.`,'success');closeModal();renderExpenses();
   }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Submit for Approval';}}
@@ -8241,8 +8285,8 @@ async function rejectExpense(id){
 function downloadExpensesExcel(){
   if(typeof XLSX==='undefined')return toast('Excel library is still loading. Please retry.','warning');
   const data=window._patafixExpenses;if(!data?.rows?.length)return toast('No expenses to export for this period.','info');
-  const aoa=[['PataFix - Operational Expenses'],['Generated',new Date().toLocaleString('en-KE')],[],['Date','Expense No','Category','Description','Method','Reference','Requested By','Amount (KES)','Status','Approved By','Rejection Reason'],...data.rows.map(e=>[e.expense_date,e.expense_no,e.category,e.description,e.payment_method,e.payment_reference||'',data.staffMap[e.requested_by]||'',Number(e.amount||0),e.status,data.staffMap[e.approved_by]||'',e.rejection_reason||''])];
-  const ws=XLSX.utils.aoa_to_sheet(aoa);ws['!cols']=[{wch:13},{wch:20},{wch:24},{wch:45},{wch:12},{wch:22},{wch:24},{wch:16},{wch:13},{wch:24},{wch:35}];ws['!autofilter']={ref:`A4:K${4+data.rows.length}`};
+  const aoa=[['PataFix - Operational Expenses'],['Generated',new Date().toLocaleString('en-KE')],['Branch Filter',appFilters.expenses?.branch||'all'],[],['Date','Branch','Expense No','Category','Description','Method','Reference','Requested By','Amount (KES)','Status','Approved By','Rejection Reason'],...data.rows.map(e=>[e.expense_date,normalizeBranchName(e.branch_name),e.expense_no,e.category,e.description,e.payment_method,e.payment_reference||'',data.staffMap[e.requested_by]||'',Number(e.amount||0),e.status,data.staffMap[e.approved_by]||'',e.rejection_reason||''])];
+  const ws=XLSX.utils.aoa_to_sheet(aoa);ws['!cols']=[{wch:13},{wch:18},{wch:20},{wch:24},{wch:45},{wch:12},{wch:22},{wch:24},{wch:16},{wch:13},{wch:24},{wch:35}];ws['!autofilter']={ref:`A5:L${5+data.rows.length}`};
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Expenses');XLSX.writeFile(wb,`PataFix_Expenses_${today()}.xlsx`);toast('Expenses exported.','success');
 }
 
@@ -8292,7 +8336,7 @@ async function renderAccounting() {
       sb('loan_clients').select('id,created_at,notes').eq('business_id',biz).order('created_at', {ascending: false}).limit(100000),
       sb('loan_penalties').select('id,loan_id,penalty_amount,date_charged,is_waived').eq('business_id',biz).eq('is_waived',false).gte('date_charged',qStart).lte('date_charged',qEndFull).order('date_charged', {ascending: false}).limit(100000),
       sb('loans').select('id,client_id,principal_amount,total_interest,total_payable,disbursement_date,loan_officer_id').eq('business_id',biz).order('disbursement_date', {ascending: true}).limit(100000),
-      sb('patafix_expenses').select('id,expense_no,expense_date,category,description,amount,payment_method,payment_reference').eq('business_id',biz).eq('status','approved').gte('expense_date',qStart).lte('expense_date',qEnd).order('expense_date',{ascending:false}).limit(100000),
+      sb('patafix_expenses').select('*').eq('business_id',biz).eq('status','approved').gte('expense_date',qStart).lte('expense_date',qEnd).order('expense_date',{ascending:false}).limit(100000),
       sb('journal_entries').select('id,date,ref,description,debit,credit,amount').eq('business_id',biz).gte('date',qStart).lte('date',qEnd).order('date',{ascending:false}).limit(100000),
       sb('patafix_company_assets').select('*').eq('business_id',biz).order('asset_date',{ascending:false}).limit(100000)
     ]);
@@ -8308,9 +8352,13 @@ async function renderAccounting() {
     const allReps = repR.data||[];
     const allClients = cliR.data||[];
     const allPenalties = penR.data||[];
-    const approvedExpenses = expensesR.data||[];
+    const approvedExpensesAll = expensesR.data||[];
     const journalEntries = journalR.data||[];
-    const allCompanyAssets = assetsR.data||[];
+    const allCompanyAssetsAll = assetsR.data||[];
+    const branchSourceRows=[...approvedExpensesAll,...allCompanyAssetsAll];
+    const approvedExpenses = filterByBranch(approvedExpensesAll,'accounting');
+    const allCompanyAssets = filterByBranch(allCompanyAssetsAll,'accounting');
+    window._patafixAccountingAssets = allCompanyAssetsAll;
 
     // Build loan lookup map for fast interest ratio calculation
     const loanMap = {};
@@ -8384,7 +8432,7 @@ async function renderAccounting() {
     const netOwnerCapital=capitalCredits-capitalDebits;
     const periodAssetPurchases=allCompanyAssets.filter(a=>dateInSelectedRange(a.asset_date)).reduce((s,a)=>s+Number(a.purchase_amount||0),0);
     const activeAssetValue=allCompanyAssets.filter(a=>a.status==='active').reduce((s,a)=>s+Number(a.current_value||a.purchase_amount||0),0);
-    const assetRowsHtml=allCompanyAssets.slice(0,8).map(a=>`<tr><td>${fmtDate(a.asset_date)}</td><td><strong>${escapeHtml(a.asset_no||'-')}</strong></td><td>${escapeHtml(a.asset_name||'-')}</td><td><span class="badge badge-blue">${escapeHtml(a.category||'Other')}</span></td><td>${fmtMoney(a.purchase_amount)}</td><td>${fmtMoney(a.current_value)}</td><td>${escapeHtml((a.payment_method||'cash').toUpperCase())}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(a.payment_reference||'-')}</span></td><td>${statusBadge(a.status)}</td></tr>`).join('');
+    const assetRowsHtml=allCompanyAssets.map(a=>`<tr><td>${fmtDate(a.asset_date)}</td><td>${escapeHtml(normalizeBranchName(a.branch_name))}</td><td><strong>${escapeHtml(a.asset_no||'-')}</strong></td><td>${escapeHtml(a.asset_name||'-')}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(a.model_type||a.description||'-')}</span></td><td><span class="badge badge-blue">${escapeHtml(a.category||'Other')}</span></td><td>${fmtMoney(a.purchase_amount)}</td><td>${fmtMoney(a.current_value)}</td><td>${escapeHtml((a.payment_method||'cash').toUpperCase())}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(a.payment_reference||'-')}</span></td><td>${statusBadge(a.status)}</td><td><button class="btn btn-outline btn-sm" onclick="openCompanyAssetModal('${a.id}')">View / Edit</button></td></tr>`).join('');
 
     // Officer Revenue Breakdown — detailed by reg, proc, interest per officer
     const clientToOfficer = {};
@@ -8454,6 +8502,7 @@ async function renderAccounting() {
           </div>
         </div>
         ${getDateFilterHtml('accounting')}
+        ${getBranchFilterHtml('accounting',branchSourceRows)}
       </div>
       
       <div class="kpi-grid">
@@ -8500,15 +8549,15 @@ async function renderAccounting() {
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px"><h3 style="font-size:16px;color:var(--accent-purple)">Company Assets Account</h3><button class="btn btn-outline btn-sm" onclick="openCompanyAssetModal()">Add Asset</button></div>
           <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px"><span>Active Asset Value</span><strong style="color:var(--accent-purple)">${fmtMoney(activeAssetValue)}</strong></div>
           <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px"><span>Asset Purchases in Period</span><strong>${fmtMoney(periodAssetPurchases)}</strong></div>
-          <p style="font-size:11px;color:var(--text-secondary);margin-top:8px">Use this for company assets such as laptops, furniture, phones, equipment or office fittings.</p>
+          <p style="font-size:11px;color:var(--text-secondary);margin-top:8px">Use this for company assets such as motorbikes, vehicles, furniture, fittings, electronics, printers and office equipment.</p>
         </div>
       </div>
 
       <div class="card" style="margin-top:24px">
         <h3 style="font-size:16px;margin-bottom:8px;color:var(--accent-purple)">Company Asset Register</h3>
         <div class="table-wrap"><table>
-          <thead><tr><th>Date</th><th>Asset #</th><th>Asset Name</th><th>Category</th><th>Purchase Amount</th><th>Current Value</th><th>Method / Ref</th><th>Status</th></tr></thead>
-          <tbody>${assetRowsHtml||'<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:18px">No company assets recorded yet</td></tr>'}</tbody>
+          <thead><tr><th>Date</th><th>Branch</th><th>Asset #</th><th>Asset / Model</th><th>Category</th><th>Initial Price</th><th>Current Value</th><th>Method / Ref</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>${assetRowsHtml||'<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);padding:18px">No company assets recorded yet</td></tr>'}</tbody>
         </table></div>
       </div>
 
@@ -8596,34 +8645,41 @@ async function saveOwnerCapital(){
   }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Save Capital';}}
 }
 
-function openCompanyAssetModal(){
+function openCompanyAssetModal(assetId=null){
   if(!hasFinancePermission('view_accounting',['admin']))return toast('Accounting access is restricted.','warning');
-  const categories=['Computer & IT','Furniture','Office Equipment','Motor Vehicle','Phone','Fixtures & Fittings','Other'];
+  const categories=['Motorbikes','Vehicles','Furniture & Fittings','Electronic Devices','Printers','Computer & IT','Office Equipment','Phones','Other'];
+  const asset=(window._patafixAccountingAssets||[]).find(a=>String(a.id)===String(assetId))||null;
+  const selected=(value,option)=>String(value||'')===String(option)?'selected':'';
   openModal(`
-    <h2>Record Company Asset</h2>
+    <h2>${asset?'View / Amend Company Asset':'Record Company Asset'}</h2>
     <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Use this for company-owned assets. This posts to the Company Assets account, not to operating expenses.</p>
+    <div class="form-group"><label>Branch *</label><input class="input" id="assetBranch" value="${escapeHtml(normalizeBranchName(asset?.branch_name || currentStaffBranchName()))}" placeholder="e.g. Kilifi Branch"></div>
     <div class="form-row">
-      <div class="form-group"><label>Date *</label><input class="input" id="assetDate" type="date" value="${today()}"></div>
-      <div class="form-group"><label>Category *</label><select class="select" id="assetCategory">${categories.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select></div>
-    </div>
-    <div class="form-group"><label>Asset Name *</label><input class="input" id="assetName" placeholder="e.g. Office laptop"></div>
-    <div class="form-group"><label>Description</label><textarea class="textarea" id="assetDescription" placeholder="Optional asset details"></textarea></div>
-    <div class="form-row">
-      <div class="form-group"><label>Purchase Amount (KES) *</label><input class="input" id="assetPurchaseAmount" type="number" min="0.01" step="0.01"></div>
-      <div class="form-group"><label>Current Value (KES)</label><input class="input" id="assetCurrentValue" type="number" min="0" step="0.01" placeholder="Leave blank if same as purchase"></div>
+      <div class="form-group"><label>Date of Purchase *</label><input class="input" id="assetDate" type="date" value="${asset?.asset_date||today()}"></div>
+      <div class="form-group"><label>Category *</label><select class="select" id="assetCategory">${categories.map(c=>`<option value="${escapeHtml(c)}" ${selected(asset?.category,c)}>${escapeHtml(c)}</option>`).join('')}</select></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label>Payment Method *</label><select class="select" id="assetMethod"><option value="cash">Cash</option><option value="mpesa">M-Pesa</option><option value="bank">Bank</option><option value="imprest">Imprest</option></select></div>
-      <div class="form-group"><label>Reference</label><input class="input" id="assetReference" placeholder="Receipt, M-Pesa code or bank ref"></div>
+      <div class="form-group"><label>Asset Name *</label><input class="input" id="assetName" value="${escapeHtml(asset?.asset_name||'')}" placeholder="e.g. Office motorbike"></div>
+      <div class="form-group"><label>Model / Type</label><input class="input" id="assetModelType" value="${escapeHtml(asset?.model_type||'')}" placeholder="e.g. Boxer BM150, HP LaserJet"></div>
     </div>
+    <div class="form-group"><label>Description</label><textarea class="textarea" id="assetDescription" placeholder="Optional asset details">${escapeHtml(asset?.description||'')}</textarea></div>
+    <div class="form-row">
+      <div class="form-group"><label>Initial Price (KES) *</label><input class="input" id="assetPurchaseAmount" type="number" min="0.01" step="0.01" value="${asset?.purchase_amount||''}"></div>
+      <div class="form-group"><label>Current Value (KES)</label><input class="input" id="assetCurrentValue" type="number" min="0" step="0.01" value="${asset?.current_value||''}" placeholder="Leave blank if same as initial price"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Payment Method *</label><select class="select" id="assetMethod"><option value="cash" ${selected(asset?.payment_method,'cash')}>Cash</option><option value="mpesa" ${selected(asset?.payment_method,'mpesa')}>M-Pesa</option><option value="bank" ${selected(asset?.payment_method,'bank')}>Bank</option><option value="imprest" ${selected(asset?.payment_method,'imprest')}>Imprest</option></select></div>
+      <div class="form-group"><label>Reference</label><input class="input" id="assetReference" value="${escapeHtml(asset?.payment_reference||'')}" placeholder="Receipt, M-Pesa code or bank ref"></div>
+    </div>
+    ${asset?`<div class="form-group"><label>Status</label><select class="select" id="assetStatus"><option value="active" ${selected(asset.status,'active')}>Active</option><option value="disposed" ${selected(asset.status,'disposed')}>Disposed</option><option value="written_off" ${selected(asset.status,'written_off')}>Written Off</option></select></div>`:''}
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" id="btnSaveAsset" onclick="saveCompanyAsset()">Save Asset</button>
+      <button class="btn btn-primary" id="btnSaveAsset" onclick="saveCompanyAsset(${asset?`'${asset.id}'`:'null'})">${asset?'Save Changes':'Save Asset'}</button>
     </div>
   `);
 }
 
-async function saveCompanyAsset(){
+async function saveCompanyAsset(assetId=null){
   const amount=Number(document.getElementById('assetPurchaseAmount')?.value||0);
   const currentValueRaw=(document.getElementById('assetCurrentValue')?.value||'').trim();
   const assetName=(document.getElementById('assetName')?.value||'').trim();
@@ -8631,18 +8687,26 @@ async function saveCompanyAsset(){
   if(amount<=0)return toast('Enter a valid purchase amount.','warning');
   const btn=document.getElementById('btnSaveAsset');if(btn){btn.disabled=true;btn.textContent='Saving...';}
   try{
-    const{error}=await supabaseClient.rpc('patafix_record_company_asset',{
+    const payload={
       p_asset_date:document.getElementById('assetDate')?.value||today(),
       p_category:document.getElementById('assetCategory')?.value||'Other',
       p_asset_name:assetName,
       p_description:(document.getElementById('assetDescription')?.value||'').trim()||null,
+      p_model_type:(document.getElementById('assetModelType')?.value||'').trim()||null,
+      p_branch_name:normalizeBranchName(document.getElementById('assetBranch')?.value),
       p_purchase_amount:amount,
       p_current_value:currentValueRaw?Number(currentValueRaw):null,
       p_payment_method:document.getElementById('assetMethod')?.value||'cash',
       p_reference:(document.getElementById('assetReference')?.value||'').trim()||null
-    });
+    };
+    const rpcName=assetId?'patafix_update_company_asset':'patafix_record_company_asset';
+    if(assetId){
+      payload.p_asset_id=assetId;
+      payload.p_status=document.getElementById('assetStatus')?.value||'active';
+    }
+    const{error}=await supabaseClient.rpc(rpcName,payload);
     if(error)throw error;
-    toast('Company asset recorded in accounting.','success');
+    toast(assetId?'Company asset updated.':'Company asset recorded in accounting.','success');
     closeModal();
     renderAccounting();
   }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Save Asset';}}

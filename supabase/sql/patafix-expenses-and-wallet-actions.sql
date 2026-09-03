@@ -76,10 +76,15 @@ create table if not exists public.patafix_expenses (
   unique (business_id, expense_no)
 );
 
+alter table public.patafix_expenses
+  add column if not exists branch_name text not null default 'Head Office';
+
 create index if not exists patafix_expenses_business_date_idx
   on public.patafix_expenses (business_id, expense_date desc, created_at desc);
 create index if not exists patafix_expenses_status_idx
   on public.patafix_expenses (business_id, status, expense_date desc);
+create index if not exists patafix_expenses_branch_idx
+  on public.patafix_expenses (business_id, branch_name, status, expense_date desc);
 
 drop trigger if exists patafix_expenses_updated_at on public.patafix_expenses;
 create trigger patafix_expenses_updated_at before update on public.patafix_expenses
@@ -100,13 +105,16 @@ revoke insert, update, delete on public.patafix_expenses from anon, authenticate
 grant select on public.patafix_expenses to authenticated;
 grant all on public.patafix_expenses to service_role;
 
+drop function if exists public.patafix_create_expense(date,text,text,numeric,text,text);
+
 create or replace function public.patafix_create_expense(
   p_expense_date date,
   p_category text,
   p_description text,
   p_amount numeric,
   p_payment_method text default 'cash',
-  p_payment_reference text default null
+  p_payment_reference text default null,
+  p_branch_name text default 'Head Office'
 )
 returns jsonb
 language plpgsql
@@ -134,10 +142,10 @@ begin
 
   v_expense_no := 'EXP-' || to_char(coalesce(p_expense_date,current_date),'YYYYMMDD') || '-' || upper(substr(replace(gen_random_uuid()::text,'-',''),1,6));
   insert into public.patafix_expenses (
-    business_id,expense_no,expense_date,category,description,amount,
+    business_id,expense_no,expense_date,branch_name,category,description,amount,
     payment_method,payment_reference,requested_by
   ) values (
-    v_business_id,v_expense_no,coalesce(p_expense_date,current_date),trim(p_category),trim(p_description),round(p_amount,2),
+    v_business_id,v_expense_no,coalesce(p_expense_date,current_date),coalesce(nullif(trim(p_branch_name),''),'Head Office'),trim(p_category),trim(p_description),round(p_amount,2),
     lower(coalesce(nullif(trim(p_payment_method),''),'cash')),nullif(trim(p_payment_reference),''),v_staff_id
   ) returning * into v_expense;
 
@@ -197,7 +205,7 @@ begin
     insert into public.journal_entries (business_id,date,ref,description,debit,credit,amount,synced)
     values (
       v_business_id,v_expense.expense_date,coalesce(v_expense.payment_reference,v_expense.expense_no),
-      'Approved expense - '||v_expense.category||' | '||v_expense.description,
+      'Approved expense - '||v_expense.category||' | '||v_expense.description||' | Branch: '||coalesce(v_expense.branch_name,'Head Office'),
       'Expense - '||v_expense.category,v_cash_account,v_expense.amount,false
     );
   end if;
@@ -507,12 +515,12 @@ begin
 end;
 $$;
 
-revoke all on function public.patafix_create_expense(date,text,text,numeric,text,text) from public;
+revoke all on function public.patafix_create_expense(date,text,text,numeric,text,text,text) from public;
 revoke all on function public.patafix_decide_expense(uuid,text,text) from public;
 revoke all on function public.patafix_refund_client_charge(uuid,numeric,date,text,text,text) from public;
 revoke all on function public.patafix_transfer_client_charge(uuid,uuid,numeric,date,text,text) from public;
 revoke all on function public.patafix_transfer_charge_to_loan(uuid,uuid,numeric,date,text,text) from public;
-grant execute on function public.patafix_create_expense(date,text,text,numeric,text,text) to authenticated,service_role;
+grant execute on function public.patafix_create_expense(date,text,text,numeric,text,text,text) to authenticated,service_role;
 grant execute on function public.patafix_decide_expense(uuid,text,text) to authenticated,service_role;
 grant execute on function public.patafix_refund_client_charge(uuid,numeric,date,text,text,text) to authenticated,service_role;
 grant execute on function public.patafix_transfer_client_charge(uuid,uuid,numeric,date,text,text) to authenticated,service_role;

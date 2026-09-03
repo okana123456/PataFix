@@ -27,8 +27,15 @@ create table if not exists public.patafix_company_assets (
   unique (business_id, asset_no)
 );
 
+alter table public.patafix_company_assets
+  add column if not exists branch_name text not null default 'Head Office',
+  add column if not exists model_type text,
+  add column if not exists asset_identifier text;
+
 create index if not exists patafix_company_assets_business_date_idx
   on public.patafix_company_assets (business_id, asset_date desc, created_at desc);
+create index if not exists patafix_company_assets_branch_idx
+  on public.patafix_company_assets (business_id, branch_name, status);
 
 drop trigger if exists patafix_company_assets_updated_at on public.patafix_company_assets;
 create trigger patafix_company_assets_updated_at before update on public.patafix_company_assets
@@ -82,6 +89,8 @@ as $$
   end;
 $$;
 
+drop function if exists public.patafix_record_company_asset(date,text,text,text,numeric,numeric,text,text);
+
 create or replace function public.patafix_record_owner_capital(
   p_capital_date date,
   p_amount numeric,
@@ -127,7 +136,9 @@ create or replace function public.patafix_record_company_asset(
   p_category text,
   p_asset_name text,
   p_description text,
-  p_purchase_amount numeric,
+  p_model_type text default null,
+  p_branch_name text default 'Head Office',
+  p_purchase_amount numeric default null,
   p_current_value numeric default null,
   p_payment_method text default 'cash',
   p_reference text default null
@@ -155,11 +166,11 @@ begin
   v_ref := coalesce(nullif(trim(p_reference),''),v_asset_no);
 
   insert into public.patafix_company_assets (
-    business_id,asset_no,asset_date,category,asset_name,description,purchase_amount,current_value,
+    business_id,asset_no,asset_date,branch_name,category,asset_name,description,model_type,purchase_amount,current_value,
     payment_method,payment_reference,recorded_by
   ) values (
-    v_business_id,v_asset_no,coalesce(p_asset_date,current_date),coalesce(nullif(trim(p_category),''),'Other'),
-    trim(p_asset_name),nullif(trim(coalesce(p_description,'')),''),round(p_purchase_amount,2),
+    v_business_id,v_asset_no,coalesce(p_asset_date,current_date),coalesce(nullif(trim(p_branch_name),''),'Head Office'),coalesce(nullif(trim(p_category),''),'Other'),
+    trim(p_asset_name),nullif(trim(coalesce(p_description,'')),''),nullif(trim(coalesce(p_model_type,'')),''),round(p_purchase_amount,2),
     round(coalesce(p_current_value,p_purchase_amount),2),lower(coalesce(nullif(trim(p_payment_method),''),'cash')),
     nullif(trim(coalesce(p_reference,'')),''),v_staff_id
   ) returning * into v_asset;
@@ -167,12 +178,100 @@ begin
   insert into public.journal_entries (business_id,date,ref,description,debit,credit,amount,synced)
   values (
     v_business_id,v_asset.asset_date,v_ref,
-    'Company asset purchase - '||v_asset.asset_name||coalesce(' | '||nullif(v_asset.description,''),''),
+    'Company asset purchase - '||v_asset.asset_name||coalesce(' | '||nullif(v_asset.model_type,''),'')||coalesce(' | '||nullif(v_asset.description,''),'')||' | Branch: '||v_asset.branch_name,
     'Company Assets',public.patafix_payment_account(p_payment_method),v_asset.purchase_amount,false
   );
 
   insert into public.loan_audit_log (business_id,user_id,action,table_name,record_id,new_value)
   values (v_business_id,v_staff_id,'company_asset_recorded','patafix_company_assets',v_asset.id::text,to_jsonb(v_asset));
+
+  return to_jsonb(v_asset);
+end;
+$$;
+
+create or replace function public.patafix_update_company_asset(
+  p_asset_id uuid,
+  p_asset_date date,
+  p_category text,
+  p_asset_name text,
+  p_description text,
+  p_model_type text default null,
+  p_branch_name text default 'Head Office',
+  p_purchase_amount numeric default null,
+  p_current_value numeric default null,
+  p_payment_method text default 'cash',
+  p_reference text default null,
+  p_status text default 'active'
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_business_id text := public.current_patafix_business_id();
+  v_staff_id uuid := public.patafix_current_staff_id();
+  v_old public.patafix_company_assets%rowtype;
+  v_asset public.patafix_company_assets%rowtype;
+  v_old_ref text;
+  v_new_ref text;
+begin
+  if v_business_id is null or v_staff_id is null then raise exception 'No active PataFix staff account was found.'; end if;
+  if not public.patafix_has_permission('view_accounting',array['admin']::text[]) then
+    raise exception 'You do not have permission to amend company assets.';
+  end if;
+  if coalesce(p_purchase_amount,0) <= 0 then raise exception 'Asset amount must be greater than zero.'; end if;
+  if nullif(trim(coalesce(p_asset_name,'')),'') is null then raise exception 'Enter the asset name.'; end if;
+  if lower(coalesce(nullif(trim(p_status),''),'active')) not in ('active','disposed','written_off') then
+    raise exception 'Unsupported asset status.';
+  end if;
+
+  select * into v_old from public.patafix_company_assets
+  where id = p_asset_id and business_id = v_business_id
+  for update;
+  if v_old.id is null then raise exception 'Company asset was not found.'; end if;
+
+  update public.patafix_company_assets
+  set asset_date=coalesce(p_asset_date,current_date),
+      branch_name=coalesce(nullif(trim(p_branch_name),''),'Head Office'),
+      category=coalesce(nullif(trim(p_category),''),'Other'),
+      asset_name=trim(p_asset_name),
+      description=nullif(trim(coalesce(p_description,'')),''),
+      model_type=nullif(trim(coalesce(p_model_type,'')),''),
+      purchase_amount=round(p_purchase_amount,2),
+      current_value=round(coalesce(p_current_value,p_purchase_amount),2),
+      payment_method=lower(coalesce(nullif(trim(p_payment_method),''),'cash')),
+      payment_reference=nullif(trim(coalesce(p_reference,'')),''),
+      status=lower(coalesce(nullif(trim(p_status),''),'active'))
+  where id = p_asset_id and business_id = v_business_id
+  returning * into v_asset;
+
+  v_old_ref := coalesce(v_old.payment_reference,v_old.asset_no);
+  v_new_ref := coalesce(v_asset.payment_reference,v_asset.asset_no);
+
+  update public.journal_entries
+  set date=v_asset.asset_date,
+      ref=v_new_ref,
+      description='Company asset purchase - '||v_asset.asset_name||coalesce(' | '||nullif(v_asset.model_type,''),'')||coalesce(' | '||nullif(v_asset.description,''),'')||' | Branch: '||v_asset.branch_name,
+      debit='Company Assets',
+      credit=public.patafix_payment_account(v_asset.payment_method),
+      amount=v_asset.purchase_amount,
+      synced=false
+  where business_id = v_business_id
+    and ref = v_old_ref
+    and debit = 'Company Assets';
+
+  if not found then
+    insert into public.journal_entries (business_id,date,ref,description,debit,credit,amount,synced)
+    values (
+      v_business_id,v_asset.asset_date,v_new_ref,
+      'Company asset purchase - '||v_asset.asset_name||coalesce(' | '||nullif(v_asset.model_type,''),'')||coalesce(' | '||nullif(v_asset.description,''),'')||' | Branch: '||v_asset.branch_name,
+      'Company Assets',public.patafix_payment_account(v_asset.payment_method),v_asset.purchase_amount,false
+    );
+  end if;
+
+  insert into public.loan_audit_log (business_id,user_id,action,table_name,record_id,old_value,new_value)
+  values (v_business_id,v_staff_id,'company_asset_updated','patafix_company_assets',v_asset.id::text,to_jsonb(v_old),to_jsonb(v_asset));
 
   return to_jsonb(v_asset);
 end;
@@ -284,13 +383,15 @@ $$;
 revoke all on function public.patafix_current_staff_id() from public;
 revoke all on function public.patafix_payment_account(text) from public;
 revoke all on function public.patafix_record_owner_capital(date,numeric,text,text,text) from public;
-revoke all on function public.patafix_record_company_asset(date,text,text,text,numeric,numeric,text,text) from public;
+revoke all on function public.patafix_record_company_asset(date,text,text,text,text,text,numeric,numeric,text,text) from public;
+revoke all on function public.patafix_update_company_asset(uuid,date,text,text,text,text,text,numeric,numeric,text,text,text) from public;
 revoke all on function public.patafix_move_suspense_to_capital(uuid,text,numeric,text,text) from public;
 
 grant execute on function public.patafix_current_staff_id() to authenticated, service_role;
 grant execute on function public.patafix_payment_account(text) to authenticated, service_role;
 grant execute on function public.patafix_record_owner_capital(date,numeric,text,text,text) to authenticated, service_role;
-grant execute on function public.patafix_record_company_asset(date,text,text,text,numeric,numeric,text,text) to authenticated, service_role;
+grant execute on function public.patafix_record_company_asset(date,text,text,text,text,text,numeric,numeric,text,text) to authenticated, service_role;
+grant execute on function public.patafix_update_company_asset(uuid,date,text,text,text,text,text,numeric,numeric,text,text,text) to authenticated, service_role;
 grant execute on function public.patafix_move_suspense_to_capital(uuid,text,numeric,text,text) to authenticated, service_role;
 
 select 'PataFix capital and assets accounting ready' as result;
