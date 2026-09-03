@@ -105,17 +105,35 @@ where c.loan_officer_id = s.id
   and (c.branch_name is null or c.branch_name = 'Head Office');
 
 update public.loan_applications a
-set branch_name = coalesce(nullif(trim(c.branch_name),''), nullif(trim(s.branch_name),''), 'Head Office')
+set branch_name = coalesce(
+  nullif(trim(c.branch_name),''),
+  (
+    select nullif(trim(s.branch_name),'')
+    from public.loan_staff s
+    where s.id = a.loan_officer_id
+      and s.business_id = a.business_id
+    limit 1
+  ),
+  'Head Office'
+)
 from public.loan_clients c
-left join public.loan_staff s on s.id = a.loan_officer_id and s.business_id = a.business_id
 where a.client_id = c.id
   and a.business_id = c.business_id
   and (a.branch_name is null or a.branch_name = 'Head Office');
 
 update public.loans l
-set branch_name = coalesce(nullif(trim(c.branch_name),''), nullif(trim(s.branch_name),''), 'Head Office')
+set branch_name = coalesce(
+  nullif(trim(c.branch_name),''),
+  (
+    select nullif(trim(s.branch_name),'')
+    from public.loan_staff s
+    where s.id = l.loan_officer_id
+      and s.business_id = l.business_id
+    limit 1
+  ),
+  'Head Office'
+)
 from public.loan_clients c
-left join public.loan_staff s on s.id = l.loan_officer_id and s.business_id = l.business_id
 where l.client_id = c.id
   and l.business_id = c.business_id
   and (l.branch_name is null or l.branch_name = 'Head Office');
