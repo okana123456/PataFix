@@ -1606,11 +1606,11 @@ function showApp(){
   buildSidebar();
   
   // Restore previous section or navigate to default view based on roles
-  // Strict role-based defaults: officers → officer_performance, cashiers → repayments
+  // Strict role-based defaults: officers → My Dashboard, cashiers → repayments
   const savedSection = localStorage.getItem('patafix_last_section');
   const onlyOfficer = hasRole('loan_officer') && !hasRole('admin','branch_manager','cashier');
   const onlyCashier = hasRole('cashier') && !hasRole('admin','branch_manager','loan_officer');
-  if (savedSection && !(onlyOfficer && savedSection==='dashboard') && !(onlyCashier && savedSection==='dashboard')) {
+  if (savedSection && !(onlyOfficer && ['dashboard','officer_performance'].includes(savedSection)) && !(onlyCashier && savedSection==='dashboard')) {
       navigateTo(savedSection);
   } else {
       if(hasRole('admin', 'branch_manager')) navigateTo('dashboard');
@@ -1645,7 +1645,7 @@ function buildSidebar() {
     
     { isHeader: true, label: 'Management', roles: ['admin', 'branch_manager'] },
     { id: 'reports', icon: '+', label: 'Reports', roles: ['admin', 'branch_manager'] },
-    { id: 'officer_performance', icon: '★', label: 'Officer Performance', roles: ['admin', 'branch_manager', 'loan_officer'] },
+    { id: 'officer_performance', icon: '★', label: 'Officer Performance', roles: ['admin', 'branch_manager'] },
     { id: 'officer_dashboard', icon: '◉', label: 'My Dashboard', roles: ['loan_officer'] },
     { id: 'accounting', icon: '%', label: 'Accounting & P&L', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier'], permission: 'view_accounting', permissionDefaults: ['admin'] },
     { id: 'expenses', icon: 'E', label: 'Expenses', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier'], permission: 'view_expenses', permissionDefaults: ['admin'] },
@@ -1788,6 +1788,10 @@ supabaseClient.auth.onAuthStateChange((event,session)=>{
 
 // ═══ NAVIGATION ═══
 function navigateTo(section){
+  if(section==='officer_performance'&&!hasRole('admin','branch_manager')){
+    toast('Officer Performance is restricted to admin and branch managers.','warning');
+    section=hasRole('loan_officer')?'officer_dashboard':'calculator';
+  }
   if(section==='accounting'&&!hasFinancePermission('view_accounting',['admin'])){
     toast('Accounting access is restricted for this account.','warning');
     section=hasRole('branch_manager')?'dashboard':'calculator';
@@ -8081,7 +8085,7 @@ function downloadOfficerPerformanceReport(){
     const disbMonth = oLoansMonth.reduce((s,l)=>s+Number(l.principal_amount||0),0);
     return {
       'Officer':           o.name||o.email,
-      'Branch':            'PataFix001',
+      'Branch':            recordBranchName(o),
       'Active Clients':    oActive.length,
       'ACC Arrears (Clients)': clientsInArr,
       'BQ %':              Number(bq.toFixed(2)),
@@ -8147,6 +8151,10 @@ function downloadOfficerPerformanceReport(){
 
 async function renderOfficerPerformance(){
   const main=$('#mainContent');
+  if(!hasRole('admin','branch_manager')){
+    main.innerHTML='<div class="empty-state"><h3>Restricted</h3><p>Officer Performance is available only to admins and branch managers. Use My Dashboard for your assigned portfolio.</p></div>';
+    return;
+  }
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
   try{
     const[loansR,repsR,appsR,staffR,schedulesR,todaySchedulesR]=await Promise.all([
@@ -8154,7 +8162,7 @@ async function renderOfficerPerformance(){
       sb('loan_repayments').select('*').eq('business_id',currentUser.business_id),
       sb('loan_applications').select('*').eq('business_id',currentUser.business_id),
       // FIX #13: loan_staff column is `name`, not `full_name`
-      sb('loan_staff').select('id,name,email,role').eq('business_id',currentUser.business_id),
+      sb('loan_staff').select('id,name,email,role,branch_name').eq('business_id',currentUser.business_id),
       sb('loan_schedules').select('loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status').eq('business_id',currentUser.business_id).lt('due_date', localISODate()).limit(100000),
       sb('loan_schedules').select('loan_id,due_date,total_due,total_paid,status').eq('business_id',currentUser.business_id).eq('due_date',localISODate()).limit(100000)
     ]);
@@ -8253,7 +8261,7 @@ async function renderOfficerPerformance(){
               const parColor=par<=5?'var(--accent-green)':par<=15?'var(--accent-yellow)':'var(--accent-red)';
               return '<tr>' +
                 '<td><strong>'+( o.name||o.email)+'</strong></td>' +
-                '<td><span class="badge badge-gray">PataFix001</span></td>' +
+                '<td><span class="badge badge-gray">'+escapeHtml(recordBranchName(o))+'</span></td>' +
                 '<td><strong style="color:var(--accent-green)">'+oActive.length+'</strong></td>' +
                 '<td><span class="badge badge-red">'+clientsInArr+'</span></td>' +
                 '<td><strong style="color:'+bqColor+'">'+bq.toFixed(1)+'%</strong></td>' +
@@ -9052,7 +9060,7 @@ async function renderStaff(){
             <tr>
               <td><span class="badge badge-blue">LOAN OFFICER</span></td>
               <td>Client onboarding and assigned loan portfolio</td>
-              <td>Own Clients, own Applications, own Active Loans, own Repayments, own Arrears, Officer Performance, My Dashboard and Calculator</td>
+              <td>Own Clients, own Applications, own Active Loans, own Repayments, own Arrears, My Dashboard and Calculator</td>
               <td>Add clients and applications; edit own pending applications; view assigned loans and repayment history; record arrears follow-ups</td>
               <td>Cannot approve, reject or disburse loans; cannot record repayments; cannot access accounting, reports, charges, suspense, staff or settings</td>
             </tr>
@@ -9093,9 +9101,9 @@ async function openMoveStaffBranchModal(staffId){
   if(error||!staff)return toast(error?.message||'Staff member not found','error');
   openModal(`
     <h2>Move Staff Branch</h2>
-    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Move <strong>${escapeHtml(staff.name||'Staff')}</strong> to another branch. This changes their branch access; it does not move their existing clients unless you choose portfolio transfer separately.</p>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Move <strong>${escapeHtml(staff.name||'Staff')}</strong> to another branch. By default, their active portfolio also moves to keep clients, loans and reports aligned with the staff branch.</p>
     <div class="form-group"><label>New Branch *</label><select class="select" id="moveStaffBranch">${branchOptionsHtml(staff.branch_name)}</select></div>
-    <label style="display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:10px"><input type="checkbox" id="moveStaffPortfolioToo"> Also move this staff member's active client portfolio to this new branch.</label>
+    <label style="display:flex;align-items:flex-start;gap:7px;font-size:12px;color:var(--text-secondary);margin-bottom:10px"><input type="checkbox" id="moveStaffPortfolioToo" checked> Also move this staff member's active client portfolio to this new branch.</label>
     <div class="form-group"><label>Reason</label><textarea class="textarea" id="moveStaffReason" placeholder="e.g. Staff transferred to another branch"></textarea></div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
