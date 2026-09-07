@@ -8392,6 +8392,7 @@ async function renderExpenses(){
     window._patafixExpenses={all,rows,staffMap};
     const canCreate=hasFinancePermission('create_expenses',['admin','branch_manager']);
     const canApprove=hasFinancePermission('approve_expenses',['admin']);
+    const canManage=canApprove;
     main.innerHTML=`
       <div class="page-header" style="align-items:flex-start">
         <div><h1>Operational Expenses</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Initiate, approve and track operating costs used in the Profit & Loss statement.</p></div>
@@ -8405,7 +8406,10 @@ async function renderExpenses(){
         <div class="kpi-card"><div class="kpi-label">Rejected</div><div class="kpi-value">${rejected.length}</div><div class="kpi-sub">Not included in Profit & Loss</div></div>
       </div>
       <div class="table-wrap"><table><thead><tr><th>Date</th><th>Branch</th><th>Expense #</th><th>Category</th><th>Description</th><th>Method / Reference</th><th>Requested By</th><th>Amount</th><th>Status</th><th>Approved By</th><th>Actions</th></tr></thead><tbody>
-        ${rows.map(e=>`<tr><td>${fmtDate(e.expense_date)}</td><td>${escapeHtml(normalizeBranchName(e.branch_name))}</td><td><strong>${escapeHtml(e.expense_no||'-')}</strong></td><td><span class="badge badge-blue">${escapeHtml(e.category||'Other')}</span></td><td>${escapeHtml(e.description||'-')}${e.rejection_reason?`<br><span style="font-size:11px;color:var(--accent-red)">Reason: ${escapeHtml(e.rejection_reason)}</span>`:''}</td><td>${escapeHtml((e.payment_method||'cash').toUpperCase())}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(e.payment_reference||'-')}</span></td><td>${escapeHtml(staffMap[e.requested_by]||'Unknown')}</td><td><strong>${fmtMoney(e.amount||0)}</strong></td><td>${statusBadge(e.status)}</td><td>${escapeHtml(staffMap[e.approved_by]||'-')}${e.approved_at?`<br><span style="font-size:11px;color:var(--text-secondary)">${fmtDateTime(e.approved_at)}</span>`:''}</td><td>${e.status==='pending'&&canApprove?`<div style="display:flex;gap:4px"><button class="btn btn-success btn-sm" onclick="approveExpense('${e.id}')">Approve</button><button class="btn btn-danger btn-sm" onclick="openRejectExpenseModal('${e.id}','${escapeHtml(e.expense_no||'Expense')}')">Reject</button></div>`:'-'}</td></tr>`).join('')||'<tr><td colspan="11" style="text-align:center;color:var(--text-secondary);padding:20px">No expenses found for this period</td></tr>'}
+        ${rows.map(e=>{
+          const menuId=`expenseActions_${String(e.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
+          return `<tr><td>${fmtDate(e.expense_date)}</td><td>${escapeHtml(normalizeBranchName(e.branch_name))}</td><td><strong>${escapeHtml(e.expense_no||'-')}</strong></td><td><span class="badge badge-blue">${escapeHtml(e.category||'Other')}</span></td><td>${escapeHtml(e.description||'-')}${e.rejection_reason?`<br><span style="font-size:11px;color:var(--accent-red)">Reason: ${escapeHtml(e.rejection_reason)}</span>`:''}</td><td>${escapeHtml((e.payment_method||'cash').toUpperCase())}<br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(e.payment_reference||'-')}</span></td><td>${escapeHtml(staffMap[e.requested_by]||'Unknown')}</td><td><strong>${fmtMoney(e.amount||0)}</strong></td><td>${statusBadge(e.status)}</td><td>${escapeHtml(staffMap[e.approved_by]||'-')}${e.approved_at?`<br><span style="font-size:11px;color:var(--text-secondary)">${fmtDateTime(e.approved_at)}</span>`:''}</td><td>${canManage?`<div class="row-action-menu" id="${menuId}"><button class="row-action-toggle" type="button" aria-label="Expense actions" onclick="toggleRowActionMenu('${menuId}',event)">...</button><div class="row-action-panel">${e.status==='pending'?`<button class="success" type="button" onclick="closeRowActionMenus();approveExpense('${e.id}')">Approve Expense</button><button class="danger" type="button" onclick="closeRowActionMenus();openRejectExpenseModal('${e.id}','${escapeHtml(e.expense_no||'Expense')}')">Reject Expense</button>`:''}<button type="button" onclick="closeRowActionMenus();openEditExpenseModal('${e.id}')">Edit Expense</button><button class="danger" type="button" onclick="closeRowActionMenus();deleteExpense('${e.id}')">Delete Expense</button></div></div>`:'-'}</td></tr>`;
+        }).join('')||'<tr><td colspan="11" style="text-align:center;color:var(--text-secondary);padding:20px">No expenses found for this period</td></tr>'}
       </tbody></table></div>`;
   }catch(e){main.innerHTML=`<div class="empty-state"><p>${escapeHtml(e.message)}</p></div>`;toast(e.message,'error');}
 }
@@ -8436,6 +8440,53 @@ async function saveExpense(){
     });
     if(error)throw error;toast(`Expense ${data?.expense_no||''} submitted for approval.`,'success');closeModal();renderExpenses();
   }catch(e){toast(e.message,'error');if(btn){btn.disabled=false;btn.textContent='Submit for Approval';}}
+}
+
+function openEditExpenseModal(id){
+  if(!hasFinancePermission('approve_expenses',['admin']))return toast('Only an administrator can edit expenses.','warning');
+  const expense=(window._patafixExpenses?.all||[]).find(e=>String(e.id)===String(id));
+  if(!expense)return toast('Expense record was not found. Refresh the page and try again.','error');
+  openModal(`
+    <h2>Edit ${escapeHtml(expense.expense_no||'Expense')}</h2>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Changes to an approved expense will also update Accounting and Profit &amp; Loss.</p>
+    <div class="form-group"><label>Branch *</label><select class="select" id="expenseEditBranch">${branchOptionsHtml(normalizeBranchName(expense.branch_name))}</select></div>
+    <div class="form-row"><div class="form-group"><label>Expense Date *</label><input class="input" id="expenseEditDate" type="date" value="${escapeHtml(expense.expense_date||today())}"></div><div class="form-group"><label>Category *</label><select class="select" id="expenseEditCategory">${PATAFIX_EXPENSE_CATEGORIES.map(c=>`<option value="${escapeHtml(c)}" ${c===(expense.category||'Other')?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select></div></div>
+    <div class="form-group"><label>Description *</label><textarea class="input" id="expenseEditDescription" rows="3">${escapeHtml(expense.description||'')}</textarea></div>
+    <div class="form-row"><div class="form-group"><label>Amount (KES) *</label><input class="input" id="expenseEditAmount" type="number" min="0.01" step="0.01" value="${Number(expense.amount||0).toFixed(2)}"></div><div class="form-group"><label>Payment Method *</label><select class="select" id="expenseEditMethod">${['cash','mpesa','bank','imprest'].map(method=>`<option value="${method}" ${method===(expense.payment_method||'cash')?'selected':''}>${method==='mpesa'?'M-Pesa':method.charAt(0).toUpperCase()+method.slice(1)}</option>`).join('')}</select></div></div>
+    <div class="form-group"><label>Receipt / Payment Reference</label><input class="input" id="expenseEditReference" value="${escapeHtml(expense.payment_reference||'')}" placeholder="Receipt, M-Pesa code, voucher or bank reference"></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnUpdateExpense" onclick="updateExpense('${expense.id}')">Save Changes</button></div>`);
+}
+
+async function updateExpense(id){
+  if(!hasFinancePermission('approve_expenses',['admin']))return toast('Only an administrator can edit expenses.','warning');
+  const amount=Number(document.getElementById('expenseEditAmount')?.value||0);
+  const description=(document.getElementById('expenseEditDescription')?.value||'').trim();
+  if(amount<=0)return toast('Enter a valid expense amount.','warning');
+  if(!description)return toast('Enter the expense description.','warning');
+  const btn=document.getElementById('btnUpdateExpense');if(btn){btn.disabled=true;btn.textContent='Saving...';}
+  try{
+    const{error}=await supabaseClient.rpc('patafix_update_expense',{
+      p_expense_id:id,p_expense_date:document.getElementById('expenseEditDate')?.value||today(),
+      p_category:document.getElementById('expenseEditCategory')?.value||'Other',p_description:description,p_amount:amount,
+      p_payment_method:document.getElementById('expenseEditMethod')?.value||'cash',p_payment_reference:(document.getElementById('expenseEditReference')?.value||'').trim()||null,
+      p_branch_name:normalizeBranchName(document.getElementById('expenseEditBranch')?.value)
+    });
+    if(error)throw error;
+    toast('Expense and accounting records updated.','success');closeModal();renderExpenses();
+  }catch(e){toast(`${e.message}. Run patafix-expense-edit-delete.sql in Supabase if this is the first deployment.`,'error');if(btn){btn.disabled=false;btn.textContent='Save Changes';}}
+}
+
+async function deleteExpense(id){
+  if(!hasFinancePermission('approve_expenses',['admin']))return toast('Only an administrator can delete expenses.','warning');
+  const expense=(window._patafixExpenses?.all||[]).find(e=>String(e.id)===String(id));
+  if(!expense)return toast('Expense record was not found. Refresh the page and try again.','error');
+  const approvedNote=expense.status==='approved'?' This will also remove it from Accounting and Profit & Loss.':'';
+  if(!await confirm_(`Delete ${expense.expense_no||'this expense'} permanently?${approvedNote}`))return;
+  try{
+    const{error}=await supabaseClient.rpc('patafix_delete_expense',{p_expense_id:id});
+    if(error)throw error;
+    toast('Expense removed from the register and accounting.','success');renderExpenses();
+  }catch(e){toast(`${e.message}. Run patafix-expense-edit-delete.sql in Supabase if this is the first deployment.`,'error');}
 }
 
 async function approveExpense(id){
