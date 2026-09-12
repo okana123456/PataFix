@@ -9797,12 +9797,9 @@ async function renderAuditLog(page=1){
 }
 
 // ═══ ROLLOVER PENALTY (ONE-TIME PER LOAN) ═══
-// Policy: a loan can be "rolled over" at most ONCE in its lifetime. The first
-// time a loan goes past maturity + grace period, a one-time rollover penalty
-// is charged and the balance is restructured into a fresh 3-week schedule.
-// After that single rollover, if the client falls behind again, the system
-// must NOT roll over a second time — instead the entire outstanding balance
-// simply becomes arrears (no new schedules, no second penalty).
+// Policy: a loan can receive at most one maturity penalty. Original due dates
+// must remain intact so arrears age never restarts or develops schedule gaps.
+// Only the explicit Restructure action may replace an unpaid schedule.
 async function applyRolloverPenalties(){
   if(!currentUser?.business_id) return;
   try{
@@ -9841,14 +9838,23 @@ async function applyRolloverPenalties(){
           .limit(1);
         const alreadyRolledOver = !!(priorRollovers && priorRollovers.length);
 
+        const{data:unpaidSchedules,error:scheduleError}=await sb('loan_schedules')
+          .select('id,due_date,total_due,total_paid,penalty_charged,status')
+          .eq('loan_id',loan.id)
+          .in('status',['pending','overdue','partial'])
+          .order('due_date',{ascending:false});
+        if(scheduleError)throw scheduleError;
+        const penaltySchedule=(unpaidSchedules||[])[0];
+        if(!penaltySchedule)throw new Error(`Loan ${loan.loan_no||loan.id} has no unpaid schedule.`);
+        const oldestUnpaid=(unpaidSchedules||[]).reduce((oldest,s)=>!oldest||s.due_date<oldest?s.due_date:oldest,null);
+        const oldestDate=oldestUnpaid?parseLocalDate(oldestUnpaid):maturity;
+        const scheduleOverdueDays=Math.max(0,Math.floor((todayDate-oldestDate)/(1000*60*60*24)));
+
         if(alreadyRolledOver){
-          // ── ONE-TIME ROLLOVER ALREADY USED ───────────────────────────
-          // Do NOT charge another penalty and do NOT create new schedules.
-          // The entire outstanding balance becomes arrears from here on.
-          const newOverdueDays = Math.max(0, pastMaturity);
+          // The one-time penalty already exists. Keep aging the original debt.
           await sb('loans').update({
             arrears_amount: Number(loan.outstanding_balance) || 0,
-            overdue_days: newOverdueDays
+            overdue_days: scheduleOverdueDays
           }).eq('id',loan.id);
           continue;
         }
@@ -9859,8 +9865,7 @@ async function applyRolloverPenalties(){
         if(existingToday?.length) continue;
 
         const penaltyAmt = Number(loan.outstanding_balance) * penaltyRate;
-
-        await sb('loan_penalties').insert({
+        const{error:penaltyInsertError}=await sb('loan_penalties').insert({
           loan_id:loan.id,
           business_id:currentUser.business_id,
           penalty_amount:penaltyAmt,
@@ -9868,51 +9873,26 @@ async function applyRolloverPenalties(){
           date_charged:todayStr,
           is_waived:false
         });
+        if(penaltyInsertError)throw penaltyInsertError;
 
-        // Permanently delete old unpaid schedules so we don't double-bill them
-        await sb('loan_schedules')
-          .delete()
-          .eq('loan_id', loan.id)
-          .in('status', ['pending', 'overdue', 'partial']);
-
-        // Update total_payable to keep the accounting math completely balanced
+        // Add the penalty to the final unpaid installment. This preserves every
+        // contractual due date while keeping schedule and loan balances aligned.
         const newBalance = Number(loan.outstanding_balance) + penaltyAmt;
         const newTotalPayable = Number(loan.total_payable || 0) + penaltyAmt;
-        const newWeeklyInstallment = newBalance / 3;
+        const{error:penaltyScheduleError}=await sb('loan_schedules').update({
+          penalty_charged:Number((Number(penaltySchedule.penalty_charged||0)+penaltyAmt).toFixed(2)),
+          total_due:Number((Number(penaltySchedule.total_due||0)+penaltyAmt).toFixed(2)),
+          status:penaltySchedule.due_date<todayStr?'overdue':penaltySchedule.status
+        }).eq('id',penaltySchedule.id);
+        if(penaltyScheduleError)throw penaltyScheduleError;
 
-        let newMaturity = new Date();
-        newMaturity.setDate(newMaturity.getDate() + 21);
-
-        await sb('loans').update({
+        const{error:loanUpdateError}=await sb('loans').update({
           outstanding_balance: newBalance,
           total_payable: newTotalPayable,
-          arrears_amount: 0,
-          overdue_days: 0,
-          maturity_date: localISODate(newMaturity)
+          arrears_amount: newBalance,
+          overdue_days: scheduleOverdueDays
         }).eq('id',loan.id);
-
-        const newSchedules = [];
-        // Use a timestamp-based installment number to ensure they are always unique
-        const baseInstallmentNo = Math.floor(Date.now() / 1000000);
-
-        for(let i=1; i<=3; i++){
-          let due = new Date();
-          due.setDate(due.getDate() + (i*7));
-          newSchedules.push({
-            loan_id: loan.id,
-            business_id: currentUser.business_id,
-            installment_no: baseInstallmentNo + i,
-            due_date: localISODate(due),
-            principal_due: newWeeklyInstallment,
-            interest_due: 0,
-            total_due: newWeeklyInstallment,
-            principal_paid: 0,
-            interest_paid: 0,
-            total_paid: 0,
-            status: 'pending'
-          });
-        }
-        await sb('loan_schedules').insert(newSchedules);
+        if(loanUpdateError)throw loanUpdateError;
       }
     }
   }catch(e){console.error('Rollover penalty error:',e)}
