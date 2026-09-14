@@ -1216,7 +1216,7 @@ const PATAFIX_PRODUCTS = [
   {key:'kuza',name:'KUZA',min:11000,max:15000,registrationFee:300,monthlyRate:20,feeType:'percent',feeValue:5,paymentEveryWeeks:1,description:'11k-15k | registration fee KES 300 | interest 20% p.m | processing fee 5% of principal | weekly payments'},
   {key:'nawiri',name:'NAWIRI',min:16000,max:20000,registrationFee:400,monthlyRate:20,feeType:'percent',feeValue:6,paymentEveryWeeks:1,description:'16k-20k | registration fee KES 400 | interest 20% p.m | application fee 6% of principal | weekly payments'},
   {key:'komanza',name:'KOMANZA',min:16000,max:40000,registrationFee:400,monthlyRate:18,feeType:'percent',feeValue:10,paymentEveryWeeks:2,repaymentFrequency:'biweekly',description:'16k-40k | registration fee KES 400 | interest 18% p.m | application fee 10% of principal | biweekly payments'},
-  {key:'uwezo-loan',name:'UWEZO LOAN',min:15000,max:50000,registrationFee:500,monthlyRate:12,feeType:'percent',feeValue:8,feeName:'Processing fee',paymentEveryWeeks:4,repaymentFrequency:'monthly',termUnit:'months',minTermWeeks:12,maxTermWeeks:12,description:'KES 15,000-50,000 | 3 months | interest 12% p.m | processing fee 8% of principal | registration fee KES 500 | monthly payments'}
+  {key:'uwezo-loan',name:'UWEZO LOAN',min:15000,max:50000,registrationFee:500,monthlyRate:12,feeType:'percent',feeValue:8,feeName:'Processing fee',paymentEveryWeeks:4,repaymentFrequency:'monthly',termUnit:'months',minTermWeeks:4,maxTermWeeks:12,description:'KES 15,000-50,000 | choose 1, 2 or 3 months | interest 12% p.m | processing fee 8% of principal | registration fee KES 500 | monthly payments'}
 ];
 
 function cachedPataFixProductByName(name){
@@ -3128,11 +3128,12 @@ function openAddProductModal(prod){
 
 async function saveProduct(id){
   const termUnit=$('#pTermUnit').value;const feeType=$('#pFeeType').value;const feeValue=Number($('#pFee').value);
+  const minTermInput=Number($('#pMinTerm').value);const maxTermInput=Number($('#pMaxTerm').value);
   const termFactor=termUnit==='months'?4:1;
-  const rec={name:$('#pName').value.trim(),description:$('#pDesc').value.trim(),min_amount:Number($('#pMinAmt').value),max_amount:Number($('#pMaxAmt').value),interest_rate:Number($('#pRate').value),interest_type:$('#pIntType').value,interest_period:$('#pIntPeriod').value,min_term_weeks:Number($('#pMinTerm').value)*termFactor,max_term_weeks:Number($('#pMaxTerm').value)*termFactor,processing_fee_pct:feeType==='percent'?feeValue:0,processing_fee_type:feeType,processing_fee_value:feeValue,registration_fee:Number($('#pRegistrationFee').value),repayment_frequency:$('#pFrequency').value,term_unit:termUnit,late_penalty_pct:Number($('#pPenalty').value),grace_period_days:Number($('#pGrace').value),requires_guarantor:$('#pGuarantor').checked,is_active:$('#pActive').value==='true',business_id:currentUser?.business_id};
+  const rec={name:$('#pName').value.trim(),description:$('#pDesc').value.trim(),min_amount:Number($('#pMinAmt').value),max_amount:Number($('#pMaxAmt').value),interest_rate:Number($('#pRate').value),interest_type:$('#pIntType').value,interest_period:$('#pIntPeriod').value,min_term_weeks:minTermInput*termFactor,max_term_weeks:maxTermInput*termFactor,processing_fee_pct:feeType==='percent'?feeValue:0,processing_fee_type:feeType,processing_fee_value:feeValue,registration_fee:Number($('#pRegistrationFee').value),repayment_frequency:$('#pFrequency').value,term_unit:termUnit,late_penalty_pct:Number($('#pPenalty').value),grace_period_days:Number($('#pGrace').value),requires_guarantor:$('#pGuarantor').checked,is_active:$('#pActive').value==='true',business_id:currentUser?.business_id};
   if(!rec.name)return toast('Product name is required','warning');
   if(!(rec.min_amount>0)||rec.max_amount<rec.min_amount)return toast('Enter a valid minimum and maximum loan amount','warning');
-  if(!Number.isInteger(rec.min_term_weeks)||rec.min_term_weeks<1||!Number.isInteger(rec.max_term_weeks)||rec.max_term_weeks<rec.min_term_weeks)return toast('Enter a valid term range','warning');
+  if(!Number.isInteger(minTermInput)||minTermInput<1||!Number.isInteger(maxTermInput)||maxTermInput<minTermInput)return toast(`Enter whole ${termUnit} for the term range`,'warning');
   if(rec.interest_rate<0||feeValue<0||rec.registration_fee<0||rec.late_penalty_pct<0)return toast('Rates and fees cannot be negative','warning');
   try{
     const result=id?await sb('loan_products').update(rec).eq('id',id).eq('business_id',currentUser.business_id):await sb('loan_products').insert(rec);
@@ -3361,8 +3362,9 @@ function appStepNav(dir){
     const product=selectedAppProduct();
     if(!validPataFixProduct(product))return toast('Selected product is incomplete. Ask an admin to finish its setup first.','warning');
     if(amt<product.min||amt>product.max)return toast(`${product.name} allows ${fmtMoney(product.min)} to ${fmtMoney(product.max)}`,'warning');
+    const displayedTerm=Number($('#appTerm').value);
+    if(!Number.isInteger(displayedTerm)||displayedTerm<1)return toast(`Select a whole number of ${product.termUnit==='months'?'months':'weeks'}`,'warning');
     const termWeeks=selectedAppTermWeeks();
-    if(!termWeeks)return toast(`Enter loan term in ${product.termUnit==='months'?'months':'weeks'}`,'warning');
     if(termWeeks<(product.minTermWeeks||1)||termWeeks>(product.maxTermWeeks||52))return toast(`Term must be ${patafixTermLabel(product,product.minTermWeeks||1)} to ${patafixTermLabel(product,product.maxTermWeeks||52)}`,'warning');
     buildAppReview();
   }
@@ -3473,6 +3475,7 @@ async function submitApplication(){
       return;
     }
     const selectedClient=(window._appClients||[]).find(c=>c.id===selectedClientId);
+    if(!Number.isInteger(Number($('#appTerm').value))||Number($('#appTerm').value)<1)return toast('Select a whole loan term','warning');
     const termWeeks=selectedAppTermWeeks();
     if(termWeeks<productRule.minTermWeeks||termWeeks>productRule.maxTermWeeks)return toast('The selected term is outside this product settings','warning');
     const rec={application_no:appNo,client_id:selectedClientId,product_id:productId,applied_amount:amt,applied_term_weeks:termWeeks,purpose:$('#appPurpose').value,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRel')?.value||'').trim(),status:'submitted',application_date:appDate,created_at:dateInputToLocalDateTime(appDate),loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType,branch_name:recordBranchName(selectedClient)};

@@ -38,8 +38,8 @@ insert into public.loan_products (
 )
 select
   s.business_id,'UWEZO LOAN',
-  'KES 15,000-50,000 | 3 months | 12% monthly | 8% processing fee | KES 500 registration fee | monthly payments',
-  15000,50000,12,'flat','monthly',12,12,8,'percent',8,500,'monthly','months',5,3,true,true
+  'KES 15,000-50,000 | choose 1, 2 or 3 months | 12% monthly | 8% processing fee | KES 500 registration fee | monthly payments',
+  15000,50000,12,'flat','monthly',4,12,8,'percent',8,500,'monthly','months',5,3,true,true
 from public.loan_settings s
 where not exists (
   select 1 from public.loan_products p
@@ -47,10 +47,10 @@ where not exists (
 );
 
 update public.loan_products
-set description='KES 15,000-50,000 | 3 months | 12% monthly | 8% processing fee | KES 500 registration fee | monthly payments',
+set description='KES 15,000-50,000 | choose 1, 2 or 3 months | 12% monthly | 8% processing fee | KES 500 registration fee | monthly payments',
     min_amount=15000,max_amount=50000,interest_rate=12,
     interest_type='flat',interest_period='monthly',
-    min_term_weeks=12,max_term_weeks=12,
+    min_term_weeks=4,max_term_weeks=12,
     processing_fee_pct=8,processing_fee_type='percent',processing_fee_value=8,
     registration_fee=500,repayment_frequency='monthly',term_unit='months',
     is_active=true,updated_at=now()
