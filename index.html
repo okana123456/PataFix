@@ -465,7 +465,7 @@ let appFilters = {
     disbursement: { type: 'all', start: '', end: '', branch: 'all' },
     loans: { type: 'all', start: '', end: '', branch: 'all' },
     repayments: { type: 'this_month', start: '', end: '', branch: 'all' },
-    overdue: { type: 'all', start: '', end: '', branch: 'all' },
+    overdue: { type: 'all', start: '', end: '', branch: 'all', officer: 'all', minDays: 1 },
     reports: { type: 'this_month', start: '', end: '', branch: 'all' },
     officer_performance: { type: 'this_month', start: '', end: '', branch: 'all' },
     charges_excess: { type: 'all', start: '', end: '', branch: 'all' },
@@ -1215,18 +1215,48 @@ const PATAFIX_PRODUCTS = [
   {key:'inua-biz',name:'INUA BIZ',min:5000,max:10000,registrationFee:200,monthlyRate:20,feeType:'flat',feeValue:500,paymentEveryWeeks:1,description:'5k-10k | registration fee KES 200 | interest 20% p.m | processing fee KES 500 flat | weekly payments'},
   {key:'kuza',name:'KUZA',min:11000,max:15000,registrationFee:300,monthlyRate:20,feeType:'percent',feeValue:5,paymentEveryWeeks:1,description:'11k-15k | registration fee KES 300 | interest 20% p.m | processing fee 5% of principal | weekly payments'},
   {key:'nawiri',name:'NAWIRI',min:16000,max:20000,registrationFee:400,monthlyRate:20,feeType:'percent',feeValue:6,paymentEveryWeeks:1,description:'16k-20k | registration fee KES 400 | interest 20% p.m | application fee 6% of principal | weekly payments'},
-  {key:'komanza',name:'KOMANZA',min:16000,max:40000,registrationFee:400,monthlyRate:18,feeType:'percent',feeValue:10,paymentEveryWeeks:2,description:'16k-40k | registration fee KES 400 | interest 18% p.m | application fee 10% of principal | biweekly payments'}
+  {key:'komanza',name:'KOMANZA',min:16000,max:40000,registrationFee:400,monthlyRate:18,feeType:'percent',feeValue:10,paymentEveryWeeks:2,repaymentFrequency:'biweekly',description:'16k-40k | registration fee KES 400 | interest 18% p.m | application fee 10% of principal | biweekly payments'},
+  {key:'uwezo-loan',name:'UWEZO LOAN',min:15000,max:50000,registrationFee:500,monthlyRate:12,feeType:'percent',feeValue:8,feeName:'Processing fee',paymentEveryWeeks:4,repaymentFrequency:'monthly',termUnit:'months',minTermWeeks:12,maxTermWeeks:12,description:'KES 15,000-50,000 | 3 months | interest 12% p.m | processing fee 8% of principal | registration fee KES 500 | monthly payments'}
 ];
 
+function cachedPataFixProductByName(name){
+  const clean=String(name||'').trim().toLowerCase();
+  const rows=[...(cachedData?.products||[]),...(window._appProducts||[]),...(window._calcProducts||[])];
+  return rows.find(p=>String(p?.name||'').trim().toLowerCase()===clean)||null;
+}
+function normalizePataFixProduct(row){
+  if(!row)return null;
+  const fixed=PATAFIX_PRODUCTS.find(p=>p.name.toLowerCase()===String(row.name||'').trim().toLowerCase()||p.key===String(row.name||'').trim().toLowerCase());
+  const isDatabaseRow=Boolean(row.id||Object.prototype.hasOwnProperty.call(row,'min_amount'));
+  if(fixed&&!isDatabaseRow)return {...fixed,interestType:fixed.interestType||'flat',dbRecord:null};
+  const frequency=String(row.repayment_frequency??fixed?.repaymentFrequency??(fixed?.paymentEveryWeeks===2?'biweekly':'weekly')).toLowerCase();
+  const feeType=String(row.processing_fee_type??fixed?.feeType??'percent').toLowerCase()==='flat'?'flat':'percent';
+  const feeValue=Number(row.processing_fee_value??row.processing_fee_pct??fixed?.feeValue??0);
+  const interestPeriod=String(row.interest_period??'monthly').toLowerCase();
+  const interestRate=Number(row.interest_rate??fixed?.monthlyRate??0);
+  return {
+    key:fixed?.key||String(row.name||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-'),name:String(row.name||fixed?.name||'').trim(),
+    min:Number(row.min_amount??fixed?.min??0),max:Number(row.max_amount??fixed?.max??0),registrationFee:Number(row.registration_fee??fixed?.registrationFee??0),
+    monthlyRate:interestPeriod==='monthly'?interestRate:interestRate*4,
+    feeType,feeValue,paymentEveryWeeks:frequency==='monthly'?4:frequency==='biweekly'?2:1,
+    feeName:fixed?.feeName,repaymentFrequency:frequency,termUnit:String(row.term_unit??fixed?.termUnit??'weeks').toLowerCase(),
+    minTermWeeks:Number(row.min_term_weeks??fixed?.minTermWeeks??1),maxTermWeeks:Number(row.max_term_weeks??fixed?.maxTermWeeks??52),
+    interestType:String(row.interest_type??fixed?.interestType??'flat'),description:row.description||fixed?.description||'',requiresGuarantor:row.requires_guarantor!==false,
+    dbRecord:row
+  };
+}
 function patafixProductByName(name){
   const clean=String(name||'').trim().toLowerCase();
-  return PATAFIX_PRODUCTS.find(p=>p.name.toLowerCase()===clean||p.key===clean)||null;
+  const fixed=PATAFIX_PRODUCTS.find(p=>p.name.toLowerCase()===clean||p.key===clean);
+  const saved=cachedPataFixProductByName(name);
+  return saved?normalizePataFixProduct(saved):(fixed?normalizePataFixProduct(fixed):null);
 }
 function patafixProductsForAmount(amount){
   const n=Number(amount||0);
   return PATAFIX_PRODUCTS.filter(p=>n>=p.min&&n<=p.max);
 }
 function getPataFixProduct(amount, productName=''){
+  if(productName&&typeof productName==='object')return normalizePataFixProduct(productName);
   return patafixProductByName(productName) || patafixProductsForAmount(amount)[0] || null;
 }
 function getAutoRate(amount, productName=''){
@@ -1240,11 +1270,11 @@ function getAutoTier(amount, productName=''){
 function patafixFeeLabel(product){
   if(!product) return 'No matching product';
   const fee=product.feeType==='flat' ? fmtMoney(product.feeValue) : `${product.feeValue}% of principal`;
-  const feeName=product.name==='INUA BIZ'?'Processing fee':'Application fee';
+  const feeName=product.feeName||(product.name==='INUA BIZ'?'Processing fee':'Application fee');
   return `${feeName}: ${fee}`;
 }
 function patafixFeeName(product){
-  return product?.name==='INUA BIZ'?'Processing fee':'Application fee';
+  return product?.feeName||(product?.name==='INUA BIZ'?'Processing fee':'Application fee');
 }
 function patafixRegistrationFeeForAmount(amount, productName=''){
   return Number(getPataFixProduct(amount, productName)?.registrationFee || 0);
@@ -1271,8 +1301,38 @@ function calcPataFixLoan(principal, termWeeks, productName='', type='flat'){
   const interval=product?.paymentEveryWeeks||1;
   const installments=Math.max(1, Math.ceil(Number(termWeeks||1)/interval));
   const periodRate=(product?.monthlyRate||0)/4*interval;
-  const calc=calcLoan(Number(principal||0),periodRate,type,installments);
-  return {...calc,product,periodRate,intervalWeeks:interval,installments,installmentLabel:interval===2?'Biweekly Installment':'Weekly Installment'};
+  const calc=calcLoan(Number(principal||0),periodRate,product?.interestType||type,installments);
+  return {...calc,product,periodRate,intervalWeeks:interval,installments,installmentLabel:product?.repaymentFrequency==='monthly'?'Monthly Installment':interval===2?'Biweekly Installment':'Weekly Installment'};
+}
+
+function patafixRepaymentLabel(product){
+  return product?.repaymentFrequency==='monthly'?'Monthly':product?.paymentEveryWeeks===2?'Biweekly':'Weekly';
+}
+function patafixTermLabel(product,termWeeks){
+  return product?.termUnit==='months'?`${Number(termWeeks||0)/4} months`:`${Number(termWeeks||0)} weeks`;
+}
+function patafixDisplayedTerm(product,termWeeks){
+  return product?.termUnit==='months'?Number(termWeeks||0)/4:Number(termWeeks||0);
+}
+function patafixInputTermWeeks(product,value){
+  return product?.termUnit==='months'?Number(value||0)*4:Number(value||0);
+}
+function validPataFixProduct(product){
+  return Boolean(product&&product.name&&Number(product.min)>0&&Number(product.max)>=Number(product.min)&&
+    Number(product.minTermWeeks)>=1&&Number(product.maxTermWeeks)>=Number(product.minTermWeeks)&&
+    Number(product.monthlyRate)>=0&&Number(product.feeValue)>=0&&Number(product.registrationFee)>=0&&
+    ['weekly','biweekly','monthly'].includes(product.repaymentFrequency));
+}
+function addPataFixRepaymentPeriods(baseDate,periods,product){
+  const date=parseLocalDate(baseDate instanceof Date?localISODate(baseDate):baseDate);
+  if(!date)return null;
+  if(product?.repaymentFrequency==='monthly'){
+    const originalDay=date.getDate();
+    date.setDate(1);date.setMonth(date.getMonth()+Number(periods||0));
+    const lastDay=new Date(date.getFullYear(),date.getMonth()+1,0).getDate();
+    date.setDate(Math.min(originalDay,lastDay));
+  }else date.setDate(date.getDate()+Number(periods||0)*Number(product?.paymentEveryWeeks||1)*7);
+  return date;
 }
 
 // ═══ AUTH — EMAIL + GOOGLE ═══
@@ -1890,11 +1950,11 @@ function stripPendingRegFeeTag(notes){ return String(notes||'').replace(/\s*\[RE
 function markRegistrationFeePaidNotes(notes, amount, dateISO){
   return `${stripRegFeeTag(stripPendingRegFeeTag(notes))} ${regFeeTag(amount, dateISO)}`.trim();
 }
-function registrationFeeForClient(client, previousLoans, productName=''){
+function registrationFeeForClient(client, previousLoans, productRef=''){
   const tag = parseRegFeeFromNotes(client?.notes);
   const pending = hasPendingRegFee(client?.notes);
   const hasPreviousLoan = (previousLoans||[]).length > 0;
-  const product = getPataFixProduct(0, productName);
+  const product = getPataFixProduct(0, productRef);
   const productFee = Number(product?.registrationFee || tag?.amount || 0);
   return (tag || pending) && !hasPreviousLoan ? productFee : 0;
 }
@@ -2093,7 +2153,7 @@ async function renderDashboard(){
     await loadPataFixBranches();
     const todayFetch=today();
     const[loansR,schedR,todaySchedR,repR,appsR,clientsR]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name,phone,id_number,address,branch_name),loan_applications(loan_products(name))').eq('business_id', currentUser.business_id),
+      sb('loans').select('*,loan_clients(full_name,phone,id_number,address,branch_name),loan_applications(loan_products(*))').eq('business_id', currentUser.business_id),
       sb('loan_schedules').select('*').eq('business_id', currentUser.business_id).limit(50000),
       sb('loan_schedules').select('*').eq('business_id', currentUser.business_id).eq('due_date', todayFetch),
       sb('loan_repayments').select('*').eq('business_id', currentUser.business_id),
@@ -2991,16 +3051,25 @@ async function ensurePataFixProducts(){
     interest_rate:p.monthlyRate,
     interest_period:'monthly',
     interest_type:'flat',
-    min_term_weeks:p.paymentEveryWeeks,
-    max_term_weeks:52,
+    min_term_weeks:p.minTermWeeks||p.paymentEveryWeeks,
+    max_term_weeks:p.maxTermWeeks||52,
     processing_fee_pct:p.feeType==='percent'?p.feeValue:0,
+    processing_fee_type:p.feeType,
+    processing_fee_value:p.feeValue,
+    registration_fee:p.registrationFee,
+    repayment_frequency:p.repaymentFrequency||(p.paymentEveryWeeks===2?'biweekly':'weekly'),
+    term_unit:p.termUnit||'weeks',
     late_penalty_pct:5,
     grace_period_days:3,
     requires_guarantor:true,
     is_active:true
   }));
-  if(missing.length) await sb('loan_products').insert(missing);
-  const {data:products}=await sb('loan_products').select('*').eq('business_id', currentUser.business_id).order('min_amount',{ascending:true});
+  if(missing.length){
+    const {error:insertError}=await sb('loan_products').insert(missing);
+    if(insertError)throw insertError;
+  }
+  const {data:products,error:productsError}=await sb('loan_products').select('*').eq('business_id', currentUser.business_id).order('min_amount',{ascending:true});
+  if(productsError)throw productsError;
   return products||[];
 }
 
@@ -3012,23 +3081,23 @@ async function renderProducts(){
     main.innerHTML=`
       <div class="page-header"><h1>Loan Products</h1>${hasRole('admin')?'<button class="btn btn-primary" onclick="openAddProductModal()">+ Add Product</button>':''}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px">
-      ${(products||[]).map(p=>`
+      ${(products||[]).map(p=>{const configured=normalizePataFixProduct(p);const configuredOk=validPataFixProduct(configured);return `
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:8px">
             <div><strong style="font-size:16px">${p.name}</strong></div>
-            ${p.is_active?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>'}
+            ${!configuredOk?'<span class="badge badge-red">Needs setup</span>':p.is_active?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>'}
           </div>
           <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">${p.description||patafixProductByName(p.name)?.description||'No description'}</p>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
             <div><span style="color:var(--text-secondary)">Amount:</span> ${fmtMoney(p.min_amount)} - ${fmtMoney(p.max_amount)}</div>
             <div><span style="color:var(--text-secondary)">Rate:</span> ${p.interest_rate}% / ${p.interest_period||'weekly'}</div>
-            <div><span style="color:var(--text-secondary)">Payments:</span> ${(patafixProductByName(p.name)?.paymentEveryWeeks||1)===2?'Biweekly':'Weekly'}</div>
-            <div><span style="color:var(--text-secondary)">Reg. Fee:</span> ${fmtMoney(patafixProductByName(p.name)?.registrationFee||0)}</div>
-            <div><span style="color:var(--text-secondary)">Fee:</span> ${patafixFeeLabel(patafixProductByName(p.name))}</div>
+            <div><span style="color:var(--text-secondary)">Payments:</span> ${patafixRepaymentLabel(configured)}</div>
+            <div><span style="color:var(--text-secondary)">Reg. Fee:</span> ${fmtMoney(configured?.registrationFee||0)}</div>
+            <div><span style="color:var(--text-secondary)">Fee:</span> ${patafixFeeLabel(configured)}</div>
           </div>
           <div style="margin-top:12px;display:flex;gap:6px">${hasRole('admin')?`<button class="btn btn-outline btn-sm" onclick="editProduct('${p.id}')">Edit</button><button class="btn btn-outline btn-sm" onclick="deleteProduct('${p.id}')">Delete</button>`:'<span style="font-size:12px;color:var(--text-secondary)">View only</span>'}</div>
         </div>
-      `).join('')||'<div class="empty-state"><p>No loan products yet. Create your first product.</p></div>'}
+      `}).join('')||'<div class="empty-state"><p>No loan products yet. Create your first product.</p></div>'}
       </div>
     `;
   }catch(e){toast(e.message,'error')}
@@ -3036,14 +3105,21 @@ async function renderProducts(){
 
 function openAddProductModal(prod){
   const p=prod||{};
+  const normalized=normalizePataFixProduct(p)||{};
+  const termUnit=p.term_unit||normalized.termUnit||'weeks';
+  const minTerm=termUnit==='months'?Number(p.min_term_weeks||12)/4:Number(p.min_term_weeks??1);
+  const maxTerm=termUnit==='months'?Number(p.max_term_weeks||12)/4:Number(p.max_term_weeks??52);
   openModal(`
     <h2>${p.id?'Edit':'Add'} Loan Product</h2>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">These settings automatically control applications, fees, disbursements, repayment schedules, the calculator and reports.</p>
     <div class="form-row"><div class="form-group"><label>Name *</label><input class="input" id="pName" value="${p.name||''}"></div><div class="form-group"><label>Interest Period</label><select class="select" id="pIntPeriod"><option value="weekly" ${(p.interest_period||'weekly')==='weekly'?'selected':''}>Weekly</option><option value="monthly" ${p.interest_period==='monthly'?'selected':''}>Monthly</option></select></div></div>
     <div class="form-group"><label>Description</label><textarea class="textarea" id="pDesc">${p.description||''}</textarea></div>
     <div class="form-row"><div class="form-group"><label>Min Amount</label><input class="input" type="number" id="pMinAmt" value="${p.min_amount||500}"></div><div class="form-group"><label>Max Amount</label><input class="input" type="number" id="pMaxAmt" value="${p.max_amount||100000}"></div></div>
     <div class="form-row"><div class="form-group"><label>Interest Rate (%)</label><input class="input" type="number" step="0.01" id="pRate" value="${p.interest_rate||5}"></div><div class="form-group"><label>Interest Type</label><select class="select" id="pIntType"><option value="flat" ${p.interest_type==='flat'?'selected':''}>Flat Rate</option><option value="reducing_balance" ${p.interest_type==='reducing_balance'?'selected':''}>Reducing Balance</option></select></div></div>
-    <div class="form-row"><div class="form-group"><label>Min Term (weeks)</label><input class="input" type="number" id="pMinTerm" value="${p.min_term_weeks||1}"></div><div class="form-group"><label>Max Term (weeks)</label><input class="input" type="number" id="pMaxTerm" value="${p.max_term_weeks||52}"></div></div>
-    <div class="form-row"><div class="form-group"><label>Processing Fee %</label><input class="input" type="number" step="0.1" id="pFee" value="${p.processing_fee_pct||3}"></div><div class="form-group"><label>Late Penalty %</label><input class="input" type="number" step="0.1" id="pPenalty" value="${p.late_penalty_pct||5}"></div></div>
+    <div class="form-row"><div class="form-group"><label>Repayment Frequency</label><select class="select" id="pFrequency"><option value="weekly" ${(p.repayment_frequency||'weekly')==='weekly'?'selected':''}>Weekly</option><option value="biweekly" ${p.repayment_frequency==='biweekly'?'selected':''}>Biweekly</option><option value="monthly" ${p.repayment_frequency==='monthly'?'selected':''}>Monthly</option></select></div><div class="form-group"><label>Term Unit</label><select class="select" id="pTermUnit"><option value="weeks" ${termUnit==='weeks'?'selected':''}>Weeks</option><option value="months" ${termUnit==='months'?'selected':''}>Months</option></select></div></div>
+    <div class="form-row"><div class="form-group"><label>Minimum Term</label><input class="input" type="number" id="pMinTerm" value="${minTerm}"></div><div class="form-group"><label>Maximum Term</label><input class="input" type="number" id="pMaxTerm" value="${maxTerm}"></div></div>
+    <div class="form-row"><div class="form-group"><label>Processing Fee Type</label><select class="select" id="pFeeType"><option value="percent" ${(p.processing_fee_type||'percent')==='percent'?'selected':''}>Percentage of principal</option><option value="flat" ${p.processing_fee_type==='flat'?'selected':''}>Flat amount</option></select></div><div class="form-group"><label>Processing Fee Value</label><input class="input" type="number" step="0.01" id="pFee" value="${p.processing_fee_value??p.processing_fee_pct??0}"></div></div>
+    <div class="form-row"><div class="form-group"><label>Registration Fee (KES)</label><input class="input" type="number" step="0.01" id="pRegistrationFee" value="${p.registration_fee??normalized.registrationFee??0}"></div><div class="form-group"><label>Late Penalty %</label><input class="input" type="number" step="0.1" id="pPenalty" value="${p.late_penalty_pct??5}"></div></div>
     <div class="form-row"><div class="form-group"><label>Grace Period (days)</label><input class="input" type="number" id="pGrace" value="${p.grace_period_days||3}"></div><div class="form-group"><label>Active</label><select class="select" id="pActive"><option value="true" ${p.is_active!==false?'selected':''}>Yes</option><option value="false" ${p.is_active===false?'selected':''}>No</option></select></div></div>
     <div class="form-group"><label><input type="checkbox" id="pGuarantor" ${p.requires_guarantor?'checked':''}> Requires Guarantor</label></div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveProduct('${p.id||''}')">${p.id?'Update':'Save'} Product</button></div>
@@ -3051,10 +3127,17 @@ function openAddProductModal(prod){
 }
 
 async function saveProduct(id){
-  const rec={name:$('#pName').value,description:$('#pDesc').value,min_amount:Number($('#pMinAmt').value),max_amount:Number($('#pMaxAmt').value),interest_rate:Number($('#pRate').value),interest_type:$('#pIntType').value,interest_period:$('#pIntPeriod').value,min_term_weeks:Number($('#pMinTerm').value),max_term_weeks:Number($('#pMaxTerm').value),processing_fee_pct:Number($('#pFee').value),late_penalty_pct:Number($('#pPenalty').value),grace_period_days:Number($('#pGrace').value),requires_guarantor:$('#pGuarantor').checked,is_active:$('#pActive').value==='true',business_id:currentUser?.business_id};
+  const termUnit=$('#pTermUnit').value;const feeType=$('#pFeeType').value;const feeValue=Number($('#pFee').value);
+  const termFactor=termUnit==='months'?4:1;
+  const rec={name:$('#pName').value.trim(),description:$('#pDesc').value.trim(),min_amount:Number($('#pMinAmt').value),max_amount:Number($('#pMaxAmt').value),interest_rate:Number($('#pRate').value),interest_type:$('#pIntType').value,interest_period:$('#pIntPeriod').value,min_term_weeks:Number($('#pMinTerm').value)*termFactor,max_term_weeks:Number($('#pMaxTerm').value)*termFactor,processing_fee_pct:feeType==='percent'?feeValue:0,processing_fee_type:feeType,processing_fee_value:feeValue,registration_fee:Number($('#pRegistrationFee').value),repayment_frequency:$('#pFrequency').value,term_unit:termUnit,late_penalty_pct:Number($('#pPenalty').value),grace_period_days:Number($('#pGrace').value),requires_guarantor:$('#pGuarantor').checked,is_active:$('#pActive').value==='true',business_id:currentUser?.business_id};
   if(!rec.name)return toast('Product name is required','warning');
+  if(!(rec.min_amount>0)||rec.max_amount<rec.min_amount)return toast('Enter a valid minimum and maximum loan amount','warning');
+  if(!Number.isInteger(rec.min_term_weeks)||rec.min_term_weeks<1||!Number.isInteger(rec.max_term_weeks)||rec.max_term_weeks<rec.min_term_weeks)return toast('Enter a valid term range','warning');
+  if(rec.interest_rate<0||feeValue<0||rec.registration_fee<0||rec.late_penalty_pct<0)return toast('Rates and fees cannot be negative','warning');
   try{
-    if(id){await sb('loan_products').update(rec).eq('id',id)}else{await sb('loan_products').insert(rec)}
+    const result=id?await sb('loan_products').update(rec).eq('id',id).eq('business_id',currentUser.business_id):await sb('loan_products').insert(rec);
+    if(result.error)throw result.error;
+    cachedData.products=null;
     toast(id?'Product updated':'Product created','success');closeModal();renderProducts();
   }catch(e){toast(e.message,'error')}
 }
@@ -3067,7 +3150,7 @@ async function editProduct(id){
 async function deleteProduct(id){
   if(!hasRole('admin'))return toast('Only admins can delete products','warning');
   if(!await confirm_('Delete this product?'))return;
-  try{await sb('loan_products').delete().eq('id',id);toast('Product deleted','success');renderProducts();}catch(e){toast(e.message,'error')}
+  try{const{error}=await sb('loan_products').delete().eq('id',id).eq('business_id',currentUser.business_id);if(error)throw error;cachedData.products=null;toast('Product deleted','success');renderProducts();}catch(e){toast(e.message,'error')}
 }
 
 // ═══ APPLICATIONS ═══
@@ -3076,7 +3159,7 @@ async function renderApplications(page=1){
   appPage=page;const main=$('#mainContent');
   try{
     await loadPataFixBranches();
-    const{data:apps}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,asset_photo_paths,branch_name),loan_products(name)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
+    const{data:apps}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,asset_photo_paths,branch_name),loan_products(*)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
     cachedData.applications=filterByBranch(apps||[],'applications');
     const isOnlyOfficer = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     if(isOnlyOfficer) cachedData.applications = cachedData.applications.filter(a => a.loan_officer_id === currentUser.id);
@@ -3098,13 +3181,14 @@ function renderAppRows(apps){
     const canManage=canManagePendingApplication(a);
     const appStatus=String(a.status||'').toLowerCase();
     const canApprove=appStatus==='submitted'&&hasRole('admin','branch_manager');
+    const appProduct=normalizePataFixProduct(a.loan_products);
     return `<tr>
     <td>${canApprove?`<input type="checkbox" class="app-approve-chk" value="${a.id}" onchange="updateBulkApproveApplicationsBtn()">`:''}</td>
     <td><strong>${a.application_no||'DRAFT'}</strong></td>
     <td><strong>${a.loan_clients?.full_name||'—'}</strong></td>
     <td>${a.loan_clients?.id_number||'-'}</td>
     <td>${a.loan_clients?.phone||'-'}</td>
-    <td>${fmtMoney(a.applied_amount)}</td><td>${a.applied_term_weeks}w</td>
+    <td>${fmtMoney(a.applied_amount)}</td><td>${appProduct?patafixTermLabel(appProduct,a.applied_term_weeks):a.applied_term_weeks+'w'}</td>
     <td><span class="badge badge-blue">${escapeHtml(a.loan_products?.name||getAutoTier(a.applied_amount))}</span></td>
     <td>${statusBadge(a.status)}</td><td>${fmtDate(a.created_at)}</td>
     <td>
@@ -3178,7 +3262,7 @@ async function openNewApplication(){
   const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number,branch_name').eq('business_id', currentUser.business_id).order('full_name');
   const branchClients=filterByBranch(clients||[],'applications');
   const products=(await ensurePataFixProducts()).filter(p=>p.is_active!==false);
-  const productOptions=products.map(p=>`<option value="${p.id}" data-name="${escapeHtml(p.name)}">${escapeHtml(p.name)} - ${escapeHtml(patafixProductByName(p.name)?.description||p.description||'')}</option>`).join('');
+  const productOptions=products.map(p=>{const configured=normalizePataFixProduct(p);const valid=validPataFixProduct(configured);return `<option value="${p.id}" data-name="${escapeHtml(p.name)}" ${valid?'':'disabled'}>${escapeHtml(p.name)} - ${escapeHtml(valid?(configured.description||p.description||''):'Complete this product setup first')}</option>`;}).join('');
   // Build datalist; encode id in option's data-id via a hidden lookup map
   window._appClientLookup = {};
   const optionsHtml = (branchClients||[]).map(c=>{
@@ -3203,10 +3287,10 @@ async function openNewApplication(){
       <p style="font-size:12px;color:var(--text-secondary);margin-top:6px">Select the client first. Guarantor details will be captured on this loan application.</p>
     </div>
     <div id="appStep2" style="display:none">
-      <div class="form-group"><label>PataFix Product *</label><select class="select" id="appProduct" onchange="appCalcUpdate()"><option value="">Select product</option>${productOptions}</select></div>
+      <div class="form-group"><label>PataFix Product *</label><select class="select" id="appProduct" onchange="onAppProductChange()"><option value="">Select product</option>${productOptions}</select></div>
       <div class="form-group"><label>Loan Amount *</label><input class="input" type="number" id="appAmount" oninput="appCalcUpdate()" placeholder="Enter amount"></div>
       <div id="appTierInfo" class="card" style="margin:8px 0;font-size:13px;display:none"></div>
-      <div class="form-row"><div class="form-group"><label>Term (weeks) *</label><input class="input" type="number" id="appTerm" oninput="appCalcUpdate()" placeholder="Number of weeks"></div><div class="form-group"><label>Application Date</label><input class="input" type="date" id="appDate" value="${today()}" max="${today()}"></div></div>
+      <div class="form-row"><div class="form-group"><label id="appTermLabel">Term (weeks) *</label><input class="input" type="number" id="appTerm" oninput="appCalcUpdate()" placeholder="Number of weeks"></div><div class="form-group"><label>Application Date</label><input class="input" type="date" id="appDate" value="${today()}" max="${today()}"></div></div>
       <div class="form-group"><label>Purpose</label><textarea class="textarea" id="appPurpose"></textarea></div>
       <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin:10px 0 12px;font-size:12px;color:var(--text-secondary)"><strong>Loan Guarantor Details</strong></div>
       <div class="form-row"><div class="form-group"><label>Guarantor Full Name</label><input class="input" id="appGuarantorName"></div><div class="form-group"><label>Guarantor Phone</label><input class="input" id="appGuarantorPhone"></div></div>
@@ -3247,7 +3331,22 @@ function onAppClientPick(val){
 function selectedAppProduct(){
   const sel=document.getElementById('appProduct');
   const row=(window._appProducts||[]).find(p=>p.id===sel?.value);
-  return patafixProductByName(row?.name||sel?.selectedOptions?.[0]?.dataset?.name||'');
+  return normalizePataFixProduct(row)||patafixProductByName(sel?.selectedOptions?.[0]?.dataset?.name||'');
+}
+function selectedAppTermWeeks(){
+  return patafixInputTermWeeks(selectedAppProduct(),Number(document.getElementById('appTerm')?.value||0));
+}
+function onAppProductChange(){
+  const product=selectedAppProduct();const input=document.getElementById('appTerm');const label=document.getElementById('appTermLabel');
+  if(product&&input){
+    const min=patafixDisplayedTerm(product,product.minTermWeeks||product.paymentEveryWeeks||1);
+    const max=patafixDisplayedTerm(product,product.maxTermWeeks||52);
+    input.min=min;input.max=max;
+    if(!Number(input.value)||Number(input.value)<min||Number(input.value)>max)input.value=min===max?min:'';
+    input.placeholder=product.termUnit==='months'?'Number of months':'Number of weeks';
+  }
+  if(label)label.textContent=`Term (${product?.termUnit==='months'?'months':'weeks'}) *`;
+  appCalcUpdate();
 }
 
 window._appStep=1;
@@ -3260,9 +3359,11 @@ function appStepNav(dir){
     if(!amt||amt<=0)return toast('Enter a valid loan amount','warning');
     if(!$('#appProduct')?.value)return toast('Select a PataFix product','warning');
     const product=selectedAppProduct();
-    if(!product)return toast('Selected product is not configured','warning');
+    if(!validPataFixProduct(product))return toast('Selected product is incomplete. Ask an admin to finish its setup first.','warning');
     if(amt<product.min||amt>product.max)return toast(`${product.name} allows ${fmtMoney(product.min)} to ${fmtMoney(product.max)}`,'warning');
-    if(!$('#appTerm').value)return toast('Enter loan term in weeks','warning');
+    const termWeeks=selectedAppTermWeeks();
+    if(!termWeeks)return toast(`Enter loan term in ${product.termUnit==='months'?'months':'weeks'}`,'warning');
+    if(termWeeks<(product.minTermWeeks||1)||termWeeks>(product.maxTermWeeks||52))return toast(`Term must be ${patafixTermLabel(product,product.minTermWeeks||1)} to ${patafixTermLabel(product,product.maxTermWeeks||52)}`,'warning');
     buildAppReview();
   }
   window._appStep=s;
@@ -3275,17 +3376,18 @@ function appStepNav(dir){
 }
 
 function appCalcUpdate(){
-  const amt=Number($('#appAmount').value)||0;const term=Number($('#appTerm').value)||0;
+  const amt=Number($('#appAmount').value)||0;
   const product=selectedAppProduct();
+  const term=selectedAppTermWeeks();
   const tierInfo=$('#appTierInfo');
   if(amt>0&&tierInfo){
     const rate=getAutoRate(amt, product?.name);
     const tier=getAutoTier(amt, product?.name);
     tierInfo.style.display='block';
     const valid=product && amt>=product.min && amt<=product.max;
-    tierInfo.innerHTML=`<strong>${tier}</strong> | Rate: <strong>${product?.monthlyRate||0}% p.m</strong> | ${patafixFeeLabel(product)} | Registration fee: <strong>${fmtMoney(product?.registrationFee||0)}</strong> | Payments: <strong>${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'}</strong>${valid?'':`<br><span style="color:var(--accent-red)">Amount must be ${fmtMoney(product?.min||0)} - ${fmtMoney(product?.max||0)}</span>`}`;
+    tierInfo.innerHTML=`<strong>${tier}</strong> | Rate: <strong>${product?.monthlyRate||0}% p.m</strong> | ${patafixFeeLabel(product)} | Registration fee: <strong>${fmtMoney(product?.registrationFee||0)}</strong> | Payments: <strong>${patafixRepaymentLabel(product)}</strong>${valid?'':`<br><span style="color:var(--accent-red)">Amount must be ${fmtMoney(product?.min||0)} - ${fmtMoney(product?.max||0)}</span>`}`;
     if(term>0){
-      const c=calcPataFixLoan(amt,term,product?.name,'flat');
+      const c=calcPataFixLoan(amt,term,product,'flat');
       $('#appCalcResult').innerHTML=`<div style="font-size:13px"><strong>${c.installmentLabel}:</strong> ${fmtMoney(c.weekly)} | <strong>Total Interest:</strong> ${fmtMoney(c.totalInterest)} | <strong>Total:</strong> ${fmtMoney(c.totalPayable)}</div>`;
     }
   }else if(tierInfo){tierInfo.style.display='none'}
@@ -3298,18 +3400,19 @@ function buildAppReview(){
   const amt=Number($('#appAmount').value);
   const product=selectedAppProduct();
   const tier=getAutoTier(amt, product?.name);
-  const calc=calcPataFixLoan(amt,Number($('#appTerm').value),product?.name,'flat');
+  const termWeeks=selectedAppTermWeeks();
+  const calc=calcPataFixLoan(amt,termWeeks,product,'flat');
   $('#appReview').innerHTML=`<div class="card"><h3 style="font-size:14px;margin-bottom:12px">Application Summary</h3>
     <p><strong>Client:</strong> ${client}</p><p><strong>Product:</strong> ${tier}</p>
     <p><strong>Amount:</strong> ${fmtMoney(amt)}</p><p><strong>Rate:</strong> ${product?.monthlyRate||0}% per month</p>
-    <p><strong>Term:</strong> ${$('#appTerm').value} weeks</p>
+    <p><strong>Term:</strong> ${patafixTermLabel(product,termWeeks)}</p>
     <p><strong>Application Date:</strong> ${fmtDate($('#appDate')?.value||today())}</p>
     <p><strong>Purpose:</strong> ${$('#appPurpose').value||'-'}</p>
     <p><strong>Guarantor:</strong> ${$('#appGuarantorName')?.value||'-'} ${$('#appGuarantorPhone')?.value?`(${ $('#appGuarantorPhone').value })`:''}</p>
     <p><strong>Guarantor Relationship:</strong> ${$('#appGuarantorRel')?.value||'-'}</p>
     <p><strong>${calc.installmentLabel}:</strong> ${fmtMoney(calc.weekly)}</p>
     <p><strong>Total Payable:</strong> ${fmtMoney(calc.totalPayable)}</p>
-    <p><strong>${patafixFeeLabel(product)}:</strong> ${fmtMoney(processingFeeFor(amt, product?.name))}</p>
+    <p><strong>${patafixFeeName(product)}:</strong> ${fmtMoney(processingFeeFor(amt, product))}</p>
   </div>`;
 }
 
@@ -3345,8 +3448,8 @@ async function submitApplication(){
     const amt=Number($('#appAmount').value);
     const productId=$('#appProduct')?.value||'';
     const product=(window._appProducts||[]).find(p=>p.id===productId);
-    const productRule=patafixProductByName(product?.name);
-    if(!productId||!productRule) return toast('Select a valid PataFix product','warning');
+    const productRule=normalizePataFixProduct(product);
+    if(!productId||!validPataFixProduct(productRule)) return toast('Select a fully configured PataFix product','warning');
     if(amt<productRule.min||amt>productRule.max) return toast(`${productRule.name} allows ${fmtMoney(productRule.min)} to ${fmtMoney(productRule.max)}`,'warning');
     // Determine loan type: 'new_loan' if this is the client's first ever loan, 'repeat_loan' otherwise
     const{data:prevLoanCheck}=await sb('loans').select('id,loan_officer_id,created_at').eq('client_id',selectedClientId).eq('business_id',currentUser?.business_id).order('created_at',{ascending:false}).limit(1);
@@ -3370,7 +3473,9 @@ async function submitApplication(){
       return;
     }
     const selectedClient=(window._appClients||[]).find(c=>c.id===selectedClientId);
-    const rec={application_no:appNo,client_id:selectedClientId,product_id:productId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRel')?.value||'').trim(),status:'submitted',application_date:appDate,created_at:dateInputToLocalDateTime(appDate),loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType,branch_name:recordBranchName(selectedClient)};
+    const termWeeks=selectedAppTermWeeks();
+    if(termWeeks<productRule.minTermWeeks||termWeeks>productRule.maxTermWeeks)return toast('The selected term is outside this product settings','warning');
+    const rec={application_no:appNo,client_id:selectedClientId,product_id:productId,applied_amount:amt,applied_term_weeks:termWeeks,purpose:$('#appPurpose').value,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRel')?.value||'').trim(),status:'submitted',application_date:appDate,created_at:dateInputToLocalDateTime(appDate),loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType,branch_name:recordBranchName(selectedClient)};
     
     // Try with product_id first; if Supabase rejects (column may not exist), retry without
     let insertedApp=null;
@@ -3421,9 +3526,9 @@ function renderApplicationAssetManager(app){
 }
 
 async function viewApplication(id){
-    const{data:a}=await sb('loan_applications').select('*,loan_clients(id,full_name,phone,id_number,asset_photo_paths),loan_products(name)').eq('id',id).eq('business_id',currentUser.business_id).single();
+    const{data:a}=await sb('loan_applications').select('*,loan_clients(id,full_name,phone,id_number,asset_photo_paths),loan_products(*)').eq('id',id).eq('business_id',currentUser.business_id).single();
   if(!a)return;
-  const product=patafixProductByName(a.loan_products?.name)||getPataFixProduct(a.applied_amount);
+  const product=normalizePataFixProduct(a.loan_products)||getPataFixProduct(a.applied_amount);
   const tier=product?.name||getAutoTier(a.applied_amount);
   openModal(`
     <h2>Application ${a.application_no||'DRAFT'}</h2>
@@ -3569,7 +3674,7 @@ async function renderDisbursement(){
   const main=$('#mainContent');
   try{
     await loadPataFixBranches();
-    const{data:apps,error:appsError}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,branch_name),loan_products(name)').eq('business_id', currentUser.business_id).in('status',['approved','disbursed']).order('approved_at',{ascending:false});
+    const{data:apps,error:appsError}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,branch_name),loan_products(*)').eq('business_id', currentUser.business_id).in('status',['approved','disbursed']).order('approved_at',{ascending:false});
     if(appsError)throw appsError;
     const appIds=(apps||[]).map(a=>a.id).filter(Boolean);
     let loansByApp={};
@@ -3599,9 +3704,7 @@ async function renderDisbursement(){
         <input class="input" type="date" id="disbursementDateTo" onchange="applyDisbursementFilters()" title="To date">
         <button class="btn btn-primary btn-sm" onclick="exportDisbursementExcel()">&#11015; Download Excel</button>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager','cashier')?'<input type="checkbox" id="bulkDisburseAllApps" onchange="toggleBulkDisbursementApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Approved</th><th>Disbursed</th><th>Method</th><th>Reference</th><th>Actions</th></tr></thead><tbody id="disbursementBody">
-      ${(apps||[]).map(a=>`<tr><td>${a.application_no}</td><td><strong>${a.loan_clients?.full_name||'—'}</strong></td><td>${a.loan_clients?.phone||'-'}</td><td>${fmtMoney(a.applied_amount)}</td><td>${a.applied_term_weeks}w</td><td><span class="badge badge-blue">${getAutoTier(a.applied_amount)}</span></td><td>${fmtDate(a.approved_at)}</td><td><button class="btn btn-primary btn-sm" onclick="openDisburseModal('${a.id}')">Disburse</button></td></tr>`).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--text-secondary)">No approved applications awaiting disbursement</td></tr>'}
-      </tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager','cashier')?'<input type="checkbox" id="bulkDisburseAllApps" onchange="toggleBulkDisbursementApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Approved</th><th>Disbursed</th><th>Method</th><th>Reference</th><th>Actions</th></tr></thead><tbody id="disbursementBody"></tbody></table></div>
     `;
     const disbBody=$('#disbursementBody');
     if(disbBody)disbBody.innerHTML=renderDisbursementRows(cachedData.disbursements);
@@ -3615,6 +3718,7 @@ function disbursementRowDate(a){
 function renderDisbursementRows(rows){
   return (rows||[]).map(a=>{
     const loan=a.loan_record||{};
+    const product=normalizePataFixProduct(a.loan_products);
     const isDisbursed=a.status==='disbursed'||!!loan.id;
     return `<tr>
       <td>${!isDisbursed&&hasRole('admin','branch_manager','cashier')?`<input type="checkbox" class="app-disburse-chk" value="${a.id}" onchange="updateBulkDisbursementBtn()">`:''}</td>
@@ -3623,7 +3727,7 @@ function renderDisbursementRows(rows){
       <td>${a.loan_clients?.id_number||'-'}</td>
       <td>${a.loan_clients?.phone||'-'}</td>
       <td>${fmtMoney(loan.disbursed_amount||a.applied_amount)}</td>
-      <td>${a.applied_term_weeks||'-'}w</td>
+      <td>${product?patafixTermLabel(product,a.applied_term_weeks):(a.applied_term_weeks||'-')+'w'}</td>
       <td><span class="badge badge-blue">${escapeHtml(a.loan_products?.name||getAutoTier(a.applied_amount))}</span></td>
       <td>${isDisbursed?statusBadge('disbursed'):statusBadge('approved')}</td>
       <td>${fmtDate(a.approved_at)}</td>
@@ -3667,6 +3771,7 @@ function exportDisbursementExcel(){
   if(!rows.length)return toast('No disbursement records to download','warning');
   const data=rows.map(a=>{
     const loan=a.loan_record||{};
+    const product=normalizePataFixProduct(a.loan_products);
     const isDisbursed=a.status==='disbursed'||!!loan.id;
     return {
       'Application #':a.application_no||'-',
@@ -3676,7 +3781,7 @@ function exportDisbursementExcel(){
       'Phone':a.loan_clients?.phone||'-',
       'Approved Amount (KES)':Number(a.applied_amount||0),
       'Disbursed Amount (KES)':Number(loan.disbursed_amount||a.applied_amount||0),
-      'Term (Weeks)':a.applied_term_weeks||'-',
+      'Term':product?patafixTermLabel(product,a.applied_term_weeks):(a.applied_term_weeks||'-')+' weeks',
       'Product':a.loan_products?.name||getAutoTier(a.applied_amount),
       'Status':isDisbursed?'Disbursed':'Awaiting Disbursement',
       'Approved Date':a.approved_at?String(a.approved_at).slice(0,10):'-',
@@ -3754,9 +3859,9 @@ async function confirmBulkDisbursement(ids){
     if(!app){failures.push(`Application ${ids[i]}: not found`);continue;}
     if(btn)btn.textContent=`Processing ${i+1} of ${ids.length}...`;
     try{
-      const product=patafixProductByName(app.loan_products?.name)||getPataFixProduct(app.applied_amount);
-      const firstRepDate=parseLocalDate(disbDate);
-      firstRepDate.setDate(firstRepDate.getDate()+Number(product?.paymentEveryWeeks||1)*7);
+      const product=normalizePataFixProduct(app.loan_products)||getPataFixProduct(app.applied_amount);
+      if(!validPataFixProduct(product))throw new Error('This loan product is incomplete. Finish its setup before disbursement.');
+      const firstRepDate=addPataFixRepaymentPeriods(disbDate,1,product);
       await disburseApprovedApplication({
         appId:app.id,clientId:app.client_id,termWeeks:app.applied_term_weeks,
         amount:Number(app.applied_amount),method,reference:refPrefix?`${refPrefix}-${i+1}`:'',
@@ -3776,15 +3881,16 @@ async function confirmBulkDisbursement(ids){
 }
 
 async function openDisburseModal(appId){
-  const{data:app}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,notes),loan_products(name)').eq('id',appId).single();
+  const{data:app}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,notes),loan_products(*)').eq('id',appId).single();
   if(!app)return toast('Application not found','error');
   const amt=app.applied_amount;
-  const product=patafixProductByName(app.loan_products?.name)||getPataFixProduct(amt);
-  const calc=calcPataFixLoan(amt,app.applied_term_weeks,product?.name,'flat');
-  const procFee=processingFeeFor(amt, product?.name);
+  const product=normalizePataFixProduct(app.loan_products)||getPataFixProduct(amt);
+  if(!validPataFixProduct(product))return toast('This loan product is incomplete. Finish its setup before disbursement.','error');
+  const calc=calcPataFixLoan(amt,app.applied_term_weeks,product,'flat');
+  const procFee=processingFeeFor(amt, product);
   // Registration fee only applies to newly registered clients on their first loan.
   const{data:prevLoans}=await sb('loans').select('id').eq('client_id',app.client_id).eq('business_id',currentUser?.business_id).limit(2);
-  const regFee=registrationFeeForClient(app.loan_clients, prevLoans, product?.name);
+  const regFee=registrationFeeForClient(app.loan_clients, prevLoans, product);
   let walletBalance=0;
   try{
     walletBalance=await getClientChargeWalletBalance(app.client_id);
@@ -3797,7 +3903,7 @@ async function openDisburseModal(appId){
   // Upfront fees are collected before release and do not reduce the released principal.
   const netDisbursement=amt;
   const defaultDisbDate=isFutureDateValue(app.approved_at)?today():(String(app.approved_at||today()).slice(0,10)||today());
-  const firstRep=parseLocalDate(defaultDisbDate);firstRep.setDate(firstRep.getDate()+((product?.paymentEveryWeeks||1)*7));
+  const firstRep=addPataFixRepaymentPeriods(defaultDisbDate,1,product);
   const clientName=app.loan_clients?.full_name||'Unknown Client';
   const clientPhone=app.loan_clients?.phone||'';
   const clientIdNumber=app.loan_clients?.id_number||'-';
@@ -3805,10 +3911,10 @@ async function openDisburseModal(appId){
     <h2>Disburse Loan — ${app.application_no}</h2>
     <div class="card" style="margin-bottom:12px;font-size:13px;background:rgba(59,130,246,0.08);border-color:rgba(59,130,246,0.3)">
       <p style="font-size:15px;font-weight:700;margin-bottom:4px">👤 ${clientName}</p>
-      <p style="color:var(--text-secondary)">ID: ${clientIdNumber} &nbsp;|&nbsp; Phone: ${clientPhone||'-'} &nbsp;|&nbsp; <strong>Product:</strong> ${product?.name||'-'} | <strong>Rate:</strong> ${product?.monthlyRate||0}% / month | <strong>Payments:</strong> ${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'} | <strong>Term:</strong> ${app.applied_term_weeks} weeks</p>
+      <p style="color:var(--text-secondary)">ID: ${clientIdNumber} &nbsp;|&nbsp; Phone: ${clientPhone||'-'} &nbsp;|&nbsp; <strong>Product:</strong> ${product?.name||'-'} | <strong>Rate:</strong> ${product?.monthlyRate||0}% / month | <strong>Payments:</strong> ${patafixRepaymentLabel(product)} | <strong>Term:</strong> ${patafixTermLabel(product,app.applied_term_weeks)}</p>
     </div>
     <div class="form-row"><div class="form-group"><label>Approved Loan Amount</label><input class="input" type="number" id="dAmt" value="${amt}"></div><div class="form-group"><label>Disbursement Method</label><select class="select" id="dMethod"><option value="cash">Cash</option><option value="mpesa" selected>M-Pesa</option><option value="bank_transfer">Bank Transfer</option></select></div></div>
-    <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="dRef"></div><div class="form-group"><label>Disbursement Date</label><input class="input" type="date" id="dDate" value="${defaultDisbDate}" max="${today()}" onchange="updateDisbursementFirstRepayment(${product?.paymentEveryWeeks||1})"></div></div>
+    <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="dRef"></div><div class="form-group"><label>Disbursement Date</label><input class="input" type="date" id="dDate" value="${defaultDisbDate}" max="${today()}" onchange="updateDisbursementFirstRepayment('${product?.repaymentFrequency||'weekly'}')"></div></div>
     <div class="form-group"><label>First Repayment Date</label><input class="input" type="date" id="dFirstRep" value="${localISODate(firstRep)}"></div>
     <div class="form-group"><label>Current Remaining Balance (optional)</label><input class="input" type="number" id="dOpeningBalance" placeholder="${calc.totalPayable.toFixed(2)}"><div style="font-size:11px;color:var(--text-secondary);margin-top:3px">For an existing/backdated loan, enter what the client still owes now. Leave blank for a fresh loan.</div></div>
     <div class="card" style="margin-top:12px;font-size:13px">
@@ -3833,7 +3939,7 @@ async function openDisburseModal(appId){
   `,true);
 }
 
-function updateDisbursementFirstRepayment(intervalWeeks=1){
+function updateDisbursementFirstRepayment(frequency='weekly'){
   const dInput=document.getElementById('dDate');
   const firstInput=document.getElementById('dFirstRep');
   if(!dInput||!firstInput)return;
@@ -3841,35 +3947,38 @@ function updateDisbursementFirstRepayment(intervalWeeks=1){
     toast('Disbursement date cannot be in the future.', 'warning');
     dInput.value=today();
   }
-  const d=parseLocalDate(dInput.value||today());
+  const product={repaymentFrequency:frequency,paymentEveryWeeks:frequency==='biweekly'?2:frequency==='monthly'?4:1};
+  const d=addPataFixRepaymentPeriods(dInput.value||today(),1,product);
   if(!d)return;
-  d.setDate(d.getDate()+Number(intervalWeeks||1)*7);
   firstInput.value=localISODate(d);
 }
 
 async function disburseApprovedApplication(options){
     const{appId,clientId,termWeeks}=options;
-    const {data: appCheck} = await sb('loan_applications').select('status,branch_name,loan_clients(branch_name),loan_products(name)').eq('id', appId).single();
+    const {data: appCheck} = await sb('loan_applications').select('status,branch_name,loan_clients(branch_name),loan_products(*)').eq('id', appId).single();
     if(appCheck?.status === 'disbursed') {
         throw new Error('This application has already been disbursed.');
     }
 
     const amt=Number(options.amount);const term=Number(termWeeks);
-    const product=patafixProductByName(appCheck?.loan_products?.name)||getPataFixProduct(amt);
-    const c=calcPataFixLoan(amt,term,product?.name,'flat');
-    const procFee=processingFeeFor(amt, product?.name);
+    const product=normalizePataFixProduct(appCheck?.loan_products)||getPataFixProduct(amt);
+    if(!validPataFixProduct(product))throw new Error('This loan product is incomplete. Finish its setup before disbursement.');
+    if(amt<product.min||amt>product.max)throw new Error(`${product.name} allows ${fmtMoney(product.min)} to ${fmtMoney(product.max)}.`);
+    if(term<product.minTermWeeks||term>product.maxTermWeeks)throw new Error('The approved term is outside this product settings.');
+    const c=calcPataFixLoan(amt,term,product,'flat');
+    const procFee=processingFeeFor(amt, product);
     // Registration fee only applies to newly registered clients on their first loan.
     const{data:prevLoans}=await sb('loans').select('id,loan_officer_id,created_at').eq('client_id',clientId).eq('business_id',currentUser?.business_id).order('created_at',{ascending:false}).limit(2);
     const{data:feeClient}=await sb('loan_clients').select('full_name,notes').eq('id',clientId).eq('business_id',currentUser?.business_id).single();
     const isReturningClient=(prevLoans&&prevLoans.length>0);
-    const regFee=registrationFeeForClient(feeClient, prevLoans, product?.name);
+    const regFee=registrationFeeForClient(feeClient, prevLoans, product);
     const netDisbursement=amt;
     const disbDate=options.disbDate;const firstRep=options.firstRep;
     if(!disbDate)throw new Error('Select disbursement date.');
     if(isFutureDateValue(disbDate))throw new Error('Disbursement date cannot be in the future.');
     if(firstRep && firstRep < disbDate)throw new Error('First repayment date cannot be before disbursement date.');
     const feeRef=String(options.feeRef||'').trim();
-    const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(c.installments-1)*c.intervalWeeks*7);
+    const maturity=addPataFixRepaymentPeriods(firstRep,c.installments-1,product);
 
     const loanNo = generateUniqueNo('LN');
 
@@ -3935,7 +4044,7 @@ async function disburseApprovedApplication(options){
 
     let alreadyPaidForSchedules=openingPaid;
     const schedules=c.schedule.map((s,i)=>{
-      const due=parseLocalDate(firstRep);due.setDate(due.getDate()+i*c.intervalWeeks*7);
+      const due=addPataFixRepaymentPeriods(firstRep,i,product);
       const paidHere=Math.min(alreadyPaidForSchedules, Number(s.total||0));
       alreadyPaidForSchedules=Number(Math.max(0,alreadyPaidForSchedules-paidHere).toFixed(2));
       const scheduleStatus=paidHere>=Number(s.total||0)?'paid':paidHere>0?'partial':'pending';
@@ -4269,7 +4378,7 @@ let restructureLoanDraft=null;
 async function openRestructureLoanModal(id){
   if(!hasRole('admin','branch_manager'))return toast('Admin or manager access required','warning');
   const[{data:loan,error:loanError},{data:schedules,error:scheduleError},{data:repayments,error:repaymentError},{data:penalties,error:penaltyError}]=await Promise.all([
-    sb('loans').select('*,loan_clients(full_name,phone,id_number),loan_applications(loan_products(name))').eq('id',id).eq('business_id',currentUser.business_id).single(),
+    sb('loans').select('*,loan_clients(full_name,phone,id_number),loan_applications(loan_products(*))').eq('id',id).eq('business_id',currentUser.business_id).single(),
     sb('loan_schedules').select('*').eq('loan_id',id).order('due_date',{ascending:true}).order('installment_no',{ascending:true}),
     sb('loan_repayments').select('amount,principal_portion,interest_portion,penalty_portion').eq('loan_id',id),
     sb('loan_penalties').select('penalty_amount,is_waived').eq('loan_id',id)
@@ -5241,6 +5350,7 @@ async function renderOverdue(opts){
   }
   const todayStr=today();
   asOfDate=asOfDate||todayStr;
+  appFilters.overdue.minDays=minDays;
 
   const main=$('#mainContent');
   try{
@@ -5248,14 +5358,18 @@ async function renderOverdue(opts){
     const isOfficerOnly = hasRole('loan_officer') && !hasRole('admin','branch_manager');
 
     // Fetch active loans — officers see only their own, admins see all
-    let loansQuery = sb('loans').select('*,loan_clients(full_name,phone,id_number,address),loan_applications(loan_products(name))')
+    let loansQuery = sb('loans').select('*,loan_clients(full_name,phone,id_number,address,branch_name),loan_applications(loan_products(*))')
       .eq('business_id',currentUser.business_id).eq('status','active').order('overdue_days',{ascending:false});
     if(isOfficerOnly) loansQuery = loansQuery.eq('loan_officer_id', currentUser.id);
 
     const [{data:loans},{data:staffList}]=await Promise.all([
       loansQuery,
-      sb('loan_staff').select('id,name').eq('business_id',currentUser.business_id)
+      sb('loan_staff').select('id,name,role,branch_name,is_active').eq('business_id',currentUser.business_id)
     ]);
+    await loadPataFixBranches();
+    let visibleLoans=filterByBranch(loans||[],'overdue');
+    const selectedOfficer=isOfficerOnly?currentUser.id:(appFilters.overdue.officer||'all');
+    if(selectedOfficer!=='all')visibleLoans=visibleLoans.filter(l=>l.loan_officer_id===selectedOfficer);
 
     // Populate global staff map so buildDueTodayTable / buildDuesTable can also use it
     window._staffMap = {};
@@ -5267,9 +5381,9 @@ async function renderOverdue(opts){
     // hasn't been visited yet, and ensures officers only see their own clients
     // in the dues forecast too.
     cachedData = cachedData || {};
-    cachedData.loans = loans || [];
+    cachedData.loans = visibleLoans;
 
-    const loanIds=(loans||[]).map(l=>l.id);
+    const loanIds=visibleLoans.map(l=>l.id);
     let allScheds=[];
     if(loanIds.length){
       const{data:scheds}=await sb('loan_schedules')
@@ -5281,7 +5395,7 @@ async function renderOverdue(opts){
 
     // Build per-loan arrears based on asOfDate
     const loanMap={};
-    (loans||[]).forEach(l=>{ loanMap[l.id]=l; });
+    visibleLoans.forEach(l=>{ loanMap[l.id]=l; });
 
     // Dues/Forecast retains installments due on the selected date.
     const missed=allScheds.filter(s=>{
@@ -5323,7 +5437,7 @@ async function renderOverdue(opts){
     // Retain the previous fallback for older/imported loans without schedules.
     const scheduleCapturedIds=new Set(overdueLoans.map(l=>l.id));
     const loansWithSchedules=new Set(allScheds.map(s=>s.loan_id));
-    const fallbackLoans=(loans||[]).filter(l=>
+    const fallbackLoans=visibleLoans.filter(l=>
       l.status==='active' &&
       !scheduleCapturedIds.has(l.id) &&
       !loansWithSchedules.has(l.id) &&
@@ -5345,7 +5459,7 @@ async function renderOverdue(opts){
     if(minDays>0) overdueLoans=overdueLoans.filter(l=>l._asof_days>=minDays);
     overdueLoans.sort((a,b)=>b._asof_days-a._asof_days);
 
-    const allActive=(loans||[]).filter(l=>l.status==='active');
+    const allActive=visibleLoans.filter(l=>l.status==='active');
     const portfolio=allActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
     const buckets=[0,0,0,0,0];
     overdueLoans.forEach(l=>{const d=Number(l._asof_days??l.overdue_days??0);if(d<=30)buckets[0]++;else if(d<=60)buckets[1]++;else if(d<=90)buckets[2]++;else if(d<=180)buckets[3]++;else buckets[4]++;});
@@ -5475,7 +5589,7 @@ async function renderOverdue(opts){
         var split=l._asof_arrears_split||splitLoanBalanceAmount(l,arrears);
         var officerName=(window._staffMap && l.loan_officer_id && window._staffMap[l.loan_officer_id])||'Unassigned';
         summaryHtml += '<tr>' +
-          '<td>'+patafixBranchLabel()+'</td>' +
+          '<td>'+escapeHtml(patafixBranchLabel(l))+'</td>' +
           '<td><span class="badge badge-gray" style="text-transform:capitalize">'+officerName+'</span></td>' +
           '<td><strong>'+(l.loan_clients?.full_name||'-')+'</strong></td>' +
           '<td><a href="tel:'+(l.loan_clients?.phone||'')+'" style="color:var(--accent-blue)">'+(l.loan_clients?.phone||'-')+'</a></td>' +
@@ -5507,6 +5621,19 @@ async function renderOverdue(opts){
       '<div style="padding:0 14px 12px"><canvas id="chartAging" style="max-height:180px"></canvas></div>';
 
     // ── Assemble page ──
+    const currentBranch=effectiveBranchFilter('overdue');
+    const branchChoices=branchOptionsFromRows(loans||[]);
+    const officerChoices=(staffList||[]).filter(s=>{
+      if(s.is_active===false)return false;
+      if(currentBranch!=='all'&&normalizeBranchName(s.branch_name)!==currentBranch)return false;
+      return (loans||[]).some(l=>l.loan_officer_id===s.id&&(currentBranch==='all'||recordBranchName(l)===currentBranch));
+    });
+    const branchFilterHtml=canViewAllBranches()
+      ? '<div style="display:flex;align-items:center;gap:6px"><span style="font-size:12px;color:var(--text-secondary)">Branch:</span><select class="select" style="width:auto;padding:4px 8px;font-size:12px" onchange="setOverdueDimensionFilter(\'branch\',this.value)"><option value="all">All Branches</option>'+branchChoices.map(b=>'<option value="'+escapeHtml(b)+'" '+(currentBranch===b?'selected':'')+'>'+escapeHtml(b)+'</option>').join('')+'</select></div>'
+      : '<div style="display:flex;align-items:center;gap:6px"><span style="font-size:12px;color:var(--text-secondary)">Branch:</span><span class="badge badge-blue">'+escapeHtml(currentBranch)+'</span></div>';
+    const officerFilterHtml=isOfficerOnly
+      ? '<div style="display:flex;align-items:center;gap:6px"><span style="font-size:12px;color:var(--text-secondary)">Officer:</span><span class="badge badge-gray">'+escapeHtml(currentUser.name||'My portfolio')+'</span></div>'
+      : '<div style="display:flex;align-items:center;gap:6px"><span style="font-size:12px;color:var(--text-secondary)">Officer:</span><select class="select" style="width:auto;padding:4px 8px;font-size:12px" onchange="setOverdueDimensionFilter(\'officer\',this.value)"><option value="all">All Officers</option>'+officerChoices.map(o=>'<option value="'+o.id+'" '+(selectedOfficer===o.id?'selected':'')+'>'+escapeHtml(o.name||'Unnamed officer')+'</option>').join('')+'</select></div>';
     var pageHtml =
       '<div class="page-header" style="flex-direction:column;align-items:flex-start;gap:10px">' +
         '<h1>Dues/Forecast Report</h1>' +
@@ -5527,6 +5654,7 @@ async function renderOverdue(opts){
               '<option value="90" '+(minDays===90?'selected':'')+'>90+ days</option>' +
             '</select>' +
           '</div>' +
+          branchFilterHtml + officerFilterHtml +
           '<span class="badge badge-red">'+overdueLoans.length+' loan'+(overdueLoans.length!==1?'s':'')+' in arrears &nbsp;·&nbsp; '+fmtMoney(totalArrears)+'</span>' +
         '</div>' +
       '</div>' +
@@ -5549,6 +5677,14 @@ async function renderOverdue(opts){
   }catch(e){console.error(e);toast(e.message,'error')}
 }
 
+function setOverdueDimensionFilter(kind,value){
+  if(!['branch','officer'].includes(kind))return;
+  appFilters.overdue[kind]=value||'all';
+  if(kind==='branch')appFilters.overdue.officer='all';
+  const snap=window._overdueSnapshot||{};
+  renderOverdue({asOfDate:snap.asOfDate||today(),minDays:appFilters.overdue.minDays||1});
+}
+
 function toggleSection(id){
   var body = document.getElementById('arr-body-'+id);
   var icon = document.getElementById('arr-icon-'+id);
@@ -5558,8 +5694,8 @@ function toggleSection(id){
   if(icon) icon.style.transform = isOpen ? '' : 'rotate(180deg)';
 }
 
-function patafixBranchLabel(){
-  return 'PataFix001';
+function patafixBranchLabel(loan){
+  return loan?recordBranchName(loan):(effectiveBranchFilter('overdue')==='all'?'All Branches':effectiveBranchFilter('overdue'));
 }
 
 function loanProductLabel(loan){
@@ -5587,7 +5723,7 @@ function buildDuesTable(dueRows){
       ? '<td style="color:var(--accent-red);font-weight:700">'+fmtMoney(arrears)+'</td>'
       : '<td><span style="color:var(--text-secondary)">—</span></td>';
     html += '<tr>' +
-      '<td>'+patafixBranchLabel()+'</td>' +
+      '<td>'+escapeHtml(patafixBranchLabel(loan))+'</td>' +
       '<td><strong>'+(loan.loan_clients?.full_name||'-')+'</strong></td>' +
       '<td>'+(loan.loan_clients?.id_number||'-')+'</td>' +
       '<td><a href="tel:'+(loan.loan_clients?.phone||'')+'" style="color:var(--accent-blue)">'+(loan.loan_clients?.phone||'-')+'</a></td>' +
@@ -5675,7 +5811,7 @@ function downloadDuesExcel(){
   const dueRows=snap.dueRows||[];
   if(!dueRows.length){toast('No dues data to download','warning');return;}
   const sheet=dueRows.map(({loan,s,remaining,paid})=>({
-    'Branch':patafixBranchLabel(),
+    'Branch':patafixBranchLabel(loan),
     'Client Name':loan.loan_clients?.full_name||'-',
     'ID Number':loan.loan_clients?.id_number||'-',
     'Phone':loan.loan_clients?.phone||'-',
@@ -5737,7 +5873,7 @@ function downloadArrearsSummaryExcel(){
   const{asOfDate,overdueLoans}=snap;
   if(!overdueLoans.length){toast('No arrears data to download','warning');return;}
   const sheet=overdueLoans.map(l=>({
-    'Branch':patafixBranchLabel(),
+    'Branch':patafixBranchLabel(l),
     'Loan Officer':(window._staffMap && l.loan_officer_id) ? window._staffMap[l.loan_officer_id] : 'Unassigned',
     'Client Name':l.loan_clients?.full_name||'-',
     'Mobile Number':l.loan_clients?.phone||'-',
@@ -5991,7 +6127,7 @@ async function loadReportData(id){
   }
   if(id==='disbursement'){
     const[{data:loans},{data:staff}]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name,phone,id_number,address)').eq('business_id',biz).order('disbursement_date',{ascending:false}),
+      sb('loans').select('*,loan_clients(full_name,phone,id_number,address),loan_applications(loan_products(*))').eq('business_id',biz).order('disbursement_date',{ascending:false}),
       sb('loan_staff').select('id,name').eq('business_id',biz)
     ]);
     const staffMap={};(staff||[]).forEach(s=>{staffMap[s.id]=s.name;});
@@ -6004,7 +6140,7 @@ async function loadReportData(id){
       {label:'Total Principal',value:fmtMoney(filteredLoansDisb.reduce((s,l)=>s+Number(l.principal_amount||0),0))},
       {label:'Total Interest',value:fmtMoney(filteredLoansDisb.reduce((s,l)=>s+Number(l.total_interest||0),0))},
       {label:'Total Processing Fees',value:fmtMoney(filteredLoansDisb.reduce((s,l)=>s+Number(l.processing_fee||0),0))}
-    ],rows:filteredLoansDisb.map(l=>({
+    ],rows:filteredLoansDisb.map(l=>{const product=normalizePataFixProduct(l.loan_applications?.loan_products);return {
       'Loan #':l.loan_no,
       'Client':l.loan_clients?.full_name||'-',
       'ID Number':l.loan_clients?.id_number||'-',
@@ -6016,19 +6152,19 @@ async function loadReportData(id){
       'Interest (KES)':Number(l.total_interest||0),
       'Total P+I (KES)':Number(l.total_payable||l.principal_amount||0),
       'Processing Fee (KES)':Number(l.processing_fee||0),
-      'Term (Weeks)':l.term_weeks||'-',
-      'Weekly Installment (KES)':Number(l.weekly_installment||0),
+      'Term':product?patafixTermLabel(product,l.term_weeks):(l.term_weeks||'-')+' weeks',
+      'Scheduled Installment (KES)':Number(l.weekly_installment||0),
       'Method':l.disbursement_method,
       'Reference':l.disbursement_reference||'-',
       'Disburse Date':l.disbursement_date||'-',
       'Maturity Date':l.maturity_date||'-',
       'Status':l.status
-    })),cols:['Loan #','Client','ID Number','Phone','Location','Loan Officer','Disbursed Amount (KES)','Principal (KES)','Interest (KES)','Total P+I (KES)','Processing Fee (KES)','Term (Weeks)','Weekly Installment (KES)','Method','Reference','Disburse Date','Maturity Date','Status']};
+    };}),cols:['Loan #','Client','ID Number','Phone','Location','Loan Officer','Disbursed Amount (KES)','Principal (KES)','Interest (KES)','Total P+I (KES)','Processing Fee (KES)','Term','Scheduled Installment (KES)','Method','Reference','Disburse Date','Maturity Date','Status']};
   }
   if(id==='aging'){
     const reportDate=today();
     const[{data:loans},{data:staff},{data:schedules}]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name,phone,id_number,address),loan_applications(loan_products(name))').eq('business_id',biz).eq('status','active'),
+      sb('loans').select('*,loan_clients(full_name,phone,id_number,address,branch_name),loan_applications(loan_products(*))').eq('business_id',biz).eq('status','active'),
       sb('loan_staff').select('id,name').eq('business_id',biz),
       sb('loan_schedules').select('loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status').eq('business_id',biz).lt('due_date',reportDate).limit(100000)
     ]);
@@ -6066,7 +6202,7 @@ async function loadReportData(id){
       {label:'Total Arrears',value:fmtMoney(totalArrears)},
       {label:'Total Outstanding Balance',value:fmtMoney(overdue.reduce((sum,item)=>sum+Number(item.loan.outstanding_balance||0),0))}
     ],rows:overdue.map(({loan:l,arrears,days})=>({
-      'Branch':patafixBranchLabel(),
+      'Branch':patafixBranchLabel(l),
       'Loan Officer':l.loan_officer_id?staffMap[l.loan_officer_id]||'Unassigned':'Unassigned',
       'Client Name':l.loan_clients?.full_name||'-',
       'Mobile Number':l.loan_clients?.phone||'-',
@@ -9474,43 +9610,70 @@ async function deleteStaff(id) {
 async function editStaff(id){const{data:s}=await sb('loan_staff').select('*').eq('id',id).single();if(s)openAddStaffModal(s)}
 
 // ═══ CALCULATOR ═══
-function renderCalculator(){
+async function renderCalculator(){
   const main=$('#mainContent');
+  let products=[];
+  try{
+    products=(await ensurePataFixProducts()).filter(p=>p.is_active!==false&&validPataFixProduct(normalizePataFixProduct(p)));
+  }catch(e){
+    main.innerHTML=`<div class="page-header"><h1>Loan Calculator</h1></div><div class="empty-state"><p>${escapeHtml(e.message||'Could not load loan products')}</p></div>`;
+    return;
+  }
+  window._calcProducts=products;
+  if(!products.length){
+    main.innerHTML='<div class="page-header"><h1>Loan Calculator</h1></div><div class="empty-state"><p>No fully configured active loan product is available.</p></div>';
+    return;
+  }
   main.innerHTML=`
     <div class="page-header"><h1>Loan Calculator</h1></div>
     <div class="card" style="max-width:700px">
-      <div class="form-row"><div class="form-group"><label>Product</label><select class="select" id="calcProduct" onchange="updateCalc()">${PATAFIX_PRODUCTS.map(p=>`<option value="${p.name}">${p.name}</option>`).join('')}</select></div><div class="form-group"><label>Loan Amount</label><input class="input" type="number" id="calcAmt" value="10000" oninput="updateCalc()"></div></div>
-      <div class="form-row"><div class="form-group"><label>Term (weeks)</label><input class="input" type="number" id="calcTerm" value="4" oninput="updateCalc()"></div><div class="form-group"><label>Interest Type</label><select class="select" id="calcType" onchange="updateCalc()"><option value="flat">Flat Rate</option><option value="reducing_balance">Reducing Balance</option></select></div></div>
-      <div class="form-group"><label>Product Fees</label><div class="input" style="background:rgba(37,99,235,.06)">Inua Biz: KES 500 flat. Kuza: 5%. Nawiri: 6%. Komanza: 10%. Registration fee is product-based.</div></div>
+      <div class="form-row"><div class="form-group"><label>Product</label><select class="select" id="calcProduct" onchange="onCalcProductChange()">${products.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')}</select></div><div class="form-group"><label>Loan Amount</label><input class="input" type="number" id="calcAmt" value="10000" oninput="updateCalc()"></div></div>
+      <div class="form-row"><div class="form-group"><label id="calcTermLabel">Term (weeks)</label><input class="input" type="number" id="calcTerm" value="4" oninput="updateCalc()"></div><div class="form-group"><label>Interest Type</label><select class="select" id="calcType" onchange="updateCalc()"><option value="flat">Flat Rate</option><option value="reducing_balance">Reducing Balance</option></select></div></div>
+      <div class="form-group"><label>Product Fees</label><div class="input" style="background:rgba(37,99,235,.06)">Fees, registration charges and repayment frequency follow the selected product settings.</div></div>
       <div class="card" style="margin-top:8px;font-size:13px" id="calcTierDetect"></div>
       <div id="calcResults" style="margin-top:16px"></div>
       <button class="btn btn-outline" style="margin-top:12px" onclick="downloadCalcExcel()">Download Schedule (Excel)</button>
       <button class="btn btn-primary" style="margin-top:12px" onclick="navigateTo('applications')">Start Application</button>
     </div>
   `;
-  setTimeout(updateCalc,50);
+  setTimeout(onCalcProductChange,50);
 }
 
 let lastCalcSchedule=[];
+function selectedCalcProduct(){
+  const row=(window._calcProducts||[]).find(p=>p.id===document.getElementById('calcProduct')?.value);
+  return normalizePataFixProduct(row);
+}
+function onCalcProductChange(){
+  const product=selectedCalcProduct();const input=document.getElementById('calcTerm');const amount=document.getElementById('calcAmt');
+  if(product&&input){
+    const min=patafixDisplayedTerm(product,product.minTermWeeks||1),max=patafixDisplayedTerm(product,product.maxTermWeeks||52);
+    input.min=min;input.max=max;input.value=min;
+    document.getElementById('calcTermLabel').textContent=`Term (${product.termUnit==='months'?'months':'weeks'})`;
+    if(amount&&(Number(amount.value)<product.min||Number(amount.value)>product.max))amount.value=product.min;
+    const typeInput=document.getElementById('calcType');if(typeInput){typeInput.value=product.interestType||'flat';typeInput.disabled=true;}
+  }
+  updateCalc();
+}
 function updateCalc(){
-  const amt=Number($('#calcAmt')?.value)||0;const productName=$('#calcProduct')?.value||'';const product=getPataFixProduct(amt,productName);
-  const term=Number($('#calcTerm')?.value)||1;const type=$('#calcType')?.value||'flat';
+  const amt=Number($('#calcAmt')?.value)||0;const product=selectedCalcProduct();
+  const term=patafixInputTermWeeks(product,Number($('#calcTerm')?.value)||1);const type=$('#calcType')?.value||product?.interestType||'flat';
   
   const tierEl=$('#calcTierDetect');
   if(tierEl&&amt>0){
-    const tier=getAutoTier(amt, productName);
-    tierEl.innerHTML=`<strong>${tier}</strong> | Rate: <strong>${product?.monthlyRate||0}% p.m</strong> | ${patafixFeeLabel(product)} | Registration fee: <strong>${fmtMoney(product?.registrationFee||0)}</strong> | Payments: <strong>${product?.paymentEveryWeeks===2?'Biweekly':'Weekly'}</strong>`;
+    const tier=product?.name||'Select product';
+    tierEl.innerHTML=`<strong>${tier}</strong> | Rate: <strong>${product?.monthlyRate||0}% p.m</strong> | ${patafixFeeLabel(product)} | Registration fee: <strong>${fmtMoney(product?.registrationFee||0)}</strong> | Payments: <strong>${patafixRepaymentLabel(product)}</strong>`;
     tierEl.style.display='block';
   }
   
-  const c=calcPataFixLoan(amt,term,productName,type);
+  const c=calcPataFixLoan(amt,term,product,type);
   lastCalcSchedule=c.schedule;
   const el=$('#calcResults');if(!el)return;
   el.innerHTML=`
     <div class="kpi-grid" style="margin-bottom:16px">
       <div class="kpi-card"><div class="kpi-label">${c.installmentLabel}</div><div class="kpi-value" style="color:var(--accent-blue)">${fmtMoney(c.weekly)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Total Interest</div><div class="kpi-value" style="color:var(--accent-yellow)">${fmtMoney(c.totalInterest)}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Loan Fee</div><div class="kpi-value">${fmtMoney(processingFeeFor(amt, productName))}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Loan Fee</div><div class="kpi-value">${fmtMoney(processingFeeFor(amt, product))}</div></div>
       <div class="kpi-card"><div class="kpi-label">Total Payable</div><div class="kpi-value" style="color:var(--accent-red)">${fmtMoney(c.totalPayable)}</div></div>
     </div>
     <div class="table-wrap"><table><thead><tr><th>#</th><th>Principal</th><th>Interest</th><th>Installment</th><th>Balance</th></tr></thead><tbody>
