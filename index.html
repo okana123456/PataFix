@@ -1335,6 +1335,34 @@ function addPataFixRepaymentPeriods(baseDate,periods,product){
   return date;
 }
 
+const patafixAgingRefreshes={};
+async function refreshPataFixLoanAging(loanId=''){
+  if(!currentUser?.business_id)return null;
+  const key=`${currentUser.business_id}:${loanId||'all'}:${today()}`;
+  if(patafixAgingRefreshes[key])return patafixAgingRefreshes[key];
+  try{
+    const{data,error}=await supabaseClient.rpc('patafix_refresh_loan_aging',{
+      p_business_id:currentUser.business_id,
+      p_loan_id:loanId||null
+    });
+    if(error)throw error;
+    patafixAgingRefreshes[key]=data||{ok:true};
+    return patafixAgingRefreshes[key];
+  }catch(e){
+    console.warn('PataFix aging refresh unavailable:',e?.message||e);
+    return null;
+  }
+}
+function effectiveScheduleStatus(schedule,asOfDate=today()){
+  const saved=String(schedule?.status||'pending').toLowerCase();
+  if(['restructured','cancelled','waived'].includes(saved))return saved;
+  const due=Number(schedule?.total_due||0);
+  const paid=Number(schedule?.total_paid||0);
+  if(paid>=due-0.005)return 'paid';
+  if(String(schedule?.due_date||'')<asOfDate)return 'overdue';
+  return paid>0?'partial':'pending';
+}
+
 // ═══ AUTH — EMAIL + GOOGLE ═══
 
 function switchAuthTab(tab){
@@ -2150,6 +2178,7 @@ async function renderDashboard(){
   const main=$('#mainContent');
   if(!currentUser?.business_id) return;
   try{
+    await refreshPataFixLoanAging();
     await loadPataFixBranches();
     const todayFetch=today();
     const[loansR,schedR,todaySchedR,repR,appsR,clientsR]=await Promise.all([
@@ -4107,6 +4136,7 @@ let loanPage=1;
 async function renderLoans(page=1){
   loanPage=page;const main=$('#mainContent');
   try{
+    await refreshPataFixLoanAging();
     await loadPataFixBranches();
     const{data:loans}=await sb('loans').select('*,loan_clients(full_name,phone,id_number,branch_name)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
 
@@ -4222,6 +4252,7 @@ function filterLoanStatus(v){
 }
 
 async function viewLoan(id){
+  await refreshPataFixLoanAging(id);
   const{data:loan}=await sb('loans').select('*,loan_clients(full_name,phone,id_number)').eq('id',id).single();
   const{data:schedules}=await sb('loan_schedules').select('*').eq('loan_id',id).order('installment_no');
   const{data:payments}=await sb('loan_repayments').select('*').eq('loan_id',id).order('payment_date',{ascending:true}).order('created_at',{ascending:true});
@@ -4252,7 +4283,7 @@ async function viewLoan(id){
         const archived=String(s.status||'').toLowerCase()==='restructured';
         const remaining=archived?0:Math.max(0, due-paid);
         const remColor = remaining===0 ? 'var(--accent-green)' : (paid>0 ? 'var(--accent-yellow)' : 'var(--accent-red)');
-        return `<tr style="${archived?'opacity:.62;background:rgba(148,163,184,.06)':''}"><td>${s.installment_no}</td><td>${fmtDate(s.due_date)}</td><td>${fmtMoney(due)}</td><td>${fmtMoney(paid)}</td><td>${archived?'<span style="color:var(--text-secondary)">Moved to new schedule</span>':`<strong style="color:${remColor}">${fmtMoney(remaining)}</strong>`}</td><td>${statusBadge(s.status)}</td></tr>`;
+        return `<tr style="${archived?'opacity:.62;background:rgba(148,163,184,.06)':''}"><td>${s.installment_no}</td><td>${fmtDate(s.due_date)}</td><td>${fmtMoney(due)}</td><td>${fmtMoney(paid)}</td><td>${archived?'<span style="color:var(--text-secondary)">Moved to new schedule</span>':`<strong style="color:${remColor}">${fmtMoney(remaining)}</strong>`}</td><td>${statusBadge(effectiveScheduleStatus(s))}</td></tr>`;
       }).join('')}
       </tbody></table></div>
     </div>
