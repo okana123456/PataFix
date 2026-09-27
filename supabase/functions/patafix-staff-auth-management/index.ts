@@ -18,6 +18,22 @@ function splitRoles(role: unknown) {
   return String(role || "").split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+async function findAuthUserByEmail(admin: any, email: string) {
+  const target = String(email || "").trim().toLowerCase();
+  if (!target) return null;
+
+  for (let page = 1; page <= 20; page += 1) {
+    const { data, error } = await admin.auth.admin.listUsers({ page, perPage: 1000 });
+    if (error) throw error;
+    const users = data?.users || [];
+    const match = users.find((user: any) => String(user.email || "").trim().toLowerCase() === target);
+    if (match) return match;
+    if (users.length < 1000) break;
+  }
+
+  return null;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, message: "Use POST" }, 405);
@@ -165,22 +181,70 @@ serve(async (req) => {
 
     if (action === "reset_password") {
       const cleanPassword = String(password || "");
-      if (!staffRecord.auth_user_id) return json({ ok: false, message: "This staff member has no linked login account." }, 400);
       if (cleanPassword.length < 6) return json({ ok: false, message: "Password must be at least 6 characters." }, 400);
-      const { error: resetError } = await admin.auth.admin.updateUserById(staffRecord.auth_user_id, {
+
+      const cleanEmail = String(staffRecord.email || "").trim().toLowerCase();
+      if (!cleanEmail) return json({ ok: false, message: "This staff member has no email address." }, 400);
+
+      let authUser = null;
+      if (staffRecord.auth_user_id) {
+        const { data: linkedUserData, error: linkedUserError } = await admin.auth.admin.getUserById(staffRecord.auth_user_id);
+        if (!linkedUserError && linkedUserData?.user) authUser = linkedUserData.user;
+      }
+
+      if (!authUser) authUser = await findAuthUserByEmail(admin, cleanEmail);
+
+      if (authUser) {
+        const { data: conflictingStaff, error: conflictError } = await admin
+          .from("loan_staff")
+          .select("id,name,business_id")
+          .eq("auth_user_id", authUser.id)
+          .neq("id", staffRecord.id)
+          .maybeSingle();
+        if (conflictError) return json({ ok: false, message: conflictError.message }, 500);
+        if (conflictingStaff) {
+          return json({
+            ok: false,
+            message: `This email is already linked to ${conflictingStaff.name || "another staff account"}.`,
+          }, 409);
+        }
+      } else {
+        const { data: createdUserData, error: createUserError } = await admin.auth.admin.createUser({
+          email: cleanEmail,
+          password: cleanPassword,
+          email_confirm: true,
+          user_metadata: { full_name: staffRecord.name, patafix_business_id: requester.business_id },
+        });
+        if (createUserError) return json({ ok: false, message: createUserError.message }, 400);
+        authUser = createdUserData?.user || null;
+      }
+
+      if (!authUser) return json({ ok: false, message: "Could not create or locate this staff login." }, 500);
+
+      const { error: resetError } = await admin.auth.admin.updateUserById(authUser.id, {
+        email: cleanEmail,
         password: cleanPassword,
         email_confirm: true,
+        user_metadata: { full_name: staffRecord.name, patafix_business_id: requester.business_id },
       });
       if (resetError) return json({ ok: false, message: resetError.message }, 400);
+
+      const { error: linkError } = await admin
+        .from("loan_staff")
+        .update({ auth_user_id: authUser.id, email: cleanEmail, is_active: true })
+        .eq("id", staffRecord.id)
+        .eq("business_id", requester.business_id);
+      if (linkError) return json({ ok: false, message: linkError.message }, 500);
+
       await admin.from("loan_audit_log").insert({
         business_id: requester.business_id,
         user_id: requester.id,
         action: "staff_password_reset_by_admin",
         table_name: "loan_staff",
         record_id: staffRecord.id,
-        new_value: { email: staffRecord.email, name: staffRecord.name },
+        new_value: { email: cleanEmail, name: staffRecord.name, auth_user_id: authUser.id, login_repaired: true },
       }).catch(() => undefined);
-      return json({ ok: true, message: "Password updated. Staff can sign in immediately." });
+      return json({ ok: true, message: "Password updated and login activated. Staff can sign in immediately." });
     }
 
     if (action === "delete") {
