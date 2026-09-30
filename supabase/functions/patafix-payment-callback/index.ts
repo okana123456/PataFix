@@ -18,23 +18,6 @@ function digits(value: unknown) {
   return String(value || "").replace(/\D/g, "");
 }
 
-function phoneVariants(value: unknown) {
-  const original = String(value || "").trim();
-  if (/[xX*•]/.test(original)) return [];
-  const raw = digits(original);
-  const out = new Set<string>();
-  if (raw.length < 9 || raw.length > 15) return [];
-  out.add(raw);
-  if (raw.length >= 9) out.add(raw.slice(-9));
-  if (raw.length === 12 && raw.startsWith("254")) out.add(`0${raw.slice(3)}`);
-  if (raw.length === 10 && raw.startsWith("0")) out.add(`254${raw.slice(1)}`);
-  if (raw.length === 9 && /^[17]/.test(raw)) {
-    out.add(`0${raw}`);
-    out.add(`254${raw}`);
-  }
-  return [...out];
-}
-
 function mpesaDate(value: unknown) {
   const s = String(value || "").trim();
   if (/^\d{14}$/.test(s)) {
@@ -65,61 +48,49 @@ function currentScheduleInterestRatio(schedules: any[], loan: any) {
     : 0;
 }
 
-async function findClient(supabase: any, businessId: string, accountNumber: string, payerPhone: string) {
+async function findClientByAccountId(supabase: any, businessId: string, accountNumber: string) {
   const accountDigits = digits(accountNumber);
-  if (accountDigits) {
-    const { data } = await supabase
-      .from("loan_clients")
-      .select("id, business_id, full_name, id_number, phone")
-      .eq("business_id", businessId)
-      .eq("id_number", accountDigits)
-      .maybeSingle();
-    if (data) return data;
-  }
+  if (!accountDigits) return null;
 
-  const phoneCandidates = [...new Set([
-    ...phoneVariants(accountNumber),
-    ...phoneVariants(payerPhone),
-  ])];
+  const { data, error } = await supabase
+    .from("loan_clients")
+    .select("id, business_id, full_name, id_number, phone")
+    .eq("business_id", businessId)
+    .eq("id_number", accountDigits)
+    .limit(2);
+  if (error) throw error;
 
-  for (const candidate of phoneCandidates) {
-    const { data } = await supabase
-      .from("loan_clients")
-      .select("id, business_id, full_name, id_number, phone")
-      .eq("business_id", businessId)
-      .eq("phone", candidate)
-      .maybeSingle();
-    if (data) return data;
-  }
-
-  for (const tail of [...new Set(phoneCandidates.map((phone) => phone.slice(-9)))]) {
-    const { data } = await supabase
-      .from("loan_clients")
-      .select("id, business_id, full_name, id_number, phone")
-      .eq("business_id", businessId)
-      .ilike("phone", `%${tail}`)
-      .limit(1)
-      .maybeSingle();
-    if (data) return data;
-  }
-
-  return null;
+  // An ID must identify exactly one client before money can post automatically.
+  return data?.length === 1 ? data[0] : null;
 }
 
 async function recordUnmatchedPayment(
   supabase: any,
   { businessId, accountNumber, amount, transId, payerPhone, payerName, body }: any,
 ) {
-  await supabase.from("unmatched_payments").insert({
+  const { data: existing, error: lookupError } = await supabase
+    .from("unmatched_payments")
+    .select("id, resolved")
+    .eq("business_id", businessId)
+    .eq("mpesa_reference", transId)
+    .limit(1)
+    .maybeSingle();
+  if (lookupError) throw lookupError;
+  if (existing) return existing;
+
+  const { data: inserted, error: insertError } = await supabase.from("unmatched_payments").insert({
     amount,
     account_number: accountNumber,
     business_id: businessId,
     mpesa_reference: transId,
     payer_phone: payerPhone,
     payer_name: payerName,
+    payment_date: mpesaDate(body?.TransTime),
     raw_payload: body,
     resolved: false,
-  });
+  }).select("id, resolved").single();
+  if (insertError) throw insertError;
+  return inserted;
 }
 
 serve(async (req) => {
@@ -163,59 +134,89 @@ serve(async (req) => {
     );
     trackedSupabase = supabase;
 
-    const { data: existingCallback } = await supabase
+    const { data: settings, error: settingsError } = await supabase
+      .from("loan_settings")
+      .select("business_id, mpesa_auto_confirm")
+      .eq("mpesa_shortcode", shortcode)
+      .maybeSingle();
+    if (settingsError) throw settingsError;
+
+    const { data: existingCallback, error: existingCallbackError } = await supabase
       .from("mpesa_callback_queue")
-      .select("id, delivery_count")
+      .select("id, business_id, delivery_count, confirmed, unmatched, processing_status")
       .eq("trans_id", transId)
       .maybeSingle();
+    if (existingCallbackError) throw existingCallbackError;
+
+    const businessId = settings?.business_id || existingCallback?.business_id || null;
+    let queue: any = existingCallback || null;
     if (existingCallback) {
-      await supabase
+      const { error: deliveryUpdateError } = await supabase
         .from("mpesa_callback_queue")
         .update({
           delivery_count: Math.max(1, Number(existingCallback.delivery_count || 1)) + 1,
           last_received_at: new Date().toISOString(),
         })
         .eq("id", existingCallback.id);
-      console.log("PataFix duplicate callback ignored", { transId });
-      return accepted();
-    }
+      if (deliveryUpdateError) throw deliveryUpdateError;
+      trackedQueueId = existingCallback.id;
 
-    const { data: settings } = await supabase
-      .from("loan_settings")
-      .select("business_id, mpesa_auto_confirm")
-      .eq("mpesa_shortcode", shortcode)
-      .maybeSingle();
-
-    const businessId = settings?.business_id || null;
-    console.log("PataFix callback business lookup", { transId, shortcode, businessId, autoConfirm: settings?.mpesa_auto_confirm });
-    const { data: queue, error: queueError } = await supabase
-      .from("mpesa_callback_queue")
-      .insert({
-        business_id: businessId,
-        transaction_type: body?.TransactionType || "C2B",
-        trans_id: transId,
-        trans_time: body?.TransTime,
-        trans_amount: amount,
-        business_short_code: shortcode,
-        bill_ref_number: accountNumber,
-        msisdn: payerPhone,
-        first_name: payerName,
-        raw_payload: body,
-        confirmed: false,
-        delivery_count: 1,
-        last_received_at: new Date().toISOString(),
-        processing_status: "received",
-      })
-      .select("id")
-      .maybeSingle();
-    if (queueError) {
-      if (String(queueError.message || "").toLowerCase().includes("duplicate")) {
-        console.log("PataFix duplicate callback insert ignored", { transId });
+      const status = String(existingCallback.processing_status || "");
+      if (existingCallback.unmatched || status === "suspense") {
+        if (businessId) {
+          await recordUnmatchedPayment(supabase, { businessId, accountNumber, amount, transId, payerPhone, payerName, body });
+        }
+        console.log("PataFix duplicate suspense callback verified", { transId });
         return accepted();
       }
-      throw queueError;
+      if (existingCallback.confirmed || ["processed_repayment", "processed_charges", "moved_to_capital"].includes(status)) {
+        console.log("PataFix completed duplicate callback ignored", { transId, status });
+        return accepted();
+      }
+      if (status === "pending_confirmation") {
+        console.log("PataFix callback already awaiting manual confirmation", { transId });
+        return accepted();
+      }
+      console.log("PataFix resuming incomplete callback", { transId, status });
     }
-    trackedQueueId = queue?.id || null;
+
+    if (queue?.id && businessId && queue.business_id !== businessId) {
+      const { error: businessLinkError } = await supabase
+        .from("mpesa_callback_queue")
+        .update({ business_id: businessId })
+        .eq("id", queue.id);
+      if (businessLinkError) throw businessLinkError;
+      queue.business_id = businessId;
+    }
+
+    console.log("PataFix callback business lookup", { transId, shortcode, businessId, autoConfirm: settings?.mpesa_auto_confirm });
+    if (!queue) {
+      const { data: insertedQueue, error: queueError } = await supabase
+        .from("mpesa_callback_queue")
+        .insert({
+          business_id: businessId,
+          transaction_type: body?.TransactionType || "C2B",
+          trans_id: transId,
+          trans_time: body?.TransTime,
+          trans_amount: amount,
+          business_short_code: shortcode,
+          bill_ref_number: accountNumber,
+          msisdn: payerPhone,
+          first_name: payerName,
+          raw_payload: body,
+          confirmed: false,
+          delivery_count: 1,
+          last_received_at: new Date().toISOString(),
+          processing_status: "received",
+        })
+        .select("id, business_id")
+        .single();
+      if (queueError) {
+        throw queueError;
+      }
+      queue = insertedQueue;
+      trackedQueueId = queue?.id || null;
+    }
 
     if (!businessId) {
       if (queue?.id) {
@@ -231,7 +232,7 @@ serve(async (req) => {
       return accepted();
     }
 
-    const client = await findClient(supabase, businessId, accountNumber, payerPhone);
+    const client = await findClientByAccountId(supabase, businessId, accountNumber);
     if (!client) {
       console.log("PataFix callback unmatched client", { transId, businessId, accountNumber, payerPhone });
       await recordUnmatchedPayment(supabase, { businessId, accountNumber, amount, transId, payerPhone, payerName, body });
