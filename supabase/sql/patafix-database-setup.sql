@@ -51,6 +51,7 @@ create table if not exists public.loan_settings (
   daraja_environment text not null default 'production',
   daraja_credentials_saved boolean not null default false,
   mpesa_auto_confirm boolean not null default true,
+  enable_rollover_penalties boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -77,6 +78,7 @@ create table if not exists public.loan_clients (
   alternative_phone text,
   email text,
   gender text,
+  business_type text,
   dob date,
   address text,
   occupation text,
@@ -94,6 +96,21 @@ create table if not exists public.loan_clients (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+create or replace function public.patafix_require_new_client_gender()
+returns trigger language plpgsql as $$
+begin
+  if nullif(btrim(new.gender), '') is null then
+    raise exception 'Gender is required when onboarding a new client';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists patafix_require_new_client_gender on public.loan_clients;
+create trigger patafix_require_new_client_gender
+before insert on public.loan_clients
+for each row execute function public.patafix_require_new_client_gender();
 
 create table if not exists public.loan_products (
   id uuid primary key default gen_random_uuid(),

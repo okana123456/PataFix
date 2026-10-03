@@ -1195,18 +1195,18 @@ async function audit(action,table_name,record_id,old_value,new_value){
 async function loadSettings(){
   if(!currentUser?.business_id) return;
   try{
-    const publicSettingsFields='id,business_id,company_name,company_phone,company_email,company_address,currency,default_grace_period,default_late_penalty_pct,default_processing_fee_pct,standard_weekly_rate,micro_weekly_rate,micro_threshold,loan_no_prefix,app_no_prefix,receipt_no_prefix,disbursement_method,mpesa_shortcode,daraja_environment,daraja_credentials_saved,mpesa_auto_confirm,created_at,updated_at';
+    const publicSettingsFields='id,business_id,company_name,company_phone,company_email,company_address,currency,default_grace_period,default_late_penalty_pct,default_processing_fee_pct,standard_weekly_rate,micro_weekly_rate,micro_threshold,loan_no_prefix,app_no_prefix,receipt_no_prefix,disbursement_method,mpesa_shortcode,daraja_environment,daraja_credentials_saved,mpesa_auto_confirm,enable_rollover_penalties,created_at,updated_at';
     let{data:settings, error}=await sb('loan_settings').select(publicSettingsFields).eq('business_id', currentUser.business_id).maybeSingle();
     if(error) throw error;
     
     if(!settings) {
-        settings={company_name:'PataFix',currency:'KES',default_grace_period:7,default_late_penalty_pct:5,default_processing_fee_pct:0,standard_weekly_rate:5,micro_weekly_rate:5,micro_threshold:5000,disbursement_method:'cash',mpesa_auto_confirm:false};
+        settings={company_name:'PataFix',currency:'KES',default_grace_period:7,default_late_penalty_pct:5,default_processing_fee_pct:0,standard_weekly_rate:5,micro_weekly_rate:5,micro_threshold:5000,disbursement_method:'cash',mpesa_auto_confirm:false,enable_rollover_penalties:false};
     }
     appSettings=settings;
     return settings;
   }catch(e){
     console.error("Settings load error:", e);
-    appSettings={company_name:'PataFix',currency:'KES',default_grace_period:7,default_late_penalty_pct:5,default_processing_fee_pct:0,standard_weekly_rate:5,micro_weekly_rate:5,micro_threshold:5000,disbursement_method:'cash',mpesa_auto_confirm:false};
+    appSettings={company_name:'PataFix',currency:'KES',default_grace_period:7,default_late_penalty_pct:5,default_processing_fee_pct:0,standard_weekly_rate:5,micro_weekly_rate:5,micro_threshold:5000,disbursement_method:'cash',mpesa_auto_confirm:false,enable_rollover_penalties:false};
     return appSettings;
   }
 }
@@ -2625,11 +2625,12 @@ async function openAddClientModal(){
     <h2>Add New Client</h2>
     <div class="form-row"><div class="form-group"><label>Full Name *</label><input class="input" id="cName"></div><div class="form-group"><label>National ID No *</label><input class="input" id="cIdNo"></div></div>
     <div class="form-row"><div class="form-group"><label>Phone *</label><input class="input" id="cPhone"></div><div class="form-group"><label>Email</label><input class="input" id="cEmail"></div></div>
-    <div class="form-row"><div class="form-group"><label>Gender</label><select class="select" id="cGender"><option value="">Select</option><option>Male</option><option>Female</option><option>Other</option></select></div><div class="form-group"><label>Date of Birth</label><input class="input" type="date" id="cDob"></div></div>
+    <div class="form-row"><div class="form-group"><label>Gender *</label><select class="select" id="cGender" required><option value="">Select</option><option>Male</option><option>Female</option><option>Other</option></select></div><div class="form-group"><label>Date of Birth</label><input class="input" type="date" id="cDob"></div></div>
     <div class="form-group"><label>Client Onboarding Date</label><input class="input" type="date" id="cOnboardDate" value="${today()}"><div style="font-size:11px;color:var(--text-secondary);margin-top:3px">Use this when entering an existing client manually.</div></div>
     <div class="form-group"><label>Branch *</label><select class="select" id="cBranch">${branchOptionsHtml()}</select></div>
     <div class="form-group"><label>Address</label><input class="input" id="cAddress"></div>
-    <div class="form-row"><div class="form-group"><label>Occupation</label><input class="input" id="cOccupation"></div><div class="form-group"><label>Employer</label><input class="input" id="cEmployer"></div></div>
+    <div class="form-row"><div class="form-group"><label>Occupation</label><input class="input" id="cOccupation"></div><div class="form-group"><label>Business Type</label><input class="input" id="cBusinessType" placeholder="e.g. Retail shop, farming"></div></div>
+    <div class="form-group"><label>Employer</label><input class="input" id="cEmployer"></div>
     <div class="form-group"><label>Daily Income (KES)</label><input class="input" type="number" id="cIncome" placeholder="e.g. 500"></div>
     <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)">🔒 <strong>Guarantor Details</strong></div>
     <div class="form-row"><div class="form-group"><label>Next of Kin Full Name</label><input class="input" id="cNokName"></div><div class="form-group"><label>Next of Kin Phone</label><input class="input" id="cNokPhone"></div></div>
@@ -2647,6 +2648,8 @@ async function openAddClientModal(){
 async function saveClient(){
   const name=$('#cName').value.trim();const idNo=$('#cIdNo').value.trim();const phone=$('#cPhone').value.trim();
   if(!name||!idNo||!phone)return toast('Name, ID No, and Phone are required','warning');
+  const gender=($('#cGender')?.value||'').trim();
+  if(!gender)return toast('Gender is required','warning');
   const btn=document.getElementById('btnSaveClient');
   if(btn){ btn.disabled=true; btn.textContent='Processing...'; }
   try{
@@ -2671,7 +2674,7 @@ async function saveClient(){
     const assignedOfficerId = ($('#cAssignedOfficer')?.value || currentUser?.id || '').trim();
     const officerTag = assignedOfficerId ? ` [OFFICER:${assignedOfficerId}]` : '';
     const taggedNotes=(userNotes?userNotes+' ':'')+regFeePendingTag(todayStr)+officerTag;
-    const rec={full_name:name,id_number:idNo,phone,email:$('#cEmail').value,gender:$('#cGender').value,dob:$('#cDob').value||null,address:$('#cAddress').value,occupation:$('#cOccupation').value,employer:$('#cEmployer').value,monthly_income:Number($('#cIncome').value)||0,next_of_kin_name:$('#cNokName').value,next_of_kin_phone:$('#cNokPhone').value,next_of_kin_relation:$('#cNokRel').value,notes:taggedNotes,branch_name:normalizeBranchName($('#cBranch')?.value),business_id:currentUser?.business_id,created_by:currentUser?.id,created_at:dateInputToLocalDateTime(todayStr)};
+    const rec={full_name:name,id_number:idNo,phone,email:$('#cEmail').value,gender,business_type:($('#cBusinessType')?.value||'').trim(),dob:$('#cDob').value||null,address:$('#cAddress').value,occupation:$('#cOccupation').value,employer:$('#cEmployer').value,monthly_income:Number($('#cIncome').value)||0,next_of_kin_name:$('#cNokName').value,next_of_kin_phone:$('#cNokPhone').value,next_of_kin_relation:$('#cNokRel').value,notes:taggedNotes,branch_name:normalizeBranchName($('#cBranch')?.value),business_id:currentUser?.business_id,created_by:currentUser?.id,created_at:dateInputToLocalDateTime(todayStr)};
     const{data,error}=await sb('loan_clients').insert(rec).select().single();
     if(error)throw error;
     // Store officer assignment in caches
@@ -2726,7 +2729,8 @@ async function viewClient(id){
         <div><strong>ID No:</strong> ${c.id_number||'-'}</div><div><strong>Phone:</strong> ${c.phone||'-'}</div>
         <div><strong>Email:</strong> ${c.email||'-'}</div><div><strong>Gender:</strong> ${c.gender||'-'}</div>
         <div><strong>DOB:</strong> ${fmtDate(c.dob)}</div><div><strong>Address:</strong> ${c.address||'-'}</div>
-        <div><strong>Occupation:</strong> ${c.occupation||'-'}</div><div><strong>Employer:</strong> ${c.employer||'-'}</div>
+        <div><strong>Occupation:</strong> ${c.occupation||'-'}</div><div><strong>Business Type:</strong> ${c.business_type||'-'}</div>
+        <div><strong>Employer:</strong> ${c.employer||'-'}</div>
         <div><strong>Daily Income:</strong> ${fmtMoney(c.monthly_income)}</div>
         <div><strong>Next of Kin:</strong> ${c.next_of_kin_name||'-'} (${c.next_of_kin_relation||'-'}) ${c.next_of_kin_phone||''}</div>
         <div style="grid-column:1/-1;padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;display:flex;justify-content:space-between;align-items:center">
@@ -2804,22 +2808,24 @@ async function editClient(id){
     </div>
     <div class="form-row">
       <div class="form-group"><label>Email</label><input class="input" id="ecEmail" value="${(c.email||'').replace(/"/g,'&quot;')}"></div>
-      <div class="form-group"><label>Gender</label>
-        <select class="select" id="ecGender">
+      <div class="form-group"><label>Gender *</label>
+        <select class="select" id="ecGender" required>
           <option value="">Select</option>
           <option value="Male" ${c.gender==='Male'?'selected':''}>Male</option>
           <option value="Female" ${c.gender==='Female'?'selected':''}>Female</option>
+          <option value="Other" ${c.gender==='Other'?'selected':''}>Other</option>
         </select>
       </div>
     </div>
     <div class="form-row">
       <div class="form-group"><label>Occupation</label><input class="input" id="ecOccupation" value="${(c.occupation||'').replace(/"/g,'&quot;')}"></div>
-      <div class="form-group"><label>Daily Income (KES)</label><input class="input" type="number" id="ecIncome" value="${c.monthly_income||0}"></div>
+      <div class="form-group"><label>Business Type</label><input class="input" id="ecBusinessType" value="${(c.business_type||'').replace(/"/g,'&quot;')}"></div>
     </div>
     <div class="form-row">
+      <div class="form-group"><label>Daily Income (KES)</label><input class="input" type="number" id="ecIncome" value="${c.monthly_income||0}"></div>
       <div class="form-group"><label>Address</label><input class="input" id="ecAddress" value="${(c.address||'').replace(/"/g,'&quot;')}"></div>
-      <div class="form-group"><label>Date of Birth</label><input class="input" type="date" id="ecDob" value="${c.dob||''}"></div>
     </div>
+    <div class="form-group"><label>Date of Birth</label><input class="input" type="date" id="ecDob" value="${c.dob||''}"></div>
     <div class="form-group"><label>Branch *</label><select class="select" id="ecBranch">${branchOptionsHtml(c.branch_name)}</select></div>
     <div class="form-row">
       <div class="form-group"><label>Next of Kin Name</label><input class="input" id="ecNokName" value="${(c.next_of_kin_name||'').replace(/"/g,'&quot;')}"></div>
@@ -2840,6 +2846,11 @@ async function updateClient(id){
   try{
     const idNo=($('#ecIdNo').value||'').trim();
     const phone=($('#ecPhone').value||'').trim();
+    const gender=($('#ecGender')?.value||'').trim();
+    if(!gender){
+      if(btn){btn.disabled=false;btn.textContent='Update';}
+      return toast('Gender is required','warning');
+    }
     // Normalize phone — ensure 07... format (fix imported phones like 712345678)
     let normPhone=phone;
     if(phone.startsWith('254')&&phone.length===12) normPhone='0'+phone.slice(3);
@@ -2852,7 +2863,7 @@ async function updateClient(id){
         return toast('Another client already has this ID number','error');
       }
     }
-    const upd={full_name:($('#ecName').value||'').trim(),id_number:idNo||null,phone:normPhone||null,alternative_phone:($('#ecAltPhone')?.value||'').trim()||null,email:($('#ecEmail')?.value||'').trim()||null,gender:$('#ecGender')?.value||null,occupation:($('#ecOccupation')?.value||'').trim()||null,monthly_income:Number($('#ecIncome')?.value)||null,address:($('#ecAddress')?.value||'').trim()||null,dob:$('#ecDob')?.value||null,next_of_kin_name:($('#ecNokName')?.value||'').trim()||null,next_of_kin_phone:($('#ecNokPhone')?.value||'').trim()||null,next_of_kin_relation:($('#ecNokRelation')?.value||'').trim()||null,branch_name:normalizeBranchName($('#ecBranch')?.value)};
+    const upd={full_name:($('#ecName').value||'').trim(),id_number:idNo||null,phone:normPhone||null,alternative_phone:($('#ecAltPhone')?.value||'').trim()||null,email:($('#ecEmail')?.value||'').trim()||null,gender,business_type:($('#ecBusinessType')?.value||'').trim(),occupation:($('#ecOccupation')?.value||'').trim()||null,monthly_income:Number($('#ecIncome')?.value)||null,address:($('#ecAddress')?.value||'').trim()||null,dob:$('#ecDob')?.value||null,next_of_kin_name:($('#ecNokName')?.value||'').trim()||null,next_of_kin_phone:($('#ecNokPhone')?.value||'').trim()||null,next_of_kin_relation:($('#ecNokRelation')?.value||'').trim()||null,branch_name:normalizeBranchName($('#ecBranch')?.value)};
     // Remove undefined/null keys that might cause schema errors
     Object.keys(upd).forEach(k=>{if(upd[k]===null||upd[k]===undefined)delete upd[k];});
     const{error}=await sb('loan_clients').update(upd).eq('id',id);
@@ -3038,6 +3049,7 @@ async function exportClientsExcel(){
         'Date of Birth':c.dob||'-',
         'Address / Location':c.address||'-',
         'Occupation':c.occupation||'-',
+        'Business Type':c.business_type||'-',
         'Employer':c.employer||'-',
         'Daily Income (KES)':c.monthly_income||0,
         'Next of Kin Name':c.next_of_kin_name||'-',
@@ -4138,7 +4150,7 @@ async function renderLoans(page=1){
   try{
     await refreshPataFixLoanAging();
     await loadPataFixBranches();
-    const{data:loans}=await sb('loans').select('*,loan_clients(full_name,phone,id_number,branch_name)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
+    const{data:loans}=await sb('loans').select('*,loan_clients(full_name,phone,id_number,branch_name,business_type)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
 
     const {data:staffData}=await sb('loan_staff').select('id,name').eq('business_id', currentUser.business_id);
     window._staffMap = {};
@@ -4160,7 +4172,7 @@ async function renderLoans(page=1){
         <button class="btn btn-primary btn-sm" id="btnViewAllLoans" onclick="showAllLoans(true)">View Active Loans (${openActiveLoans.length})</button>
       </div>
       <div id="loansTableWrap" style="display:none">
-        <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Officer</th><th>Type</th><th>Principal</th><th>Balance</th><th>Installment</th><th>Overdue</th><th>Status</th><th>Actions</th></tr></thead>
+        <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Business Type</th><th>Officer</th><th>Type</th><th>Principal</th><th>Balance</th><th>Installment</th><th>Overdue</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody id="loansBody"></tbody></table></div>
         <div id="loansPagination"></div>
       </div>
@@ -4201,6 +4213,7 @@ function renderLoanRows(loans){
       <td><strong>${l.loan_clients?.full_name||'—'}</strong></td>
       <td>${l.loan_clients?.id_number||'-'}</td>
       <td>${l.loan_clients?.phone||'-'}</td>
+      <td>${l.loan_clients?.business_type||'-'}</td>
       <td><span class="badge badge-gray" style="text-transform:capitalize">${window._staffMap?.[l.loan_officer_id]||'Unassigned'}</span></td>
       <td>${l.loan_type==='repeat_loan'?'<span class="badge badge-purple">Repeat</span>':'<span class="badge badge-blue">New</span>'}</td>
       <td>${fmtMoney(l.principal_amount)}</td><td>${fmtMoney(l.outstanding_balance)}</td>
@@ -6028,6 +6041,7 @@ async function loadReportData(id){
         'DOB':c.dob||'-',
         'Address / Location':c.address||'-',
         'Occupation':c.occupation||'-',
+        'Business Type':c.business_type||'-',
         'Employer':c.employer||'-',
         'Daily Income':c.monthly_income||0,
         'Next of Kin':c.next_of_kin_name||'-',
@@ -6048,7 +6062,7 @@ async function loadReportData(id){
       {label:'Total Clients',value:filteredClients.length},
       {label:'Active Borrowers',value:rows.filter(r=>r['Status']==='Active Borrower').length},
       {label:'Past Borrowers',value:rows.filter(r=>r['Status']==='Past Borrower').length}
-    ],rows,cols:['Full Name','ID Number','Phone','Alt Phone','Email','Gender','DOB','Address / Location','Occupation','Employer','Daily Income','Next of Kin','Next of Kin Phone','Next of Kin Relation','Date Onboarded','Loan Officer','Total Loans','Active Loans','Latest Loan #','Total Borrowed','Outstanding (KES)','Arrears (KES)','Status']};
+    ],rows,cols:['Full Name','ID Number','Phone','Alt Phone','Email','Gender','DOB','Address / Location','Occupation','Business Type','Employer','Daily Income','Next of Kin','Next of Kin Phone','Next of Kin Relation','Date Onboarded','Loan Officer','Total Loans','Active Loans','Latest Loan #','Total Borrowed','Outstanding (KES)','Arrears (KES)','Status']};
   }
   if(id==='collection_daily'){
     const todayStr=today();
@@ -6124,7 +6138,7 @@ async function loadReportData(id){
   }
   if(id==='portfolio'){
     const[{data:loans},{data:staff}]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name,phone,id_number,address),loan_staff(name)').eq('business_id',biz).order('created_at',{ascending:false}),
+      sb('loans').select('*,loan_clients(full_name,phone,id_number,address,business_type),loan_staff(name)').eq('business_id',biz).order('created_at',{ascending:false}),
       sb('loan_staff').select('id,name').eq('business_id',biz)
     ]);
     const staffMap={};(staff||[]).forEach(s=>{staffMap[s.id]=s.name;});
@@ -6146,6 +6160,7 @@ async function loadReportData(id){
       'ID Number':l.loan_clients?.id_number||'-',
       'Phone':l.loan_clients?.phone||'-',
       'Location':l.loan_clients?.address||'-',
+      'Business Type':l.loan_clients?.business_type||'-',
       'Loan Officer':l.loan_officer_id?staffMap[l.loan_officer_id]||'-':'-',
       'Principal (KES)':Number(l.principal_amount||0),
       'Interest (KES)':Number(l.total_interest||0),
@@ -6157,7 +6172,7 @@ async function loadReportData(id){
       'Status':l.status,
       'Disbursed':l.disbursement_date||'-',
       'Maturity':l.maturity_date||'-'
-    })),cols:['Loan #','Client','ID Number','Phone','Location','Loan Officer','Principal (KES)','Interest (KES)','Total P+I (KES)','Outstanding (KES)','Total Paid (KES)','Arrears (KES)','Overdue Days','Status','Disbursed','Maturity']};
+    })),cols:['Loan #','Client','ID Number','Phone','Location','Business Type','Loan Officer','Principal (KES)','Interest (KES)','Total P+I (KES)','Outstanding (KES)','Total Paid (KES)','Arrears (KES)','Overdue Days','Status','Disbursed','Maturity']};
   }
   if(id==='disbursement'){
     const[{data:loans},{data:staff}]=await Promise.all([
@@ -9750,12 +9765,12 @@ async function renderSettings(){
       </div>
       <div class="card" style="max-width:700px;margin-bottom:16px">
         <h3 style="font-size:16px;margin-bottom:16px">Defaults</h3>
-        <div class="form-row"><div class="form-group"><label>Grace Period (days)</label><input class="input" type="number" id="setGrace" value="${settings.default_grace_period||7}"></div><div class="form-group"><label>Late Penalty %</label><input class="input" type="number" id="setPenalty" value="${settings.default_late_penalty_pct||5}"></div></div>
+        <div class="form-row"><div class="form-group"><label>Grace Period (days)</label><input class="input" type="number" id="setGrace" value="${settings.default_grace_period||7}"></div><div class="form-group"><label>Late Penalty %</label><input class="input" type="number" id="setPenalty" value="${settings.default_late_penalty_pct||5}" ${settings.enable_rollover_penalties?'':'disabled'}></div></div>
         <div class="form-group"><label>Loan Fees</label><div class="input" style="background:rgba(59,130,246,0.06);line-height:1.5;min-height:auto">All loans require upfront application/processing fee payment before release. New clients also pay the one-time registration fee upfront before their first disbursement.</div><input type="hidden" id="setFee" value="0"></div>
         <div class="form-group"><label>Default Disbursement Method</label><select class="select" id="setDisbMethod"><option value="cash" ${settings.disbursement_method==='cash'?'selected':''}>Cash (Manual)</option><option value="mpesa" ${(!settings.disbursement_method||settings.disbursement_method==='mpesa')?'selected':''}>M-Pesa</option><option value="bank_transfer" ${settings.disbursement_method==='bank_transfer'?'selected':''}>Bank Transfer</option></select></div>
-        <div style="background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);border-radius:8px;padding:12px;margin-top:8px">
-          <strong style="font-size:13px;color:var(--accent-red)">Rollover Penalty Policy</strong>
-          <p style="font-size:12px;color:var(--text-secondary);margin-top:4px">After loan maturity date, a <strong>2-day grace period</strong> applies. Thereafter, a <strong>15% rollover penalty</strong> is charged on the outstanding balance. This is calculated automatically each day the system is accessed.</p>
+        <div style="background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.2);border-radius:8px;padding:12px;margin-top:8px">
+          <label style="display:flex;align-items:center;gap:10px;font-size:13px;font-weight:700"><input type="checkbox" id="setRolloverPenalties" ${settings.enable_rollover_penalties?'checked':''} onchange="document.getElementById('setPenalty').disabled=!this.checked"> Enable automatic maturity penalties</label>
+          <p style="font-size:12px;color:var(--text-secondary);margin-top:5px">Disabled by default. Overdue installments will remain in arrears without adding a penalty to the client's balance.</p>
         </div>
       </div>
       <div class="card" style="max-width:700px;margin-bottom:16px">
@@ -9889,6 +9904,7 @@ async function saveSettings(){
       disbursement_method:$('#setDisbMethod').value,
       mpesa_shortcode:shortcode,
       daraja_environment:darajaEnv,mpesa_auto_confirm:$('#setAutoConfirm').checked,
+      enable_rollover_penalties:$('#setRolloverPenalties').checked,
       business_id:currentUser?.business_id||'patafix'
     };
     const{data:existing}=await sb('loan_settings').select('id').eq('business_id',rec.business_id).single();
@@ -10001,6 +10017,7 @@ async function applyRolloverPenalties(){
   if(!currentUser?.business_id) return;
   try{
     const settings = await loadSettings();
+    if(settings.enable_rollover_penalties!==true) return;
     const penaltyRate = (Number(settings.default_late_penalty_pct) || 5) / 100;
     const penaltyPct = Number(settings.default_late_penalty_pct) || 5;
 
