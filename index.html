@@ -8737,13 +8737,17 @@ async function renderAccounting() {
       // 'all' or unrecognised — fetch everything
       qStart = '2000-01-01'; qEnd = '2099-12-31';
     }
-    const qEndFull = qEnd + 'T23:59:59+00:00'; // inclusive end of day in UTC
+    // PataFix operates in Kenya. Supabase stores timestamptz values in UTC, so
+    // make the business timezone explicit at both period boundaries. This keeps
+    // late-night payments in the same day/month shown to the user.
+    const qStartFull = qStart + 'T00:00:00+03:00';
+    const qEndFull = qEnd + 'T23:59:59.999+03:00';
 
     const[loansR,repR,cliR,penR,allLoansMapR,expensesR,journalR,assetsR]=await Promise.all([
-      sb('loans').select('id,client_id,loan_no,principal_amount,disbursed_amount,total_interest,total_payable,processing_fee,disbursement_date,status,loan_officer_id').eq('business_id',biz).gte('disbursement_date',qStart).lte('disbursement_date',qEndFull).order('disbursement_date', {ascending: false}).limit(100000),
-      sb('loan_repayments').select('id,loan_id,amount,interest_portion,principal_portion,penalty_portion,payment_date,payment_method').eq('business_id',biz).gte('payment_date',qStart).lte('payment_date',qEndFull).order('payment_date', {ascending: false}).limit(100000),
+      sb('loans').select('id,client_id,loan_no,principal_amount,disbursed_amount,total_interest,total_payable,processing_fee,disbursement_date,status,loan_officer_id').eq('business_id',biz).gte('disbursement_date',qStart).lte('disbursement_date',qEnd).order('disbursement_date', {ascending: false}).limit(100000),
+      sb('loan_repayments').select('id,loan_id,amount,interest_portion,principal_portion,penalty_portion,payment_date,payment_method').eq('business_id',biz).gte('payment_date',qStartFull).lte('payment_date',qEndFull).order('payment_date', {ascending: false}).limit(100000),
       sb('loan_clients').select('id,created_at,notes').eq('business_id',biz).order('created_at', {ascending: false}).limit(100000),
-      sb('loan_penalties').select('id,loan_id,penalty_amount,date_charged,is_waived').eq('business_id',biz).eq('is_waived',false).gte('date_charged',qStart).lte('date_charged',qEndFull).order('date_charged', {ascending: false}).limit(100000),
+      sb('loan_penalties').select('id,loan_id,penalty_amount,date_charged,is_waived').eq('business_id',biz).eq('is_waived',false).gte('date_charged',qStart).lte('date_charged',qEnd).order('date_charged', {ascending: false}).limit(100000),
       sb('loans').select('id,client_id,principal_amount,total_interest,total_payable,disbursement_date,loan_officer_id').eq('business_id',biz).order('disbursement_date', {ascending: true}).limit(100000),
       sb('patafix_expenses').select('*').eq('business_id',biz).eq('status','approved').gte('expense_date',qStart).lte('expense_date',qEnd).order('expense_date',{ascending:false}).limit(100000),
       sb('journal_entries').select('id,date,ref,description,debit,credit,amount').eq('business_id',biz).gte('date',qStart).lte('date',qEnd).order('date',{ascending:false}).limit(100000),
@@ -8781,12 +8785,13 @@ async function renderAccounting() {
       return !!d && d>=qStart && d<=qEnd;
     };
 
-    // JS-side filterByDate runs as a safety net for any edge-case drift
-    // but the server has already done the heavy lifting above.
-    const filteredLoans = filterByDate(allLoans.filter(l=>l.disbursement_date), 'disbursement_date', f);
-    const filteredReps = filterByDate(allReps, 'payment_date', f);
+    // These rows already came from one authoritative server-side period filter.
+    // A second browser-side pass used to reinterpret UTC timestamps and could
+    // move Kenya evening payments into a neighbouring reporting period.
+    const filteredLoans = allLoans.filter(l=>l.disbursement_date);
+    const filteredReps = allReps;
     const filteredClients = allClients.filter(c=>registrationFeeIncomeAmount(c, clientFirstLoan[c.id])>0 && dateInSelectedRange(registrationFeeIncomeDate(c, clientFirstLoan[c.id])));
-    const filteredPenalties = filterByDate(allPenalties.filter(p=>p.date_charged), 'date_charged', f);
+    const filteredPenalties = allPenalties.filter(p=>p.date_charged);
 
     // Principal disbursed
     const principalDisbursed = filteredLoans.reduce((s,l)=>s+Number(l.disbursed_amount||l.principal_amount||0),0);
