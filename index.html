@@ -461,6 +461,7 @@ const $ = (sel) => document.querySelector(sel);
 let appFilters = {
     dashboard: { type: 'this_month', start: '', end: '', branch: 'all' },
     clients: { type: 'all', start: '', end: '', branch: 'all' },
+    credit_scores: { type: 'all', start: '', end: '', branch: 'all' },
     applications: { type: 'all', start: '', end: '', branch: 'all' },
     disbursement: { type: 'all', start: '', end: '', branch: 'all' },
     loans: { type: 'all', start: '', end: '', branch: 'all' },
@@ -1738,6 +1739,9 @@ function showApp(){
   renderServiceBillingOverlay();
   loadServiceBillingStatus({ silent:true });
   setTimeout(applyRolloverPenalties,2000);
+  setTimeout(()=>refreshPataFixCreditScores(true),2500);
+  if(window._patafixCreditRefreshTimer)clearInterval(window._patafixCreditRefreshTimer);
+  window._patafixCreditRefreshTimer=setInterval(()=>refreshPataFixCreditScores(true),15*60*1000);
 }
 
 function buildSidebar() {
@@ -1750,6 +1754,7 @@ function buildSidebar() {
     
     { isHeader: true, label: 'Lending', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier', 'viewer'] },
     { id: 'clients', icon: 'C', label: 'Clients', roles: ['admin', 'branch_manager', 'loan_officer'] },
+    { id: 'credit_scores', icon: 'Q', label: 'Credit Ratings', roles: ['admin', 'branch_manager', 'loan_officer'] },
     { id: 'products', icon: 'P', label: 'Loan Products', roles: ['admin', 'branch_manager'] },
     { id: 'applications', icon: 'A', label: 'Applications', roles: ['admin', 'branch_manager', 'loan_officer'] },
     { id: 'disbursement', icon: '$', label: 'Disbursement', roles: ['admin', 'branch_manager', 'cashier'] },
@@ -1921,7 +1926,7 @@ function navigateTo(section){
   const main=$('#mainContent');
   showLoading(main);
   const renderers={
-    dashboard:renderDashboard,clients:renderClients,products:renderProducts,
+    dashboard:renderDashboard,clients:renderClients,credit_scores:renderCreditScores,products:renderProducts,
     applications:renderApplications,disbursement:renderDisbursement,loans:renderLoans,
     repayments:renderRepayments,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,charges_excess:renderChargesExcessAccount,mpesa_transactions:renderMpesaTransactions,suspense:renderSuspense,
     branches:renderBranches,company_assets:renderCompanyAssets,
@@ -2437,6 +2442,108 @@ async function renderDashboard(){
   }catch(e){main.innerHTML=`<div class="empty-state"><p>Error loading dashboard: ${e.message}</p></div>`;toast(e.message,'error')}
 }
 
+// ═══ CREDIT RATINGS ═══
+let creditRatingRows=[];
+
+async function refreshPataFixCreditScores(silent=true){
+  if(!currentUser?.business_id)return null;
+  try{
+    const{data,error}=await supabaseClient.rpc('patafix_refresh_credit_scores');
+    if(error)throw error;
+    return data;
+  }catch(e){
+    console.warn('PataFix credit rating refresh:',e?.message||e);
+    if(!silent)toast(e?.message||'Credit ratings could not be refreshed. Run the credit-rating SQL first.','error');
+    return null;
+  }
+}
+
+function creditRatingBadge(profile){
+  const status=String(profile?.rating_status||'new').toLowerCase();
+  const map={good:['badge-green','GOOD'],watchlist:['badge-yellow','WATCHLIST'],zero:['badge-red','ZERO'],new:['badge-blue','NEW']};
+  const item=map[status]||map.new;
+  return `<span class="badge ${item[0]}">${item[1]}</span>`;
+}
+
+function creditRatingPanel(profile,clientId){
+  if(!profile)return `<div class="card" style="margin-bottom:16px"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><div><strong>Credit Rating</strong><div style="font-size:12px;color:var(--text-secondary);margin-top:4px">Not calculated yet</div></div><button class="btn btn-outline btn-sm" onclick="refreshPataFixCreditScores(false).then(()=>{closeModal();viewClient('${clientId}')})">Calculate</button></div></div>`;
+  return `<div class="card" style="margin-bottom:16px;border-left:4px solid ${profile.rating_status==='zero'?'var(--accent-red)':profile.rating_status==='watchlist'?'var(--accent-yellow)':'var(--accent-green)'}">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+      <div><div style="font-size:12px;color:var(--text-secondary);font-weight:700;text-transform:uppercase">Credit Rating</div><div style="margin-top:5px">${creditRatingBadge(profile)}</div></div>
+      <button class="btn btn-outline btn-sm" onclick="openCreditHistory('${clientId}')">View history</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-top:14px">
+      <div><div class="kpi-label">Approved Limit</div><strong>${fmtMoney(profile.approved_limit)}</strong></div>
+      <div><div class="kpi-label">Current Score</div><strong style="color:${Number(profile.credit_score)<=0?'var(--accent-red)':'var(--accent-green)'}">${fmtMoney(profile.credit_score)}</strong></div>
+      <div><div class="kpi-label">Current Arrears Age</div><strong>${Number(profile.current_arrears_days||0)} days</strong></div>
+      <div><div class="kpi-label">Clean Loans</div><strong>${Number(profile.clean_loans_completed||0)}</strong></div>
+    </div>
+    <div style="font-size:12px;color:var(--text-secondary);margin-top:12px">${escapeHtml(profile.last_reason||'Credit record calculated')}</div>
+  </div>`;
+}
+
+async function renderCreditScores(){
+  const main=$('#mainContent');
+  try{
+    await loadPataFixBranches();
+    await refreshPataFixCreditScores(true);
+    const[{data:profiles,error},{data:loans},{data:staff}]=await Promise.all([
+      sb('patafix_credit_profiles').select('*,loan_clients(id,full_name,id_number,phone,branch_name)').eq('business_id',currentUser.business_id).order('credit_score',{ascending:false}),
+      sb('loans').select('client_id,loan_officer_id,status,disbursement_date,created_at').eq('business_id',currentUser.business_id).order('disbursement_date',{ascending:false}),
+      sb('loan_staff').select('id,name').eq('business_id',currentUser.business_id)
+    ]);
+    if(error)throw error;
+    const officerById=Object.fromEntries((staff||[]).map(s=>[s.id,s.name]));
+    const latestOfficer={};
+    (loans||[]).forEach(l=>{if(!latestOfficer[l.client_id]&&l.loan_officer_id)latestOfficer[l.client_id]=l.loan_officer_id;});
+    let rows=(profiles||[]).map(p=>({...p,client:p.loan_clients||{},officer_id:latestOfficer[p.client_id]||'',officer_name:officerById[latestOfficer[p.client_id]]||'-',branch_name:p.loan_clients?.branch_name||'Head Office'}));
+    rows=filterByBranch(rows,'credit_scores');
+    const onlyOfficer=hasRole('loan_officer')&&!hasRole('admin','branch_manager');
+    if(onlyOfficer)rows=rows.filter(r=>r.officer_id===currentUser.id);
+    creditRatingRows=rows;
+    const zero=rows.filter(r=>r.rating_status==='zero').length;
+    const watch=rows.filter(r=>r.rating_status==='watchlist').length;
+    const good=rows.filter(r=>r.rating_status==='good').length;
+    main.innerHTML=`
+      <div class="page-header"><div><h1>Credit Ratings</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Recommended lending limits based on approved loans and repayment conduct.</p></div><button class="btn btn-outline btn-sm" onclick="refreshPataFixCreditScores(false).then(renderCreditScores)">Refresh ratings</button></div>
+      ${getBranchFilterHtml('credit_scores',rows)}
+      <div class="kpi-grid" style="grid-template-columns:repeat(4,minmax(130px,1fr));margin-bottom:16px">
+        <div class="kpi-card"><div class="kpi-label">Rated Clients</div><div class="kpi-value">${rows.length}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Good</div><div class="kpi-value" style="color:var(--accent-green)">${good}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Watchlist</div><div class="kpi-value" style="color:var(--accent-yellow)">${watch}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Score Zero</div><div class="kpi-value" style="color:var(--accent-red)">${zero}</div></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+        <input class="input" id="creditRatingSearch" style="max-width:320px" placeholder="Search client, ID or phone" oninput="filterCreditRatings()">
+        <select class="select" id="creditRatingStatus" style="max-width:170px" onchange="filterCreditRatings()"><option value="all">All ratings</option><option value="good">Good</option><option value="watchlist">Watchlist</option><option value="zero">Zero</option><option value="new">New</option></select>
+      </div>
+      <div id="creditRatingTable"></div>`;
+    filterCreditRatings();
+  }catch(e){
+    main.innerHTML=`<div class="empty-state"><h3>Credit Ratings are not ready</h3><p>${escapeHtml(e.message||'Run the PataFix credit-rating SQL, then refresh this page.')}</p></div>`;
+  }
+}
+
+function filterCreditRatings(){
+  const q=String(document.getElementById('creditRatingSearch')?.value||'').toLowerCase().trim();
+  const status=document.getElementById('creditRatingStatus')?.value||'all';
+  const rows=creditRatingRows.filter(r=>{
+    const hay=[r.client?.full_name,r.client?.id_number,r.client?.phone,r.officer_name].join(' ').toLowerCase();
+    return (!q||hay.includes(q))&&(status==='all'||r.rating_status===status);
+  });
+  const target=document.getElementById('creditRatingTable');if(!target)return;
+  target.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Client</th><th>Branch</th><th>Officer</th><th>Approved Limit</th><th>Current Score</th><th>Rating</th><th>Arrears Age</th><th>Clean Loans</th><th>Reason</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td><strong>${escapeHtml(r.client?.full_name||'-')}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(r.client?.id_number||'-')} | ${escapeHtml(r.client?.phone||'-')}</span></td><td>${escapeHtml(r.branch_name)}</td><td>${escapeHtml(r.officer_name)}</td><td><strong>${fmtMoney(r.approved_limit)}</strong></td><td><strong style="color:${Number(r.credit_score)<=0?'var(--accent-red)':'var(--accent-green)'}">${fmtMoney(r.credit_score)}</strong></td><td>${creditRatingBadge(r)}</td><td>${Number(r.current_arrears_days||0)} days</td><td>${Number(r.clean_loans_completed||0)}</td><td style="max-width:230px;font-size:12px;color:var(--text-secondary)">${escapeHtml(r.last_reason||'-')}</td><td><button class="btn btn-outline btn-sm" onclick="openCreditHistory('${r.client_id}')">History</button></td></tr>`).join('')||'<tr><td colspan="10" style="text-align:center;padding:24px;color:var(--text-secondary)">No matching clients</td></tr>'}</tbody></table></div>`;
+}
+
+async function openCreditHistory(clientId){
+  const[{data:profile},{data:events},{data:client}]=await Promise.all([
+    sb('patafix_credit_profiles').select('*').eq('business_id',currentUser.business_id).eq('client_id',clientId).maybeSingle(),
+    sb('patafix_credit_events').select('*').eq('business_id',currentUser.business_id).eq('client_id',clientId).order('event_date',{ascending:false}).order('created_at',{ascending:false}),
+    sb('loan_clients').select('full_name,id_number,phone').eq('business_id',currentUser.business_id).eq('id',clientId).single()
+  ]);
+  openModal(`<h2>Credit History</h2><p style="color:var(--text-secondary);margin-bottom:14px">${escapeHtml(client?.full_name||'Client')} | ${escapeHtml(client?.id_number||'-')}</p>${creditRatingPanel(profile,clientId)}<div class="table-wrap"><table><thead><tr><th>Date</th><th>Event</th><th>Previous</th><th>New</th><th>Change</th><th>Days Overdue</th><th>Reason</th></tr></thead><tbody>${(events||[]).map(e=>`<tr><td>${fmtDate(e.event_date)}</td><td>${escapeHtml(String(e.event_type||'').replace(/_/g,' '))}</td><td>${fmtMoney(e.previous_score)}</td><td><strong>${fmtMoney(e.new_score)}</strong></td><td style="color:${Number(e.amount_change)>=0?'var(--accent-green)':'var(--accent-red)'}">${Number(e.amount_change)>=0?'+':''}${fmtMoney(e.amount_change)}</td><td>${Number(e.days_overdue||0)}</td><td style="max-width:280px">${escapeHtml(e.reason||'-')}</td></tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:20px">No rating events</td></tr>'}</tbody></table></div><div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Close</button></div>`,true);
+}
+
 // ═══ CLIENTS ═══
 let clientPage=1;
 async function renderClients(page=1){
@@ -2693,8 +2800,10 @@ async function saveClient(){
 
 async function viewClient(id){
   try{
+    await refreshPataFixCreditScores(true);
     const{data:c}=await sb('loan_clients').select('*').eq('id',id).single();
     const{data:cLoans}=await sb('loans').select('*').eq('client_id',id);
+    const{data:creditProfile}=await sb('patafix_credit_profiles').select('*').eq('business_id',currentUser.business_id).eq('client_id',id).maybeSingle();
     if(!c)return toast('Client not found','error');
     let clientChargeProfileHtml='';
     try{
@@ -2738,6 +2847,7 @@ async function viewClient(id){
           <strong style="color:var(--accent-green)">KES 200-400</strong>
         </div>
       </div>
+      ${creditRatingPanel(creditProfile,c.id)}
       <div class="card" style="margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
           <div><strong>Client Asset Photos</strong><div style="font-size:11px;color:var(--text-secondary);margin-top:2px">Compressed automatically to protect storage and loading speed.</div></div>
@@ -3301,7 +3411,10 @@ function toggleBulkApproveApplications(checked){
 
 async function openNewApplication(){
   await loadPataFixBranches();
+  await refreshPataFixCreditScores(true);
   const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number,branch_name').eq('business_id', currentUser.business_id).order('full_name');
+  const{data:creditProfiles}=await sb('patafix_credit_profiles').select('*').eq('business_id',currentUser.business_id);
+  window._appCreditProfiles=Object.fromEntries((creditProfiles||[]).map(p=>[p.client_id,p]));
   const branchClients=filterByBranch(clients||[],'applications');
   const products=(await ensurePataFixProducts()).filter(p=>p.is_active!==false);
   const productOptions=products.map(p=>{const configured=normalizePataFixProduct(p);const valid=validPataFixProduct(configured);return `<option value="${p.id}" data-name="${escapeHtml(p.name)}" ${valid?'':'disabled'}>${escapeHtml(p.name)} - ${escapeHtml(valid?(configured.description||p.description||''):'Complete this product setup first')}</option>`;}).join('');
@@ -3361,8 +3474,10 @@ function onAppClientPick(val){
   if(info){
     if(id){
       const c = (window._appClients||[]).find(x=>x.id===id);
-      info.innerHTML = c?`✅ Selected: <strong>${c.full_name}</strong> (${c.phone||'no phone'})`:'';
-      info.style.color='var(--accent-green)';
+      const p=(window._appCreditProfiles||{})[id];
+      const zero=p?.rating_status==='zero';
+      info.innerHTML = c?`<strong>${escapeHtml(c.full_name)}</strong> (${escapeHtml(c.phone||'no phone')})${p?`<br>${creditRatingBadge(p)} &nbsp; Current score: <strong>${fmtMoney(p.credit_score)}</strong> &nbsp; Approved limit: <strong>${fmtMoney(p.approved_limit)}</strong>${zero?`<br><span style="color:var(--accent-red)">Manual review required: ${Number(p.current_arrears_days||0)} days in arrears.</span>`:''}`:'<br>Credit rating has not been calculated yet.'}`:'';
+      info.style.color=zero?'var(--accent-red)':'var(--text-secondary)';
     } else {
       info.textContent = val ? 'No client matched. Pick from suggestions.' : '';
       info.style.color='var(--text-secondary)';
@@ -3445,9 +3560,15 @@ function buildAppReview(){
   const tier=getAutoTier(amt, product?.name);
   const termWeeks=selectedAppTermWeeks();
   const calc=calcPataFixLoan(amt,termWeeks,product,'flat');
-  $('#appReview').innerHTML=`<div class="card"><h3 style="font-size:14px;margin-bottom:12px">Application Summary</h3>
+  const credit=(window._appCreditProfiles||{})[id];
+  const aboveLimit=credit&&amt>Number(credit.credit_score||0);
+  const creditNotice=!credit?'':credit.rating_status==='zero'
+    ? `<div style="padding:10px 12px;margin-bottom:12px;border:1px solid rgba(220,38,38,.35);background:rgba(220,38,38,.08);border-radius:8px;color:var(--accent-red)"><strong>Manual review required.</strong> This client has a zero credit score after ${Number(credit.current_arrears_days||0)} days in arrears.</div>`
+    : aboveLimit?`<div style="padding:10px 12px;margin-bottom:12px;border:1px solid rgba(217,119,6,.35);background:rgba(217,119,6,.08);border-radius:8px;color:var(--accent-yellow)"><strong>Above recommended limit.</strong> Requested ${fmtMoney(amt)}; current score is ${fmtMoney(credit.credit_score)}.</div>`:'';
+  $('#appReview').innerHTML=`${creditNotice}<div class="card"><h3 style="font-size:14px;margin-bottom:12px">Application Summary</h3>
     <p><strong>Client:</strong> ${client}</p><p><strong>Product:</strong> ${tier}</p>
     <p><strong>Amount:</strong> ${fmtMoney(amt)}</p><p><strong>Rate:</strong> ${product?.monthlyRate||0}% per month</p>
+    ${credit?`<p><strong>Credit Rating:</strong> ${creditRatingBadge(credit)} &nbsp; <strong>Recommended Limit:</strong> ${fmtMoney(credit.credit_score)}</p>`:''}
     <p><strong>Term:</strong> ${patafixTermLabel(product,termWeeks)}</p>
     <p><strong>Application Date:</strong> ${fmtDate($('#appDate')?.value||today())}</p>
     <p><strong>Purpose:</strong> ${$('#appPurpose').value||'-'}</p>
@@ -4121,6 +4242,7 @@ async function disburseApprovedApplication(options){
     }catch(feeErr){ console.warn('[Disburse] Processing fee income log failed:',feeErr?.message); }
 
     await audit('loan_disbursed','loans',loan.id,null,loanRec);
+    await refreshPataFixCreditScores(true);
     return loan;
 }
 
@@ -4578,6 +4700,7 @@ function updateBranchFilter(section, branch){
     appFilters[section].branch = branch || 'all';
     if(section==='dashboard') renderDashboard();
     if(section==='clients') renderClients();
+    if(section==='credit_scores') renderCreditScores();
     if(section==='applications') renderApplications();
     if(section==='disbursement') renderDisbursement();
     if(section==='loans') renderLoans();
@@ -5306,6 +5429,7 @@ async function savePayment(){
     }
 
     await audit('payment_recorded','loan_repayments',null,null,rec);
+    await refreshPataFixCreditScores(true);
     const toastMsg = minIntResult.adjusted
       ? `Payment ${receiptNo} recorded! Remaining interest balance: KES ${fmtMoney(minIntResult.shortfall)}`
       : `Payment ${receiptNo} recorded! ${fmtMoney(amountApplied)}${excessAmount>0?` applied, ${fmtMoney(excessAmount)} deposited to Charges & Excess Account`:''}`;
