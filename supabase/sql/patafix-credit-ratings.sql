@@ -86,6 +86,8 @@ declare
   v_lifetime_late integer;
   v_previous_score numeric(14,2);
   v_new_limit numeric(14,2);
+  v_clean_round integer;
+  v_graduation_amount numeric(14,2);
   v_awards integer := 0;
   v_zero_count integer := 0;
 begin
@@ -170,31 +172,42 @@ begin
       where business_id=p_business_id and client_id=v_client.id
       for update;
 
-      if v_schedule_count>0 and v_all_paid and v_loan_max_late<=3 then
+      if v_schedule_count>0 and v_all_paid and v_loan_max_late<3 then
         v_previous_score:=v_profile.approved_limit;
-        v_new_limit:=greatest(v_profile.approved_limit,coalesce(v_loan.principal_amount,0))+2000;
+        v_clean_round:=v_profile.clean_loans_completed+1;
+        v_graduation_amount:=case v_clean_round when 2 then 2000 when 3 then 3000 else 0 end;
+        v_new_limit:=greatest(v_profile.approved_limit,coalesce(v_loan.principal_amount,0))+v_graduation_amount;
         update public.patafix_credit_profiles
         set approved_limit=v_new_limit,
             clean_loans_completed=clean_loans_completed+1,
             max_days_overdue=greatest(max_days_overdue,v_loan_max_late),
-            last_reason='KES 2,000 added after clean completion of loan '||coalesce(v_loan.loan_no,'')
+            last_reason=case
+              when v_clean_round=1 then 'First clean loan round completed; graduation begins after the second round'
+              when v_clean_round=2 then 'KES 2,000 added after the second clean loan round'
+              when v_clean_round=3 then 'KES 3,000 added after the third clean loan round'
+              else 'Clean loan round completed; automatic graduation milestones already completed' end
         where id=v_profile.id;
         insert into public.patafix_credit_events (
           business_id,client_id,loan_id,event_type,event_date,previous_score,new_score,
           amount_change,days_overdue,reason,source_key
         ) values (
-          p_business_id,v_client.id,v_loan.id,'clean_completion_bonus',v_today,
-          v_previous_score,v_new_limit,2000,v_loan_max_late,
-          'Loan '||coalesce(v_loan.loan_no,'')||' completed without exceeding three days in arrears',
+          p_business_id,v_client.id,v_loan.id,
+          case when v_graduation_amount>0 then 'clean_completion_graduation' else 'clean_completion_progress' end,
+          v_today,v_previous_score,v_new_limit,v_graduation_amount,v_loan_max_late,
+          case
+            when v_clean_round=1 then 'First clean loan round completed; no limit increase yet'
+            when v_clean_round=2 then 'Second clean loan round completed; limit increased by KES 2,000'
+            when v_clean_round=3 then 'Third clean loan round completed; limit increased by KES 3,000'
+            else 'Clean loan round completed after all automatic graduation milestones' end,
           'credit-loan:'||v_loan.id::text
         );
-        v_awards:=v_awards+1;
+        if v_graduation_amount>0 then v_awards:=v_awards+1; end if;
       else
         update public.patafix_credit_profiles
-        set has_late_history=has_late_history or v_loan_max_late>3,
+        set has_late_history=has_late_history or v_loan_max_late>=3,
             max_days_overdue=greatest(max_days_overdue,v_loan_max_late),
-            last_reason=case when v_loan_max_late>3
-              then 'Loan '||coalesce(v_loan.loan_no,'')||' exceeded three days in arrears; no completion bonus'
+            last_reason=case when v_loan_max_late>=3
+              then 'Loan '||coalesce(v_loan.loan_no,'')||' reached three days in arrears; no graduation awarded'
               else last_reason end
         where id=v_profile.id;
         insert into public.patafix_credit_events (
@@ -205,7 +218,7 @@ begin
           v_profile.approved_limit,v_profile.approved_limit,0,v_loan_max_late,
           case when v_schedule_count=0 then 'No repayment schedule was available for clean-completion scoring'
                when not v_all_paid then 'Loan schedule was not fully paid'
-               else 'Loan exceeded three days in arrears' end,
+               else 'Loan reached three days in arrears' end,
           'credit-loan:'||v_loan.id::text
         );
       end if;
@@ -220,7 +233,7 @@ begin
       and l.status='active'
       and s.status<>'restructured'
       and coalesce(s.total_due,0)-coalesce(s.total_paid,0)>0.01
-      and s.due_date<v_today-3;
+      and s.due_date<=v_today-3;
 
     select coalesce(max(greatest(0,
       coalesce((s.paid_at at time zone 'Africa/Nairobi')::date,v_today)-s.due_date
@@ -237,7 +250,7 @@ begin
     where business_id=p_business_id and client_id=v_client.id
     for update;
 
-    if v_current_late>3 then
+    if v_current_late>=3 then
       if v_profile.rating_status<>'zero' then
         insert into public.patafix_credit_events (
           business_id,client_id,event_type,event_date,previous_score,new_score,
@@ -245,7 +258,7 @@ begin
         ) values (
           p_business_id,v_client.id,'arrears_zero',v_today,v_profile.credit_score,0,
           -v_profile.credit_score,v_current_late,
-          'Credit score reduced to zero after more than three days in arrears',
+          'Credit score reduced to zero on the third full day in arrears',
           'arrears-zero:'||v_client.id::text||':'||v_today::text
         ) on conflict (business_id,source_key) do nothing;
       end if;
@@ -272,22 +285,22 @@ begin
       update public.patafix_credit_profiles
       set credit_score=approved_limit,current_arrears_days=0,
           max_days_overdue=greatest(max_days_overdue,v_lifetime_late),
-          has_late_history=has_late_history or v_lifetime_late>3,
+          has_late_history=has_late_history or v_lifetime_late>=3,
           rating_status=case
             when approved_limit<=0 then 'new'
-            when has_late_history or v_lifetime_late>3 then 'watchlist'
+            when has_late_history or v_lifetime_late>=3 then 'watchlist'
             else 'good' end,
           last_reason=case
             when approved_limit<=0 then 'No approved loan yet'
-            when has_late_history or v_lifetime_late>3 then 'No current arrears; prior late-payment history retained'
-            else coalesce(last_reason,'Repayment history is within the three-day allowance') end,
+            when has_late_history or v_lifetime_late>=3 then 'No current arrears; prior late-payment history retained'
+            else coalesce(last_reason,'Repayment history remains within the allowed period') end,
           last_calculated_at=now()
       where id=v_profile.id;
     end if;
   end loop;
 
   return jsonb_build_object(
-    'ok',true,'business_id',p_business_id,'bonuses_awarded',v_awards,
+    'ok',true,'business_id',p_business_id,'graduations_awarded',v_awards,
     'clients_at_zero',v_zero_count,'calculated_at',now()
   );
 end;
@@ -361,12 +374,16 @@ from public.loans l
 join public.patafix_credit_profiles p
   on p.business_id=l.business_id and p.client_id=l.client_id
 left join lateral (
-  select max(greatest(0,
-    coalesce((s.paid_at at time zone 'Africa/Nairobi')::date,(now() at time zone 'Africa/Nairobi')::date)-s.due_date
-  ))::integer as max_late
+  select
+    max(greatest(0,
+      coalesce((s.paid_at at time zone 'Africa/Nairobi')::date,(now() at time zone 'Africa/Nairobi')::date)-s.due_date
+    ))::integer as max_late,
+    max(s.paid_at) as completed_at
   from public.loan_schedules s where s.loan_id=l.id and s.status<>'restructured'
 ) stats on true
-where l.business_id='BIZ-58D22296' and l.status='completed'
+where l.business_id='BIZ-58D22296'
+  and l.status='completed'
+  and coalesce(stats.completed_at,l.updated_at,l.created_at) < timestamptz '2026-10-06 00:00:00+03'
 on conflict (business_id,source_key) do nothing;
 
 select public.patafix_refresh_credit_scores_for_business('BIZ-58D22296');

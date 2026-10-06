@@ -2476,7 +2476,7 @@ function creditRatingPanel(profile,clientId){
       <div><div class="kpi-label">Approved Limit</div><strong>${fmtMoney(profile.approved_limit)}</strong></div>
       <div><div class="kpi-label">Current Score</div><strong style="color:${Number(profile.credit_score)<=0?'var(--accent-red)':'var(--accent-green)'}">${fmtMoney(profile.credit_score)}</strong></div>
       <div><div class="kpi-label">Current Arrears Age</div><strong>${Number(profile.current_arrears_days||0)} days</strong></div>
-      <div><div class="kpi-label">Clean Loans</div><strong>${Number(profile.clean_loans_completed||0)}</strong></div>
+      <div><div class="kpi-label">Clean Rounds</div><strong>${Number(profile.clean_loans_completed||0)}</strong></div>
     </div>
     <div style="font-size:12px;color:var(--text-secondary);margin-top:12px">${escapeHtml(profile.last_reason||'Credit record calculated')}</div>
   </div>`;
@@ -2505,7 +2505,7 @@ async function renderCreditScores(){
     const watch=rows.filter(r=>r.rating_status==='watchlist').length;
     const good=rows.filter(r=>r.rating_status==='good').length;
     main.innerHTML=`
-      <div class="page-header"><div><h1>Credit Ratings</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Recommended lending limits based on approved loans and repayment conduct.</p></div><button class="btn btn-outline btn-sm" onclick="refreshPataFixCreditScores(false).then(renderCreditScores)">Refresh ratings</button></div>
+      <div class="page-header"><div><h1>Credit Ratings</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Second clean round: +KES 2,000. Third clean round: +KES 3,000. Three full days in arrears: score zero.</p></div><button class="btn btn-outline btn-sm" onclick="refreshPataFixCreditScores(false).then(renderCreditScores)">Refresh ratings</button></div>
       ${getBranchFilterHtml('credit_scores',rows)}
       <div class="kpi-grid" style="grid-template-columns:repeat(4,minmax(130px,1fr));margin-bottom:16px">
         <div class="kpi-card"><div class="kpi-label">Rated Clients</div><div class="kpi-value">${rows.length}</div></div>
@@ -2532,7 +2532,7 @@ function filterCreditRatings(){
     return (!q||hay.includes(q))&&(status==='all'||r.rating_status===status);
   });
   const target=document.getElementById('creditRatingTable');if(!target)return;
-  target.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Client</th><th>Branch</th><th>Officer</th><th>Approved Limit</th><th>Current Score</th><th>Rating</th><th>Arrears Age</th><th>Clean Loans</th><th>Reason</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td><strong>${escapeHtml(r.client?.full_name||'-')}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(r.client?.id_number||'-')} | ${escapeHtml(r.client?.phone||'-')}</span></td><td>${escapeHtml(r.branch_name)}</td><td>${escapeHtml(r.officer_name)}</td><td><strong>${fmtMoney(r.approved_limit)}</strong></td><td><strong style="color:${Number(r.credit_score)<=0?'var(--accent-red)':'var(--accent-green)'}">${fmtMoney(r.credit_score)}</strong></td><td>${creditRatingBadge(r)}</td><td>${Number(r.current_arrears_days||0)} days</td><td>${Number(r.clean_loans_completed||0)}</td><td style="max-width:230px;font-size:12px;color:var(--text-secondary)">${escapeHtml(r.last_reason||'-')}</td><td><button class="btn btn-outline btn-sm" onclick="openCreditHistory('${r.client_id}')">History</button></td></tr>`).join('')||'<tr><td colspan="10" style="text-align:center;padding:24px;color:var(--text-secondary)">No matching clients</td></tr>'}</tbody></table></div>`;
+  target.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Client</th><th>Branch</th><th>Officer</th><th>Approved Limit</th><th>Current Score</th><th>Rating</th><th>Arrears Age</th><th>Clean Rounds</th><th>Reason</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td><strong>${escapeHtml(r.client?.full_name||'-')}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(r.client?.id_number||'-')} | ${escapeHtml(r.client?.phone||'-')}</span></td><td>${escapeHtml(r.branch_name)}</td><td>${escapeHtml(r.officer_name)}</td><td><strong>${fmtMoney(r.approved_limit)}</strong></td><td><strong style="color:${Number(r.credit_score)<=0?'var(--accent-red)':'var(--accent-green)'}">${fmtMoney(r.credit_score)}</strong></td><td>${creditRatingBadge(r)}</td><td>${Number(r.current_arrears_days||0)} days</td><td>${Number(r.clean_loans_completed||0)}</td><td style="max-width:230px;font-size:12px;color:var(--text-secondary)">${escapeHtml(r.last_reason||'-')}</td><td><button class="btn btn-outline btn-sm" onclick="openCreditHistory('${r.client_id}')">History</button></td></tr>`).join('')||'<tr><td colspan="10" style="text-align:center;padding:24px;color:var(--text-secondary)">No matching clients</td></tr>'}</tbody></table></div>`;
 }
 
 async function openCreditHistory(clientId){
