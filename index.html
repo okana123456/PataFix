@@ -2505,7 +2505,7 @@ async function renderCreditScores(){
     const watch=rows.filter(r=>r.rating_status==='watchlist').length;
     const good=rows.filter(r=>r.rating_status==='good').length;
     main.innerHTML=`
-      <div class="page-header"><div><h1>Credit Ratings</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Second clean round: +KES 2,000. Third clean round: +KES 3,000. Three full days in arrears: score zero.</p></div><button class="btn btn-outline btn-sm" onclick="refreshPataFixCreditScores(false).then(renderCreditScores)">Refresh ratings</button></div>
+      <div class="page-header"><div><h1>Credit Ratings</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:4px">Second clean round: +KES 2,000. Third clean round: +KES 3,000. Three full days in arrears: score zero.</p></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" onclick="exportCreditRatingsExcel()">Download Excel</button><button class="btn btn-outline btn-sm" onclick="refreshPataFixCreditScores(false).then(renderCreditScores)">Refresh ratings</button></div></div>
       ${getBranchFilterHtml('credit_scores',rows)}
       <div class="kpi-grid" style="grid-template-columns:repeat(4,minmax(130px,1fr));margin-bottom:16px">
         <div class="kpi-card"><div class="kpi-label">Rated Clients</div><div class="kpi-value">${rows.length}</div></div>
@@ -2524,15 +2524,46 @@ async function renderCreditScores(){
   }
 }
 
-function filterCreditRatings(){
+function filteredCreditRatingRows(){
   const q=String(document.getElementById('creditRatingSearch')?.value||'').toLowerCase().trim();
   const status=document.getElementById('creditRatingStatus')?.value||'all';
-  const rows=creditRatingRows.filter(r=>{
+  return creditRatingRows.filter(r=>{
     const hay=[r.client?.full_name,r.client?.id_number,r.client?.phone,r.officer_name].join(' ').toLowerCase();
     return (!q||hay.includes(q))&&(status==='all'||r.rating_status===status);
   });
+}
+
+function filterCreditRatings(){
+  const rows=filteredCreditRatingRows();
   const target=document.getElementById('creditRatingTable');if(!target)return;
   target.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Client</th><th>Branch</th><th>Officer</th><th>Approved Limit</th><th>Current Score</th><th>Rating</th><th>Arrears Age</th><th>Clean Rounds</th><th>Reason</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td><strong>${escapeHtml(r.client?.full_name||'-')}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(r.client?.id_number||'-')} | ${escapeHtml(r.client?.phone||'-')}</span></td><td>${escapeHtml(r.branch_name)}</td><td>${escapeHtml(r.officer_name)}</td><td><strong>${fmtMoney(r.approved_limit)}</strong></td><td><strong style="color:${Number(r.credit_score)<=0?'var(--accent-red)':'var(--accent-green)'}">${fmtMoney(r.credit_score)}</strong></td><td>${creditRatingBadge(r)}</td><td>${Number(r.current_arrears_days||0)} days</td><td>${Number(r.clean_loans_completed||0)}</td><td style="max-width:230px;font-size:12px;color:var(--text-secondary)">${escapeHtml(r.last_reason||'-')}</td><td><button class="btn btn-outline btn-sm" onclick="openCreditHistory('${r.client_id}')">History</button></td></tr>`).join('')||'<tr><td colspan="10" style="text-align:center;padding:24px;color:var(--text-secondary)">No matching clients</td></tr>'}</tbody></table></div>`;
+}
+
+function exportCreditRatingsExcel(){
+  const rows=filteredCreditRatingRows();
+  if(!rows.length)return toast('No credit-rating records match the current filters.','warning');
+  const data=rows.map(r=>({
+    'Client':r.client?.full_name||'',
+    'ID Number':r.client?.id_number||'',
+    'Phone':r.client?.phone||'',
+    'Branch':r.branch_name||'Head Office',
+    'Loan Officer':r.officer_name||'',
+    'Approved Limit (KES)':Number(r.approved_limit||0),
+    'Current Credit Score (KES)':Number(r.credit_score||0),
+    'Rating':String(r.rating_status||'new').toUpperCase(),
+    'Current Arrears Days':Number(r.current_arrears_days||0),
+    'Maximum Days Overdue':Number(r.max_days_overdue||0),
+    'Clean Rounds':Number(r.clean_loans_completed||0),
+    'Reason':r.last_reason||'',
+    'Last Calculated':r.last_calculated_at?new Date(r.last_calculated_at).toLocaleString('en-KE',{timeZone:'Africa/Nairobi'}):''
+  }));
+  const ws=XLSX.utils.json_to_sheet(data);
+  ws['!cols']=[{wch:28},{wch:15},{wch:15},{wch:20},{wch:25},{wch:21},{wch:27},{wch:14},{wch:22},{wch:23},{wch:14},{wch:55},{wch:24}];
+  ws['!autofilter']={ref:`A1:M${data.length+1}`};
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Credit Ratings');
+  XLSX.writeFile(wb,`PataFix_Credit_Ratings_${today()}.xlsx`);
+  toast(`${data.length} credit-rating records downloaded.`,'success');
 }
 
 async function openCreditHistory(clientId){
