@@ -3476,8 +3476,9 @@ function onAppClientPick(val){
       const c = (window._appClients||[]).find(x=>x.id===id);
       const p=(window._appCreditProfiles||{})[id];
       const zero=p?.rating_status==='zero';
-      info.innerHTML = c?`<strong>${escapeHtml(c.full_name)}</strong> (${escapeHtml(c.phone||'no phone')})${p?`<br>${creditRatingBadge(p)} &nbsp; Current score: <strong>${fmtMoney(p.credit_score)}</strong> &nbsp; Approved limit: <strong>${fmtMoney(p.approved_limit)}</strong>${zero?`<br><span style="color:var(--accent-red)">Manual review required: ${Number(p.current_arrears_days||0)} days in arrears.</span>`:''}`:'<br>Credit rating has not been calculated yet.'}`:'';
-      info.style.color=zero?'var(--accent-red)':'var(--text-secondary)';
+      const watchlist=p?.rating_status==='watchlist';
+      info.innerHTML = c?`<strong>${escapeHtml(c.full_name)}</strong> (${escapeHtml(c.phone||'no phone')})${p?`<br>${creditRatingBadge(p)} &nbsp; Current score: <strong>${fmtMoney(p.credit_score)}</strong> &nbsp; Approved limit: <strong>${fmtMoney(p.approved_limit)}</strong>${zero?`<br><span style="color:var(--accent-red)">Manual review required: ${Number(p.current_arrears_days||0)} days in arrears.</span>`:watchlist?'<br><span style="color:var(--accent-yellow)">Watchlist: review the client repayment history before approval.</span>':''}`:'<br>Credit rating has not been calculated yet.'}`:'';
+      info.style.color=zero?'var(--accent-red)':watchlist?'var(--accent-yellow)':'var(--text-secondary)';
     } else {
       info.textContent = val ? 'No client matched. Pick from suggestions.' : '';
       info.style.color='var(--text-secondary)';
@@ -3564,6 +3565,7 @@ function buildAppReview(){
   const aboveLimit=credit&&amt>Number(credit.credit_score||0);
   const creditNotice=!credit?'':credit.rating_status==='zero'
     ? `<div style="padding:10px 12px;margin-bottom:12px;border:1px solid rgba(220,38,38,.35);background:rgba(220,38,38,.08);border-radius:8px;color:var(--accent-red)"><strong>Manual review required.</strong> This client has a zero credit score after ${Number(credit.current_arrears_days||0)} days in arrears.</div>`
+    : credit.rating_status==='watchlist'?`<div style="padding:10px 12px;margin-bottom:12px;border:1px solid rgba(217,119,6,.35);background:rgba(217,119,6,.08);border-radius:8px;color:var(--accent-yellow)"><strong>Watchlist client.</strong> Review the repayment history before approval.${aboveLimit?` The requested ${fmtMoney(amt)} is also above the recommended limit of ${fmtMoney(credit.credit_score)}.`:''}</div>`
     : aboveLimit?`<div style="padding:10px 12px;margin-bottom:12px;border:1px solid rgba(217,119,6,.35);background:rgba(217,119,6,.08);border-radius:8px;color:var(--accent-yellow)"><strong>Above recommended limit.</strong> Requested ${fmtMoney(amt)}; current score is ${fmtMoney(credit.credit_score)}.</div>`:'';
   $('#appReview').innerHTML=`${creditNotice}<div class="card"><h3 style="font-size:14px;margin-bottom:12px">Application Summary</h3>
     <p><strong>Client:</strong> ${client}</p><p><strong>Product:</strong> ${tier}</p>
