@@ -5590,74 +5590,17 @@ async function renderOverdue(opts){
     const loanIds=visibleLoans.map(l=>l.id);
     let allScheds=[];
     if(loanIds.length){
-      const{data:scheds}=await sb('loan_schedules')
-        .select('*').in('loan_id',loanIds)
-        .lte('due_date',asOfDate)
-        .order('due_date',{ascending:true});
-      allScheds=scheds||[];
+      const loanIdSet=new Set(loanIds);
+      const businessSchedules=await fetchAllBusinessRows('loan_schedules','*');
+      allScheds=businessSchedules.filter(s=>loanIdSet.has(s.loan_id)).sort((a,b)=>String(a.due_date).localeCompare(String(b.due_date)));
     }
 
     // Build per-loan arrears based on asOfDate
     const loanMap={};
     visibleLoans.forEach(l=>{ loanMap[l.id]=l; });
 
-    // Dues/Forecast retains installments due on the selected date.
-    const missed=allScheds.filter(s=>{
-      const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
-      return s.due_date<asOfDate && unpaid>0.01 && ['pending','partial','overdue'].includes(s.status);
-    });
-
-    // Group by loan to compute per-loan overdue_days & arrears
-    const loanArrears={};
-    missed.forEach(s=>{
-      const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
-      const split=scheduleOverdueSplit(s);
-      if(!loanArrears[s.loan_id]){ loanArrears[s.loan_id]={oldest:s.due_date,arrears:0,principal:0,interest:0,scheds:[]}; }
-      loanArrears[s.loan_id].arrears+=unpaid;
-      loanArrears[s.loan_id].principal+=split.principal;
-      loanArrears[s.loan_id].interest+=split.interest;
-      loanArrears[s.loan_id].scheds.push(s);
-    });
-
-    // Loans that have arrears as of asOfDate
-    let overdueLoans=Object.keys(loanArrears).map(lid=>{
-      const loan=loanMap[lid];
-      if(!loan)return null;
-      const oldest=new Date(loanArrears[lid].oldest);
-      const asOf=new Date(asOfDate);
-      const daysOld=Math.floor((asOf-oldest)/(1000*60*60*24));
-      return {
-        ...loan,
-        _asof_days:daysOld,
-        _asof_arrears:Number(loanArrears[lid].arrears.toFixed(2)),
-        _asof_arrears_split:{
-          principal:Number(loanArrears[lid].principal.toFixed(2)),
-          interest:Number(loanArrears[lid].interest.toFixed(2))
-        },
-        _scheds:loanArrears[lid].scheds
-      };
-    }).filter(Boolean);
-
-    // Retain the previous fallback for older/imported loans without schedules.
-    const scheduleCapturedIds=new Set(overdueLoans.map(l=>l.id));
-    const loansWithSchedules=new Set(allScheds.map(s=>s.loan_id));
-    const fallbackLoans=visibleLoans.filter(l=>
-      l.status==='active' &&
-      !scheduleCapturedIds.has(l.id) &&
-      !loansWithSchedules.has(l.id) &&
-      (Number(l.arrears_amount||0)>0 || Number(l.overdue_days||0)>0)
-    ).map(l=>({
-      ...l,
-      _asof_days:Number(l.overdue_days||0),
-      _asof_arrears:Number(l.arrears_amount||0),
-      _asof_arrears_split:splitLoanBalanceAmount(l,Number(l.arrears_amount||0)),
-      _scheds:[]
-    }));
-    overdueLoans=overdueLoans.concat(fallbackLoans);
-
-    // ── Fallback: include any active loan with arrears_amount > 0 or overdue_days > 0
-    // that was not already captured by the schedule-based logic above
-    // ────────────────────────────────────────────────────────────────────────
+    // All arrears surfaces use this same schedule-based snapshot.
+    let overdueLoans=buildCanonicalArrearsLoans(visibleLoans,allScheds,asOfDate);
 
     // Apply minDays filter
     if(minDays>0) overdueLoans=overdueLoans.filter(l=>l._asof_days>=minDays);
@@ -5780,8 +5723,6 @@ async function renderOverdue(opts){
       missedHtml += '<tr><td colspan="13" style="text-align:center;color:var(--text-secondary);padding:12px">No missed instalments</td></tr>';
     }
     missedHtml += '</tbody></table></div>';
-    const missedArrears = missedRows.reduce(function(s,r){return s+r.remaining;},0);
-
     // Arrears summary in the client's requested format.
     let summaryHtml = '<div class="table-wrap"><table style="font-size:12px"><thead><tr>' +
       '<th>Branch</th><th>Loan Officer</th><th>Client Name</th><th>Mobile Number</th><th>ID Number</th><th>Product</th><th>Disbursed Amount</th><th>Principal Overdue</th><th>Interest Overdue</th><th>Total Overdue</th><th>Days in Arrears</th><th>Total Outstanding Balance</th>' +
@@ -6126,6 +6067,7 @@ async function saveFollowUp(loanId,clientId){
 // ═══ REPORTS ═══
 async function renderReports(){
   const main=$('#mainContent');
+  await loadPataFixBranches();
   const reports=[
     {id:'clients_report',      title:'Clients Report',              icon:'👥', desc:'Full client list with onboarding date, location, loan officer, loan history and balances', color:'var(--accent-blue)'},
     {id:'collection_daily',   title:'Daily Collection Rate',       icon:'📅', desc:'Payments collected today vs scheduled due',                           color:'var(--accent-green)'},
@@ -6149,6 +6091,7 @@ async function renderReports(){
             <div style="flex:1">
               <strong style="font-size:14px">${r.title}</strong>
               <p style="font-size:12px;color:var(--text-secondary);margin:4px 0 12px">${r.desc}</p>
+              ${r.id==='aging'?getBranchFilterHtml('reports',[]):''}
               <div style="display:flex;gap:8px">
                 <button class="btn btn-outline btn-sm" onclick="previewReport('${r.id}')">👁 Preview</button>
                 <button class="btn btn-primary btn-sm" onclick="downloadReport('${r.id}')">⬇ Download</button>
@@ -6372,42 +6315,22 @@ async function loadReportData(id){
     const[{data:loans},{data:staff},{data:schedules}]=await Promise.all([
       sb('loans').select('*,loan_clients(full_name,phone,id_number,address,branch_name),loan_applications(loan_products(*))').eq('business_id',biz).eq('status','active'),
       sb('loan_staff').select('id,name').eq('business_id',biz),
-      sb('loan_schedules').select('loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status').eq('business_id',biz).lt('due_date',reportDate).limit(100000)
+      fetchAllBusinessRows('loan_schedules','loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status,created_at')
     ]);
     const staffMap={};(staff||[]).forEach(s=>{staffMap[s.id]=s.name;});
     const isOnlyOfficerAge = hasRole('loan_officer') && !hasRole('admin','branch_manager');
-    const filteredLoansAge = isOnlyOfficerAge ? (loans||[]).filter(l=>l.loan_officer_id===currentUser.id) : (loans||[]);
-    const loanMap=new Map(filteredLoansAge.map(l=>[l.id,l]));
-    const arrearsByLoan=new Map();
-    let missedInstallments=0;
-    (schedules||[]).forEach(s=>{
-      if(!loanMap.has(s.loan_id)||!isCollectibleSchedule(s))return;
-      const unpaid=Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0));
-      if(unpaid<=0.01)return;
-      const split=scheduleOverdueSplit(s);
-      const current=arrearsByLoan.get(s.loan_id)||{total:0,principal:0,interest:0,oldest:s.due_date,count:0};
-      current.total+=unpaid;
-      current.principal+=split.principal;
-      current.interest+=split.interest;
-      current.oldest=String(s.due_date)<String(current.oldest)?s.due_date:current.oldest;
-      current.count+=1;
-      arrearsByLoan.set(s.loan_id,current);
-      missedInstallments+=1;
-    });
-    const overdue=filteredLoansAge.map(l=>{
-      const arr=arrearsByLoan.get(l.id);
-      if(!arr)return null;
-      const days=Math.max(1,Math.floor((parseLocalDate(reportDate)-parseLocalDate(arr.oldest))/(24*60*60*1000)));
-      return{loan:l,arrears:arr,days};
-    }).filter(Boolean).sort((a,b)=>b.days-a.days);
-    const totalArrears=overdue.reduce((sum,item)=>sum+item.arrears.total,0);
+    let filteredLoansAge=filterByBranch(loans||[],'reports');
+    if(isOnlyOfficerAge)filteredLoansAge=filteredLoansAge.filter(l=>l.loan_officer_id===currentUser.id);
+    const overdue=buildCanonicalArrearsLoans(filteredLoansAge,schedules||[],reportDate);
+    const missedInstallments=overdue.reduce((sum,l)=>sum+(l._scheds||[]).length,0);
+    const totalArrears=overdue.reduce((sum,l)=>sum+Number(l._asof_arrears||0),0);
     return{title:'Arrears Report',summary:[
       {label:'Report Date',value:reportDate},
       {label:'Loans in Arrears',value:overdue.length},
       {label:'Missed Installments',value:missedInstallments},
       {label:'Total Arrears',value:fmtMoney(totalArrears)},
-      {label:'Total Outstanding Balance',value:fmtMoney(overdue.reduce((sum,item)=>sum+Number(item.loan.outstanding_balance||0),0))}
-    ],rows:overdue.map(({loan:l,arrears,days})=>({
+      {label:'Total Outstanding Balance',value:fmtMoney(overdue.reduce((sum,l)=>sum+Number(l.outstanding_balance||0),0))}
+    ],rows:overdue.map(l=>({
       'Branch':patafixBranchLabel(l),
       'Loan Officer':l.loan_officer_id?staffMap[l.loan_officer_id]||'Unassigned':'Unassigned',
       'Client Name':l.loan_clients?.full_name||'-',
@@ -6415,10 +6338,10 @@ async function loadReportData(id){
       'Id Number':l.loan_clients?.id_number||'-',
       'Product':loanProductLabel(l),
       'Disbursed Amount':Number(l.disbursed_amount??l.principal_amount??0),
-      'Principal Overdue':Number(arrears.principal.toFixed(2)),
-      'Interest Overdue':Number(arrears.interest.toFixed(2)),
-      'Total Overdue':Number(arrears.total.toFixed(2)),
-      'Days in Arrears':days,
+      'Principal Overdue':Number((l._asof_arrears_split?.principal||0).toFixed(2)),
+      'Interest Overdue':Number((l._asof_arrears_split?.interest||0).toFixed(2)),
+      'Total Overdue':Number((l._asof_arrears||0).toFixed(2)),
+      'Days in Arrears':Number(l._asof_days||0),
       'Total Outstanding Balance':Number(l.outstanding_balance||0)
     })),cols:['Branch','Loan Officer','Client Name','Mobile Number','Id Number','Product','Disbursed Amount','Principal Overdue','Interest Overdue','Total Overdue','Days in Arrears','Total Outstanding Balance']};
   }
@@ -8402,6 +8325,59 @@ function scheduleOverdueSplit(schedule){
   return{principal,interest};
 }
 
+function buildCanonicalArrearsLoans(loans,schedules,asOfDate){
+  const reportDate=asOfDate||localISODate();
+  const activeLoans=(loans||[]).filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01);
+  const activeIds=new Set(activeLoans.map(l=>l.id));
+  const loansWithSchedules=new Set();
+  const arrearsByLoan=new Map();
+
+  (schedules||[]).forEach(s=>{
+    if(!activeIds.has(s.loan_id))return;
+    if(String(s.status||'').toLowerCase()!=='restructured')loansWithSchedules.add(s.loan_id);
+    if(!s.due_date||s.due_date>=reportDate||!isCollectibleSchedule(s))return;
+    const unpaid=Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0));
+    if(unpaid<=0.01)return;
+    const split=scheduleOverdueSplit(s);
+    const current=arrearsByLoan.get(s.loan_id)||{total:0,principal:0,interest:0,oldest:s.due_date,schedules:[]};
+    current.total+=unpaid;
+    current.principal+=split.principal;
+    current.interest+=split.interest;
+    current.oldest=String(s.due_date)<String(current.oldest)?s.due_date:current.oldest;
+    current.schedules.push(s);
+    arrearsByLoan.set(s.loan_id,current);
+  });
+
+  return activeLoans.map(loan=>{
+    const arrears=arrearsByLoan.get(loan.id);
+    if(arrears){
+      const days=Math.max(1,Math.floor((parseLocalDate(reportDate)-parseLocalDate(arrears.oldest))/(24*60*60*1000)));
+      return{
+        ...loan,
+        _asof_days:days,
+        _asof_arrears:Number(arrears.total.toFixed(2)),
+        _asof_arrears_split:{
+          principal:Number(arrears.principal.toFixed(2)),
+          interest:Number(arrears.interest.toFixed(2))
+        },
+        _scheds:arrears.schedules
+      };
+    }
+    // Imported legacy loans without any usable schedule retain their stored arrears.
+    if(!loansWithSchedules.has(loan.id)&&Number(loan.arrears_amount||0)>0.01&&Number(loan.overdue_days||0)>0){
+      const amount=Number(loan.arrears_amount||0);
+      return{
+        ...loan,
+        _asof_days:Number(loan.overdue_days||0),
+        _asof_arrears:amount,
+        _asof_arrears_split:splitLoanBalanceAmount(loan,amount),
+        _scheds:[]
+      };
+    }
+    return null;
+  }).filter(Boolean).sort((a,b)=>b._asof_days-a._asof_days);
+}
+
 function loanPerformanceArrearsAmount(loan){
   return Number(loan?._performance_arrears ?? loan?.arrears_amount ?? 0);
 }
@@ -8412,27 +8388,14 @@ function loanPerformanceArrearsSplit(loan){
 }
 
 function attachPerformanceArrears(loans, schedules, asOfDate){
-  const byLoan = new Map();
-  (schedules||[]).forEach(s=>{
-    if(!s.loan_id || !s.due_date || s.due_date >= asOfDate || !isCollectibleSchedule(s)) return;
-    const due = Number(s.total_due||0);
-    const paid = Number(s.total_paid||0);
-    const unpaid = Math.max(0, due - paid);
-    if(unpaid <= 0.01) return;
-    const split=scheduleOverdueSplit(s);
-    const current=byLoan.get(s.loan_id)||{total:0,principal:0,interest:0};
-    byLoan.set(s.loan_id,{
-      total:Number((current.total+unpaid).toFixed(2)),
-      principal:Number((current.principal+split.principal).toFixed(2)),
-      interest:Number((current.interest+split.interest).toFixed(2))
-    });
-  });
+  const canonicalByLoan=new Map(buildCanonicalArrearsLoans(loans,schedules,asOfDate).map(l=>[l.id,l]));
   return (loans||[]).map(l=>{
-    const scheduleArrears=byLoan.get(l.id)||{total:0,principal:0,interest:0};
+    const canonical=canonicalByLoan.get(l.id);
     return {
       ...l,
-      _performance_arrears:scheduleArrears.total,
-      _performance_arrears_split:{principal:scheduleArrears.principal,interest:scheduleArrears.interest}
+      _performance_arrears:Number(canonical?._asof_arrears||0),
+      _performance_arrears_split:canonical?._asof_arrears_split||{principal:0,interest:0},
+      _performance_arrears_days:Number(canonical?._asof_days||0)
     };
   });
 }
@@ -8531,10 +8494,12 @@ async function renderOfficerPerformance(){
       sb('loan_applications').select('*').eq('business_id',currentUser.business_id),
       // FIX #13: loan_staff column is `name`, not `full_name`
       sb('loan_staff').select('id,name,email,role,branch_name').eq('business_id',currentUser.business_id),
-      sb('loan_schedules').select('loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status').eq('business_id',currentUser.business_id).lt('due_date', localISODate()).limit(100000),
+      fetchAllBusinessRows('loan_schedules','loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status,created_at'),
       sb('loan_schedules').select('loan_id,due_date,total_due,total_paid,status').eq('business_id',currentUser.business_id).eq('due_date',localISODate()).limit(100000)
     ]);
-    const allLoans=attachPerformanceArrears(loansR.data||[], schedulesR.data||[], localISODate());
+    await loadPataFixBranches();
+    const scopedPerformanceLoans=filterByBranch(loansR.data||[],'officer_performance');
+    const allLoans=attachPerformanceArrears(scopedPerformanceLoans,schedulesR.data||[],localISODate());
     const allReps=repsR.data||[];
     const allApps=appsR.data||[];
     const allStaff=staffR.data||[];
@@ -8551,7 +8516,9 @@ async function renderOfficerPerformance(){
 
     // If loan_officer-only viewing their own dashboard, filter to self
     const viewSelf = hasRole('loan_officer') && !hasRole('admin','branch_manager');
-    const filteredOfficers = viewSelf ? officers.filter(o=>o.id===currentUser.id) : officers;
+    const performanceBranch=effectiveBranchFilter('officer_performance');
+    const branchOfficers=performanceBranch==='all'?officers:officers.filter(o=>recordBranchName(o)===performanceBranch);
+    const filteredOfficers = viewSelf ? branchOfficers.filter(o=>o.id===currentUser.id) : branchOfficers;
 
     const todayStr=localISODate();
     const nowM = todayStr.slice(0,7);
@@ -8603,7 +8570,8 @@ async function renderOfficerPerformance(){
           <button class="btn btn-primary btn-sm" onclick="downloadOfficerPerformanceReport()">⬇ Download Report</button>
         </div>
       </div>
-      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Period: <strong>${nowM}</strong> (current month) | ${viewSelf?'Your performance':'All officers'}</p>
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Period: <strong>${nowM}</strong> (current month) | Arrears as of <strong>${todayStr}</strong> | ${viewSelf?'Your performance':'All officers'}</p>
+      ${getBranchFilterHtml('officer_performance',loansR.data||[])}
 
       <div class="table-wrap" style="margin-bottom:24px">
         <table>
