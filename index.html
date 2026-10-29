@@ -1212,6 +1212,8 @@ function auditActionLabel(action){
 
 function auditFieldLabel(field){
   const labels={
+    client_id:'Client',loan_officer_id:'Loan officer',officer_id:'Officer',staff_id:'Staff member',
+    created_by:'Created by',approved_by:'Approved by',reviewed_by:'Reviewed by',collected_by:'Collected by',waived_by:'Waived by',
     term_weeks:'Loan duration',repayment_interval_weeks:'Repayment interval',installments:'Installments',
     first_repayment_date:'First repayment date',maturity_date:'Maturity date',weekly_installment:'Installment amount',
     installment_amount:'Installment amount',interest_rate_per_period:'Interest rate per period',total_interest:'Total interest',
@@ -1223,8 +1225,17 @@ function auditFieldLabel(field){
   return labels[field]||String(field||'').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
 }
 
-function auditDisplayValue(value){
+function auditDisplayValue(value,field='',entityMaps={}){
   if(value===null||value===undefined||value==='')return '-';
+  const id=String(value);
+  if(field==='client_id'&&entityMaps.clients?.[id]){
+    const client=entityMaps.clients[id];
+    return `${client.full_name||'Unknown client'}${client.id_number?` (ID ${client.id_number})`:''}`;
+  }
+  if(['loan_officer_id','officer_id','staff_id','created_by','approved_by','reviewed_by','collected_by','waived_by','user_id'].includes(field)&&entityMaps.staff?.[id]){
+    const staff=entityMaps.staff[id];
+    return `${staff.name||'Unknown staff'}${staff.email?` (${staff.email})`:''}`;
+  }
   if(typeof value==='boolean')return value?'Yes':'No';
   if(typeof value==='object')return JSON.stringify(value);
   return String(value);
@@ -1237,15 +1248,15 @@ function auditActorLabel(log,staffMap={}){
   return `<strong>${escapeHtml(name)}</strong>${email?`<div style="font-size:10px;color:var(--text-secondary)">${escapeHtml(email)}</div>`:''}`;
 }
 
-function auditChangeRows(log){
+function auditChangeRows(log,entityMaps={}){
   const oldValue=log?.old_value&&typeof log.old_value==='object'?log.old_value:{};
   const newValue=log?.new_value&&typeof log.new_value==='object'?log.new_value:{};
   const fields=[...new Set([...Object.keys(oldValue),...Object.keys(newValue)])]
     .filter(field=>!['created_at','updated_at'].includes(field));
   if(!fields.length)return '<div style="color:var(--text-secondary);font-size:12px">No field-level details were recorded for this activity.</div>';
   return `<div class="table-wrap"><table><thead><tr><th>Field</th><th>Previous</th><th>New</th></tr></thead><tbody>${fields.map(field=>{
-    const before=auditDisplayValue(oldValue[field]);
-    const after=auditDisplayValue(newValue[field]);
+    const before=auditDisplayValue(oldValue[field],field,entityMaps);
+    const after=auditDisplayValue(newValue[field],field,entityMaps);
     const changed=before!==after;
     return `<tr${changed?' style="background:rgba(37,99,235,.04)"':''}><td><strong>${escapeHtml(auditFieldLabel(field))}</strong></td><td>${escapeHtml(before)}</td><td>${escapeHtml(after)}</td></tr>`;
   }).join('')}</tbody></table></div>`;
@@ -1255,7 +1266,7 @@ function auditChangeSummary(log){
   const oldValue=log?.old_value&&typeof log.old_value==='object'?log.old_value:{};
   const newValue=log?.new_value&&typeof log.new_value==='object'?log.new_value:{};
   const changed=[...new Set([...Object.keys(oldValue),...Object.keys(newValue)])]
-    .filter(field=>auditDisplayValue(oldValue[field])!==auditDisplayValue(newValue[field]))
+    .filter(field=>auditDisplayValue(oldValue[field],field)!==auditDisplayValue(newValue[field],field))
     .slice(0,3).map(auditFieldLabel);
   return changed.length?changed.join(', '):(newValue.reason?`Reason: ${newValue.reason}`:'Activity recorded');
 }
@@ -4499,6 +4510,7 @@ async function viewLoan(id){
   ]);
   if(!loan)return toast('Loan not found','error');
   const trailStaffMap=Object.fromEntries((auditStaff||[]).map(staff=>[staff.id,staff]));
+  const trailEntityMaps={staff:trailStaffMap,clients:{[loan.client_id]:loan.loan_clients||{}}};
   const canPay = hasRole('admin','branch_manager','cashier');
   openModal(`
     <h2>Loan ${loan.loan_no}</h2>
@@ -4564,7 +4576,7 @@ async function viewLoan(id){
         <td style="white-space:nowrap">${fmtDateTime(log.created_at)}</td>
         <td>${auditActorLabel(log,trailStaffMap)}</td>
         <td><span class="badge badge-blue">${escapeHtml(auditActionLabel(log.action))}</span></td>
-        <td style="min-width:280px">${auditChangeRows(log)}${log.new_value?.reason?`<div style="font-size:11px;margin-top:6px"><strong>Reason:</strong> ${escapeHtml(log.new_value.reason)}</div>`:''}</td>
+        <td style="min-width:280px">${auditChangeRows(log,trailEntityMaps)}${log.new_value?.reason?`<div style="font-size:11px;margin-top:6px"><strong>Reason:</strong> ${escapeHtml(log.new_value.reason)}</div>`:''}</td>
       </tr>`).join('')||'<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-secondary)">No account changes have been recorded for this loan.</td></tr>'}
       </tbody></table></div>
     </div>
@@ -10258,12 +10270,15 @@ async function renderAuditLog(page=1){
 }
 
 async function openAuditDetails(id){
-  const[{data:log,error},{data:auditStaff}]=await Promise.all([
+  const[{data:log,error},{data:auditStaff},{data:auditClients}]=await Promise.all([
     sb('loan_audit_log').select('*').eq('id',id).eq('business_id',currentUser.business_id).single(),
-    sb('loan_staff').select('id,name,email').eq('business_id',currentUser.business_id)
+    sb('loan_staff').select('id,name,email').eq('business_id',currentUser.business_id),
+    sb('loan_clients').select('id,full_name,id_number').eq('business_id',currentUser.business_id)
   ]);
   if(error||!log)return toast(error?.message||'Audit entry not found','error');
   const staffMap=Object.fromEntries((auditStaff||[]).map(staff=>[staff.id,staff]));
+  const clientMap=Object.fromEntries((auditClients||[]).map(client=>[client.id,client]));
+  const entityMaps={staff:staffMap,clients:clientMap};
   openModal(`
     <h2>${escapeHtml(auditActionLabel(log.action))}</h2>
     <div class="card" style="margin-bottom:12px;background:rgba(37,99,235,.05)">
@@ -10274,7 +10289,7 @@ async function openAuditDetails(id){
         <div><strong>Record ID</strong><br>${escapeHtml(log.record_id||'-')}</div>
       </div>
     </div>
-    ${auditChangeRows(log)}
+    ${auditChangeRows(log,entityMaps)}
     ${log.new_value?.reason?`<div class="card" style="margin-top:12px"><strong>Reason</strong><div style="margin-top:5px">${escapeHtml(log.new_value.reason)}</div></div>`:''}
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Close</button></div>
   `,true);
