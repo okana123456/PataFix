@@ -1189,7 +1189,75 @@ function paginationHtml(p,fn){
 // ═══ AUDIT LOG ═══
 async function audit(action,table_name,record_id,old_value,new_value){
   if(!currentUser?.business_id) return;
-  try{await sb('loan_audit_log').insert({business_id:currentUser?.business_id,user_id:currentUser?.id,action,table_name,record_id,old_value,new_value})}catch(e){console.error('Audit error',e)}
+  const entry={
+    business_id:currentUser.business_id,
+    user_id:currentUser.id,
+    actor_name:currentUser.name||currentUser.full_name||currentUser.email||'Unknown user',
+    actor_email:currentUser.email||null,
+    action,table_name,record_id,old_value,new_value
+  };
+  try{
+    const{error}=await sb('loan_audit_log').insert(entry);
+    if(error&&/actor_name|actor_email/i.test(error.message||'')){
+      delete entry.actor_name;delete entry.actor_email;
+      const{error:fallbackError}=await sb('loan_audit_log').insert(entry);
+      if(fallbackError)throw fallbackError;
+    }else if(error)throw error;
+  }catch(e){console.error('Audit error',e)}
+}
+
+function auditActionLabel(action){
+  return String(action||'activity').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+}
+
+function auditFieldLabel(field){
+  const labels={
+    term_weeks:'Loan duration',repayment_interval_weeks:'Repayment interval',installments:'Installments',
+    first_repayment_date:'First repayment date',maturity_date:'Maturity date',weekly_installment:'Installment amount',
+    installment_amount:'Installment amount',interest_rate_per_period:'Interest rate per period',total_interest:'Total interest',
+    total_payable:'Total payable',total_paid:'Total paid',outstanding_balance:'Outstanding balance',arrears_amount:'Arrears',
+    overdue_days:'Days overdue',disbursement_date:'Disbursement date',reason:'Reason',remaining_principal:'Remaining principal',
+    recalculated_interest:'Recalculated interest',remaining_penalty:'Remaining penalty',archived_schedules:'Archived schedules',
+    penalties_waived:'Penalties waived'
+  };
+  return labels[field]||String(field||'').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+}
+
+function auditDisplayValue(value){
+  if(value===null||value===undefined||value==='')return '-';
+  if(typeof value==='boolean')return value?'Yes':'No';
+  if(typeof value==='object')return JSON.stringify(value);
+  return String(value);
+}
+
+function auditActorLabel(log,staffMap={}){
+  const staff=staffMap[log?.user_id]||{};
+  const name=log?.actor_name||staff.name||'System';
+  const email=log?.actor_email||staff.email||'';
+  return `<strong>${escapeHtml(name)}</strong>${email?`<div style="font-size:10px;color:var(--text-secondary)">${escapeHtml(email)}</div>`:''}`;
+}
+
+function auditChangeRows(log){
+  const oldValue=log?.old_value&&typeof log.old_value==='object'?log.old_value:{};
+  const newValue=log?.new_value&&typeof log.new_value==='object'?log.new_value:{};
+  const fields=[...new Set([...Object.keys(oldValue),...Object.keys(newValue)])]
+    .filter(field=>!['created_at','updated_at'].includes(field));
+  if(!fields.length)return '<div style="color:var(--text-secondary);font-size:12px">No field-level details were recorded for this activity.</div>';
+  return `<div class="table-wrap"><table><thead><tr><th>Field</th><th>Previous</th><th>New</th></tr></thead><tbody>${fields.map(field=>{
+    const before=auditDisplayValue(oldValue[field]);
+    const after=auditDisplayValue(newValue[field]);
+    const changed=before!==after;
+    return `<tr${changed?' style="background:rgba(37,99,235,.04)"':''}><td><strong>${escapeHtml(auditFieldLabel(field))}</strong></td><td>${escapeHtml(before)}</td><td>${escapeHtml(after)}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+}
+
+function auditChangeSummary(log){
+  const oldValue=log?.old_value&&typeof log.old_value==='object'?log.old_value:{};
+  const newValue=log?.new_value&&typeof log.new_value==='object'?log.new_value:{};
+  const changed=[...new Set([...Object.keys(oldValue),...Object.keys(newValue)])]
+    .filter(field=>auditDisplayValue(oldValue[field])!==auditDisplayValue(newValue[field]))
+    .slice(0,3).map(auditFieldLabel);
+  return changed.length?changed.join(', '):(newValue.reason?`Reason: ${newValue.reason}`:'Activity recorded');
 }
 
 // ═══ SETTINGS HELPER ═══
@@ -4425,7 +4493,12 @@ async function viewLoan(id){
   const{data:schedules}=await sb('loan_schedules').select('*').eq('loan_id',id).order('installment_no');
   const{data:payments}=await sb('loan_repayments').select('*').eq('loan_id',id).order('payment_date',{ascending:true}).order('created_at',{ascending:true});
   const{data:loanPenalties}=await sb('loan_penalties').select('*').eq('loan_id',id).order('date_charged',{ascending:true});
+  const[{data:loanTrail},{data:auditStaff}]=await Promise.all([
+    sb('loan_audit_log').select('*').eq('business_id',currentUser.business_id).eq('table_name','loans').eq('record_id',id).order('created_at',{ascending:false}),
+    sb('loan_staff').select('id,name,email').eq('business_id',currentUser.business_id)
+  ]);
   if(!loan)return toast('Loan not found','error');
+  const trailStaffMap=Object.fromEntries((auditStaff||[]).map(staff=>[staff.id,staff]));
   const canPay = hasRole('admin','branch_manager','cashier');
   openModal(`
     <h2>Loan ${loan.loan_no}</h2>
@@ -4443,7 +4516,7 @@ async function viewLoan(id){
       <div><strong>Maturity:</strong> ${fmtDate(loan.maturity_date)}</div>
       <div><strong>Method:</strong> ${loan.disbursement_method||'-'}</div>
     </div>
-    <div class="tabs"><div class="tab active" onclick="showLoanTab('schedule',this)">Schedule</div><div class="tab" onclick="showLoanTab('payments',this)">Payments</div></div>
+    <div class="tabs"><div class="tab active" onclick="showLoanTab('schedule',this)">Schedule</div><div class="tab" onclick="showLoanTab('payments',this)">Payments</div><div class="tab" onclick="showLoanTab('trail',this)">Account Trail</div></div>
     <div id="loanTabSchedule">
       <div class="table-wrap" style="max-height:300px;overflow-y:auto"><table><thead><tr><th>#</th><th>Due Date</th><th>Total Due</th><th>Paid</th><th>Remaining Due</th><th>Status</th></tr></thead><tbody>
       ${(schedules||[]).map(s=>{
@@ -4485,6 +4558,16 @@ async function viewLoan(id){
       })()}
       </tbody></table></div>
     </div>
+    <div id="loanTabTrail" style="display:none">
+      <div class="table-wrap" style="max-height:360px;overflow-y:auto"><table><thead><tr><th>When</th><th>Changed By</th><th>Activity</th><th>Changes</th></tr></thead><tbody>
+      ${(loanTrail||[]).map(log=>`<tr>
+        <td style="white-space:nowrap">${fmtDateTime(log.created_at)}</td>
+        <td>${auditActorLabel(log,trailStaffMap)}</td>
+        <td><span class="badge badge-blue">${escapeHtml(auditActionLabel(log.action))}</span></td>
+        <td style="min-width:280px">${auditChangeRows(log)}${log.new_value?.reason?`<div style="font-size:11px;margin-top:6px"><strong>Reason:</strong> ${escapeHtml(log.new_value.reason)}</div>`:''}</td>
+      </tr>`).join('')||'<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-secondary)">No account changes have been recorded for this loan.</td></tr>'}
+      </tbody></table></div>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-outline btn-sm" onclick="viewClientPayments('${loan.id}')">💳 Payments</button>
       <button class="btn btn-outline btn-sm" onclick="exportLoanPDF('${loan.id}')">Export PDF</button>
@@ -4501,6 +4584,7 @@ function showLoanTab(tab,el){
   $$('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');
   $('#loanTabSchedule').style.display=tab==='schedule'?'block':'none';
   $('#loanTabPayments').style.display=tab==='payments'?'block':'none';
+  $('#loanTabTrail').style.display=tab==='trail'?'block':'none';
 }
 
 async function openEditLoanModal(id){
@@ -4541,6 +4625,8 @@ async function saveEditLoan(id){
   const reason=$('#elReason')?.value||'Admin adjustment';
   const todayStr=today();
   try{
+    const{data:beforeLoan,error:beforeError}=await sb('loans').select('outstanding_balance,total_paid,maturity_date,disbursement_date,arrears_amount,overdue_days').eq('id',id).eq('business_id',currentUser.business_id).single();
+    if(beforeError)throw beforeError;
     // 1. Update core loan fields
     const upd={outstanding_balance:balance,total_paid:totalPaid};
     if(maturity) upd.maturity_date=maturity;
@@ -4565,7 +4651,7 @@ async function saveEditLoan(id){
         await sb('loan_schedules').update({due_date:localISODate(newDue)}).eq('id',s.id);
       }
     }
-    await audit('loan_edited','loans',id,null,{...upd,reason,penalties_waived:waive});
+    await audit('loan_edited','loans',id,beforeLoan,{...upd,reason,penalties_waived:waive});
     toast('Loan updated successfully','success');
     closeModal();
     // Refresh all sections that depend on loan data
@@ -10155,16 +10241,43 @@ async function renderAuditLog(page=1){
   if(!hasRole('admin'))return toast('Admin access required','warning');
   auditPage=page;const main=$('#mainContent');
   try{
-    const{data:logs}=await sb('loan_audit_log').select('*').eq('business_id', currentUser.business_id).order('created_at',{ascending:false}).limit(500);
+    const[{data:logs},{data:auditStaff}]=await Promise.all([
+      sb('loan_audit_log').select('*').eq('business_id', currentUser.business_id).order('created_at',{ascending:false}).limit(500),
+      sb('loan_staff').select('id,name,email').eq('business_id',currentUser.business_id)
+    ]);
+    const staffMap=Object.fromEntries((auditStaff||[]).map(staff=>[staff.id,staff]));
     const p=paginate(logs||[],page);
     main.innerHTML=`
       <div class="page-header"><h1>Audit Log</h1></div>
       <div class="table-wrap"><table><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Table</th><th>Details</th></tr></thead><tbody>
-      ${p.items.map(l=>`<tr><td style="white-space:nowrap">${fmtDateTime(l.created_at)}</td><td>${l.user_id?.slice(0,8)||'system'}</td><td><span class="badge badge-blue">${l.action}</span></td><td>${l.table_name||'-'}</td><td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${l.new_value?JSON.stringify(l.new_value).slice(0,80):'-'}</td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">No activity recorded</td></tr>'}
+      ${p.items.map(l=>`<tr><td style="white-space:nowrap">${fmtDateTime(l.created_at)}</td><td>${auditActorLabel(l,staffMap)}</td><td><span class="badge badge-blue">${escapeHtml(auditActionLabel(l.action))}</span></td><td>${escapeHtml(l.table_name||'-')}</td><td style="font-size:11px;min-width:240px"><div>${escapeHtml(auditChangeSummary(l))}</div><button class="btn btn-outline btn-sm" style="margin-top:6px" onclick="openAuditDetails('${l.id}')">View exact changes</button></td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">No activity recorded</td></tr>'}
       </tbody></table></div>
       ${paginationHtml(p,'renderAuditLog')}
     `;
   }catch(e){toast(e.message,'error')}
+}
+
+async function openAuditDetails(id){
+  const[{data:log,error},{data:auditStaff}]=await Promise.all([
+    sb('loan_audit_log').select('*').eq('id',id).eq('business_id',currentUser.business_id).single(),
+    sb('loan_staff').select('id,name,email').eq('business_id',currentUser.business_id)
+  ]);
+  if(error||!log)return toast(error?.message||'Audit entry not found','error');
+  const staffMap=Object.fromEntries((auditStaff||[]).map(staff=>[staff.id,staff]));
+  openModal(`
+    <h2>${escapeHtml(auditActionLabel(log.action))}</h2>
+    <div class="card" style="margin-bottom:12px;background:rgba(37,99,235,.05)">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px">
+        <div><strong>When</strong><br>${fmtDateTime(log.created_at)}</div>
+        <div><strong>Changed by</strong><br>${auditActorLabel(log,staffMap)}</div>
+        <div><strong>Record type</strong><br>${escapeHtml(log.table_name||'-')}</div>
+        <div><strong>Record ID</strong><br>${escapeHtml(log.record_id||'-')}</div>
+      </div>
+    </div>
+    ${auditChangeRows(log)}
+    ${log.new_value?.reason?`<div class="card" style="margin-top:12px"><strong>Reason</strong><div style="margin-top:5px">${escapeHtml(log.new_value.reason)}</div></div>`:''}
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Close</button></div>
+  `,true);
 }
 
 // ═══ ROLLOVER PENALTY (ONE-TIME PER LOAN) ═══
