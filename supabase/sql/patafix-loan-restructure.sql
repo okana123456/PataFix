@@ -6,6 +6,7 @@ create or replace function public.patafix_restructure_loan(
   p_term_weeks integer,
   p_first_due_date date,
   p_interval_weeks integer,
+  p_adjusted_remaining_principal numeric,
   p_reason text
 )
 returns jsonb
@@ -36,6 +37,8 @@ declare
   v_unallocated_paid numeric(14,2) := 0;
   v_original_principal_ratio numeric := 1;
   v_remaining_principal numeric(14,2) := 0;
+  v_calculated_remaining_principal numeric(14,2) := 0;
+  v_principal_adjustment numeric(14,2) := 0;
   v_remaining_penalty numeric(14,2) := 0;
   v_new_interest numeric(14,2) := 0;
   v_new_outstanding numeric(14,2) := 0;
@@ -160,7 +163,20 @@ begin
     v_unallocated_paid - round(v_unallocated_paid * v_original_principal_ratio, 2)
   );
 
-  v_remaining_principal := greatest(0, v_loan.principal_amount - v_paid_principal);
+  v_calculated_remaining_principal := greatest(0, v_loan.principal_amount - v_paid_principal);
+  v_remaining_principal := round(coalesce(p_adjusted_remaining_principal, v_calculated_remaining_principal), 2);
+  v_principal_adjustment := round(v_remaining_principal - v_calculated_remaining_principal, 2);
+
+  if v_remaining_principal <= 0 then
+    raise exception 'The adjusted remaining principal must be greater than zero.';
+  end if;
+
+  if abs(v_principal_adjustment) >= 0.01 and not (
+    regexp_split_to_array(lower(coalesce(v_staff_role, '')), '\s*,\s*')
+      && array['admin']::text[]
+  ) then
+    raise exception 'Only an administrator can adjust principal during restructuring.';
+  end if;
 
   select greatest(0, coalesce(sum(penalty_amount), 0) - v_paid_penalty)
   into v_remaining_penalty
@@ -254,6 +270,8 @@ begin
       'first_repayment_date', v_loan.first_repayment_date,
       'maturity_date', v_loan.maturity_date,
       'weekly_installment', v_loan.weekly_installment,
+      'calculated_remaining_principal', v_calculated_remaining_principal,
+      'adjusted_remaining_principal', v_calculated_remaining_principal,
       'interest_rate_per_period', v_loan.interest_rate,
       'total_interest', v_loan.total_interest,
       'total_payable', v_loan.total_payable,
@@ -268,6 +286,10 @@ begin
       'first_repayment_date', p_first_due_date,
       'maturity_date', v_maturity_date,
       'installment_amount', v_regular_amount,
+      'calculated_remaining_principal', v_calculated_remaining_principal,
+      'adjusted_remaining_principal', v_remaining_principal,
+      'principal_adjustment', v_principal_adjustment,
+      'principal_adjusted', abs(v_principal_adjustment) >= 0.01,
       'remaining_principal', v_remaining_principal,
       'recalculated_interest', v_new_interest,
       'interest_rate_per_period', v_new_period_rate,
@@ -284,6 +306,9 @@ begin
     'ok', true,
     'loan_id', p_loan_id,
     'loan_no', v_loan.loan_no,
+    'calculated_remaining_principal', v_calculated_remaining_principal,
+    'adjusted_remaining_principal', v_remaining_principal,
+    'principal_adjustment', v_principal_adjustment,
     'remaining_principal', v_remaining_principal,
     'recalculated_interest', v_new_interest,
     'interest_rate_per_period', v_new_period_rate,
@@ -300,8 +325,8 @@ begin
 end;
 $$;
 
-revoke all on function public.patafix_restructure_loan(uuid, integer, date, integer, text) from public, anon;
-grant execute on function public.patafix_restructure_loan(uuid, integer, date, integer, text) to authenticated;
+revoke all on function public.patafix_restructure_loan(uuid, integer, date, integer, numeric, text) from public, anon;
+grant execute on function public.patafix_restructure_loan(uuid, integer, date, integer, numeric, text) to authenticated;
 
-comment on function public.patafix_restructure_loan(uuid, integer, date, integer, text)
-is 'Archives the unpaid schedule, preserves prior payments, and recalculates interest from remaining principal using the new term.';
+comment on function public.patafix_restructure_loan(uuid, integer, date, integer, numeric, text)
+is 'Archives the unpaid schedule, preserves prior payments and original disbursement, optionally adjusts remaining principal for admins, and records the full restructuring trail.';
