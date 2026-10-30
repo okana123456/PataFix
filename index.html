@@ -654,7 +654,7 @@ function toast(msg,type='info'){
 function showLoading(el){el.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>'}
 
 function statusBadge(status){
-  const map={draft:'gray',submitted:'blue',under_review:'yellow',approved:'green',rejected:'red',disbursed:'purple',cancelled:'gray',active:'green',completed:'blue',cleared:'blue',fully_paid:'blue',defaulted:'red',written_off:'gray',pending:'yellow',partial:'orange',paid:'green',overdue:'red',restructured:'gray'};
+  const map={draft:'gray',submitted:'blue',under_review:'yellow',approved:'green',rejected:'red',disbursed:'purple',cancelled:'gray',recalled:'gray',active:'green',completed:'blue',cleared:'blue',fully_paid:'blue',defaulted:'red',written_off:'gray',pending:'yellow',partial:'orange',paid:'green',overdue:'red',restructured:'gray'};
   return `<span class="badge badge-${map[status]||'gray'}">${(status||'').replace(/_/g,' ')}</span>`;
 }
 
@@ -663,7 +663,7 @@ function isCollectibleSchedule(schedule){
 }
 
 function isCurrentSchedule(schedule){
-  return String(schedule?.status||'').toLowerCase()!=='restructured';
+  return !['restructured','cancelled','waived'].includes(String(schedule?.status||'').toLowerCase());
 }
 
 function currentScheduleInterestRatio(schedules,loan){
@@ -1221,6 +1221,8 @@ function auditFieldLabel(field){
     overdue_days:'Days overdue',disbursement_date:'Disbursement date',reason:'Reason',remaining_principal:'Remaining principal',
     calculated_remaining_principal:'Calculated remaining principal',adjusted_remaining_principal:'Adjusted remaining principal',
     principal_adjustment:'Principal adjustment',principal_adjusted:'Principal adjusted',
+    actual_disbursed_amount:'Actual amount disbursed',repayments_moved_to_charges:'Repayments moved to Charges & Excess',
+    repayments_recalled:'Repayments recalled',fees_restored:'Fees restored',application_status:'Application status',
     recalculated_interest:'Recalculated interest',remaining_penalty:'Remaining penalty',archived_schedules:'Archived schedules',
     penalties_waived:'Penalties waived'
   };
@@ -2287,7 +2289,7 @@ async function renderDashboard(){
     const todayStr = today();
 
     // Dynamically filter EVERYTHING based on the date picker
-    const filteredDisbursed = filterByDate(allLoans.filter(l=>l.disbursement_date), 'disbursement_date', f);
+    const filteredDisbursed = filterByDate(allLoans.filter(l=>l.disbursement_date&&l.status!=='recalled'), 'disbursement_date', f);
     const filteredReps = filterByDate(allReps, 'payment_date', f);
     const filteredApps = filterByDate(allApps, 'created_at', f);
     const filteredClients = filterByDate(allClients.filter(c=>c.created_at), 'created_at', f);
@@ -2516,7 +2518,7 @@ async function renderDashboard(){
     const ctx1=document.getElementById('chartStatus');
     if(ctx1)charts.status=new Chart(ctx1,{type:'doughnut',data:{labels:Object.keys(statusCounts),datasets:[{data:Object.values(statusCounts),backgroundColor:['#059669','#2563eb','#dc2626','#94a3b8']}]},options:{responsive:true,plugins:{legend:{labels:{color:'#94a3b8'}}}}});
       const months=[];for(let i=11;i>=0;i--){const d=new Date();d.setMonth(d.getMonth()-i);months.push(localISODate(d).slice(0,7))}
-    const disbByMonth=months.map(m=>allLoans.filter(l=>l.disbursement_date&&l.disbursement_date.startsWith(m)).reduce((s,l)=>s+Number(l.disbursed_amount||0),0));
+    const disbByMonth=months.map(m=>allLoans.filter(l=>l.status!=='recalled'&&l.disbursement_date&&l.disbursement_date.startsWith(m)).reduce((s,l)=>s+Number(l.disbursed_amount||0),0));
     const repByMonth=months.map(m=>allReps.filter(r=>r.payment_date&&r.payment_date.startsWith(m)).reduce((s,r)=>s+Number(r.amount||0),0));
     const ctx2=document.getElementById('chartMonthly');
     if(ctx2)charts.monthly=new Chart(ctx2,{type:'bar',data:{labels:months.map(m=>m.slice(5)),datasets:[{label:'Disbursed',data:disbByMonth,backgroundColor:'#7c3aed'},{label:'Repaid',data:repByMonth,backgroundColor:'#059669'}]},options:{responsive:true,scales:{x:{ticks:{color:'#94a3b8'}},y:{ticks:{color:'#94a3b8'}}},plugins:{legend:{labels:{color:'#94a3b8'}}}}});
@@ -4403,7 +4405,7 @@ async function renderLoans(page=1){
       ${getBranchFilterHtml('loans',loans||[])}
       <div class="search-bar">
         <input class="input" id="loanSearchInput" placeholder="Search by loan no, client name, phone or ID..." oninput="filterLoans(this.value)">
-        <select class="select" id="loanStatusSelect" onchange="filterLoanStatus(this.value)"><option value="">All Status</option><option value="active">Active</option><option value="completed">Completed</option><option value="defaulted">Defaulted</option><option value="written_off">Written Off</option></select>
+        <select class="select" id="loanStatusSelect" onchange="filterLoanStatus(this.value)"><option value="">All Status</option><option value="active">Active</option><option value="completed">Completed</option><option value="defaulted">Defaulted</option><option value="written_off">Written Off</option><option value="recalled">Recalled</option></select>
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('loanSearchInput').value='';document.getElementById('loanStatusSelect').value='';showAllLoans(false)">Clear</button>
         <button class="btn btn-primary btn-sm" id="btnViewAllLoans" onclick="showAllLoans(true)">View Active Loans (${openActiveLoans.length})</button>
       </div>
@@ -4444,6 +4446,7 @@ function renderLoanRows(loans){
     const menuId=`loanActions_${String(l.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
     const canPay=Number(l.outstanding_balance)>0&&hasRole('admin','branch_manager','cashier');
     const canRestructure=l.status==='active'&&Number(l.outstanding_balance)>0.01&&hasRole('admin','branch_manager');
+    const canRecall=hasRole('admin')&&!!l.application_id&&['active','completed','defaulted'].includes(String(l.status||''));
     return`<tr style="${rowColor}">
       <td><strong>${l.loan_no||'-'}</strong></td>
       <td><strong>${l.loan_clients?.full_name||'—'}</strong></td>
@@ -4461,6 +4464,7 @@ function renderLoanRows(loans){
             <button type="button" onclick="closeRowActionMenus();viewLoan('${l.id}')">View Loan</button>
             ${canPay?`<button type="button" class="success" onclick="closeRowActionMenus();openPaymentModal('${l.id}')">Record Payment</button>`:''}
             ${canRestructure?`<button type="button" onclick="closeRowActionMenus();openRestructureLoanModal('${l.id}')">Restructure Loan</button>`:''}
+            ${canRecall?`<button type="button" class="danger" onclick="closeRowActionMenus();openRecallDisbursementModal('${l.id}')">Recall Disbursement</button>`:''}
             <button type="button" onclick="closeRowActionMenus();exportLoanPDF('${l.id}')">Export PDF</button>
           </div>
         </div></td>
@@ -4505,6 +4509,11 @@ async function viewLoan(id){
   const{data:loan}=await sb('loans').select('*,loan_clients(full_name,phone,id_number)').eq('id',id).single();
   const{data:schedules}=await sb('loan_schedules').select('*').eq('loan_id',id).order('installment_no');
   const{data:payments}=await sb('loan_repayments').select('*').eq('loan_id',id).order('payment_date',{ascending:true}).order('created_at',{ascending:true});
+  let recalledPayments=[];
+  try{
+    const{data,error}=await sb('patafix_recalled_repayments').select('*').eq('loan_id',id).order('recalled_at',{ascending:true});
+    if(!error)recalledPayments=data||[];
+  }catch(_){ recalledPayments=[]; }
   const{data:loanPenalties}=await sb('loan_penalties').select('*').eq('loan_id',id).order('date_charged',{ascending:true});
   const[{data:loanTrail},{data:auditStaff}]=await Promise.all([
     sb('loan_audit_log').select('*').eq('business_id',currentUser.business_id).eq('table_name','loans').eq('record_id',id).order('created_at',{ascending:false}),
@@ -4539,10 +4548,12 @@ async function viewLoan(id){
       <div class="table-wrap" style="max-height:300px;overflow-y:auto"><table><thead><tr><th>#</th><th>Due Date</th><th>Total Due</th><th>Paid</th><th>Remaining Due</th><th>Status</th></tr></thead><tbody>
       ${(schedules||[]).map(s=>{
         const due=Number(s.total_due||0); const paid=Number(s.total_paid||0);
-        const archived=String(s.status||'').toLowerCase()==='restructured';
+        const savedStatus=String(s.status||'').toLowerCase();
+        const archived=['restructured','cancelled'].includes(savedStatus);
         const remaining=archived?0:Math.max(0, due-paid);
         const remColor = remaining===0 ? 'var(--accent-green)' : (paid>0 ? 'var(--accent-yellow)' : 'var(--accent-red)');
-        return `<tr style="${archived?'opacity:.62;background:rgba(148,163,184,.06)':''}"><td>${s.installment_no}</td><td>${fmtDate(s.due_date)}</td><td>${fmtMoney(due)}</td><td>${fmtMoney(paid)}</td><td>${archived?'<span style="color:var(--text-secondary)">Moved to new schedule</span>':`<strong style="color:${remColor}">${fmtMoney(remaining)}</strong>`}</td><td>${statusBadge(effectiveScheduleStatus(s))}</td></tr>`;
+        const archivedLabel=savedStatus==='cancelled'?'Cancelled by recall':'Moved to new schedule';
+        return `<tr style="${archived?'opacity:.62;background:rgba(148,163,184,.06)':''}"><td>${s.installment_no}</td><td>${fmtDate(s.due_date)}</td><td>${fmtMoney(due)}</td><td>${fmtMoney(paid)}</td><td>${archived?`<span style="color:var(--text-secondary)">${archivedLabel}</span>`:`<strong style="color:${remColor}">${fmtMoney(remaining)}</strong>`}</td><td>${statusBadge(effectiveScheduleStatus(s))}</td></tr>`;
       }).join('')}
       </tbody></table></div>
     </div>
@@ -4560,6 +4571,19 @@ async function viewLoan(id){
             <td><span class="badge badge-green">Received</span></td>
           </tr>`
         }));
+        const recalledPayRows=(recalledPayments||[]).map(item=>{
+          const p=item.payment_snapshot||{};
+          return{
+            date:p.payment_date||item.recalled_at,
+            html:`<tr style="background:rgba(148,163,184,0.08);opacity:.82">
+              <td style="white-space:nowrap">${fmtDate(p.payment_date||item.recalled_at)}</td>
+              <td><strong>Recalled Payment</strong> <span style="color:var(--text-secondary);font-size:10px">${escapeHtml(p.receipt_no||'-')}</span></td>
+              <td style="font-weight:700">${fmtMoney(p.amount||item.amount||0)}</td>
+              <td style="font-size:11px">${escapeHtml(p.payment_method||'-')}${p.payment_reference?' · '+escapeHtml(p.payment_reference):''}</td>
+              <td><span class="badge badge-gray">Moved to Charges &amp; Excess</span></td>
+            </tr>`
+          };
+        });
         // Penalties — red rows
         const penRows=(loanPenalties||[]).map(p=>({
           date:p.date_charged,
@@ -4571,7 +4595,7 @@ async function viewLoan(id){
             <td>${p.is_waived?'<span class="badge badge-green">Waived</span>':'<span class="badge badge-red">Applied</span>'}</td>
           </tr>`
         }));
-        const all=[...payRows,...penRows].sort((a,b)=>new Date(a.date)-new Date(b.date));
+        const all=[...payRows,...recalledPayRows,...penRows].sort((a,b)=>new Date(a.date)-new Date(b.date));
         return all.length?all.map(x=>x.html).join(''):'<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-secondary)">No payments yet</td></tr>';
       })()}
       </tbody></table></div>
@@ -4591,6 +4615,7 @@ async function viewLoan(id){
       <button class="btn btn-outline btn-sm" onclick="exportLoanPDF('${loan.id}')">Export PDF</button>
       ${hasRole('admin','branch_manager')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-yellow);color:var(--accent-yellow)" onclick="openEditLoanModal('${loan.id}')">✏️ Edit Loan</button>`:''}
       ${loan.status==='active'&&Number(loan.outstanding_balance)>0.01&&hasRole('admin','branch_manager')?`<button class="btn btn-primary btn-sm" onclick="openRestructureLoanModal('${loan.id}')">Restructure</button>`:''}
+      ${hasRole('admin')&&loan.application_id&&['active','completed','defaulted'].includes(String(loan.status||''))?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-red);color:var(--accent-red)" onclick="openRecallDisbursementModal('${loan.id}')">Recall Disbursement</button>`:''}
       ${hasRole('admin')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-red);color:var(--accent-red)" onclick="deleteLoanConfirm('${loan.id}','${loan.loan_no}')">🗑 Delete</button>`:''}
       ${canPay?`<button class="btn btn-success" onclick="closeModal();openPaymentModal('${loan.id}')">Record Payment</button>`:''}
       <button class="btn btn-outline" onclick="closeModal()">Close</button>
@@ -4928,6 +4953,67 @@ async function saveLoanRestructure(id){
     const missingFunction=String(e?.message||'').toLowerCase().includes('patafix_restructure_loan');
     toast(missingFunction?'Run patafix-loan-restructure.sql in Supabase, then try again.':(e.message||'Could not restructure loan'),'error');
     if(btn){btn.disabled=false;btn.textContent='Confirm Restructure';}
+  }
+}
+
+async function openRecallDisbursementModal(id){
+  if(!hasRole('admin'))return toast('Only an administrator can recall a disbursement','warning');
+  const[{data:loan,error:loanError},{data:repayments,error:repaymentError}]=await Promise.all([
+    sb('loans').select('*,loan_clients(full_name,id_number,phone)').eq('id',id).eq('business_id',currentUser.business_id).single(),
+    sb('loan_repayments').select('id,amount,receipt_no,payment_reference,payment_date').eq('loan_id',id).eq('business_id',currentUser.business_id)
+  ]);
+  if(loanError||!loan)return toast(loanError?.message||'Loan not found','error');
+  if(repaymentError)return toast(repaymentError.message,'error');
+  if(!loan.application_id)return toast('This loan is not linked to an application and cannot be recalled automatically','warning');
+  if(!['active','completed','defaulted'].includes(String(loan.status||'')))return toast('This loan cannot be recalled in its current status','warning');
+  const repaymentTotal=(repayments||[]).reduce((sum,p)=>sum+Number(p.amount||0),0);
+  openModal(`
+    <h2>Recall Disbursement - ${escapeHtml(loan.loan_no||'')}</h2>
+    <div class="card" style="margin-bottom:12px;background:rgba(239,68,68,.05);border-color:rgba(239,68,68,.25)">
+      <div style="font-weight:800">${escapeHtml(loan.loan_clients?.full_name||'Client')}</div>
+      <div style="font-size:11px;color:var(--text-secondary);margin-top:3px">ID: ${escapeHtml(loan.loan_clients?.id_number||'-')} | Phone: ${escapeHtml(loan.loan_clients?.phone||'-')}</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px;font-size:12px">
+        <div><strong>${fmtMoney(loan.principal_amount)}</strong><br><span style="color:var(--text-secondary)">booked principal</span></div>
+        <div><strong>${(repayments||[]).length}</strong><br><span style="color:var(--text-secondary)">repayments recorded</span></div>
+        <div><strong>${fmtMoney(repaymentTotal)}</strong><br><span style="color:var(--text-secondary)">returns to Charges &amp; Excess</span></div>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">This preserves the mistaken loan as Recalled, archives its receipts, moves its repayments and used fees back to the client's Charges &amp; Excess account, cancels its schedule, and reopens the application for corrected disbursement.</p>
+    <div class="form-group"><label>Actual Amount Sent to Client (KES) *</label><input class="input" id="recallActualAmount" type="number" min="0.01" step="0.01" value="${Number(loan.disbursed_amount||loan.principal_amount||0).toFixed(2)}"></div>
+    <div class="form-group"><label>Reason for Recall *</label><textarea class="textarea" id="recallReason" placeholder="e.g. KES 6,000 was sent but KES 7,000 was booked"></textarea></div>
+    <div class="form-group"><label>Type RECALL to confirm *</label><input class="input" id="recallConfirmation" autocomplete="off" placeholder="RECALL"></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-danger" id="btnRecallDisbursement" onclick="saveRecallDisbursement('${id}')">Recall Disbursement</button></div>
+  `,true);
+}
+
+async function saveRecallDisbursement(id){
+  if(!hasRole('admin'))return toast('Only an administrator can recall a disbursement','warning');
+  const actualAmount=Number(document.getElementById('recallActualAmount')?.value||0);
+  const reason=String(document.getElementById('recallReason')?.value||'').trim();
+  const confirmation=String(document.getElementById('recallConfirmation')?.value||'').trim().toUpperCase();
+  if(!Number.isFinite(actualAmount)||actualAmount<=0)return toast('Enter the actual amount sent to the client','warning');
+  if(reason.length<5)return toast('Enter a clear reason for recalling this disbursement','warning');
+  if(confirmation!=='RECALL')return toast('Type RECALL to confirm this action','warning');
+  if(!await confirm_('Recall this disbursement? Repayments will move to Charges & Excess and the application will reopen for corrected disbursement.'))return;
+  const btn=document.getElementById('btnRecallDisbursement');
+  if(btn){btn.disabled=true;btn.textContent='Recalling...';}
+  try{
+    const{data,error}=await supabaseClient.rpc('patafix_recall_disbursement',{
+      p_loan_id:id,
+      p_actual_disbursed_amount:actualAmount,
+      p_reason:reason,
+      p_confirmation:confirmation
+    });
+    if(error)throw error;
+    const result=Array.isArray(data)?data[0]:data;
+    cachedData.loans=null;cachedData.schedules=null;cachedData.repayments=null;cachedData.disbursements=null;
+    window._chargesExcessData=null;
+    closeModal();
+    toast(`Loan recalled. ${fmtMoney(result?.repayments_moved_to_charges||0)} moved to Charges & Excess. The corrected application is ready for review.`, 'success');
+    await renderLoans();
+  }catch(e){
+    toast(String(e?.message||'Could not recall the disbursement').includes('patafix_recall_disbursement')?'Run patafix-loan-disbursement-recall.sql in Supabase, then try again.':(e.message||'Could not recall the disbursement'),'error');
+    if(btn){btn.disabled=false;btn.textContent='Recall Disbursement';}
   }
 }
 
@@ -6402,13 +6488,15 @@ async function loadReportData(id){
     const staffMap={};(staff||[]).forEach(s=>{staffMap[s.id]=s.name;});
     const isOnlyOfficerDisb = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     const filteredLoansDisb = isOnlyOfficerDisb ? (loans||[]).filter(l=>l.loan_officer_id===currentUser.id) : (loans||[]);
-    const total=filteredLoansDisb.reduce((s,l)=>s+Number(l.disbursed_amount||0),0);
+    const effectiveLoansDisb=filteredLoansDisb.filter(l=>l.status!=='recalled');
+    const total=effectiveLoansDisb.reduce((s,l)=>s+Number(l.disbursed_amount||0),0);
     return{title:'Disbursement Report',summary:[
-      {label:'Total Disbursements',value:filteredLoansDisb.length},
+      {label:'Total Disbursements',value:effectiveLoansDisb.length},
+      {label:'Recalled',value:filteredLoansDisb.length-effectiveLoansDisb.length},
       {label:'Total Amount Disbursed',value:fmtMoney(total)},
-      {label:'Total Principal',value:fmtMoney(filteredLoansDisb.reduce((s,l)=>s+Number(l.principal_amount||0),0))},
-      {label:'Total Interest',value:fmtMoney(filteredLoansDisb.reduce((s,l)=>s+Number(l.total_interest||0),0))},
-      {label:'Total Processing Fees',value:fmtMoney(filteredLoansDisb.reduce((s,l)=>s+Number(l.processing_fee||0),0))}
+      {label:'Total Principal',value:fmtMoney(effectiveLoansDisb.reduce((s,l)=>s+Number(l.principal_amount||0),0))},
+      {label:'Total Interest',value:fmtMoney(effectiveLoansDisb.reduce((s,l)=>s+Number(l.total_interest||0),0))},
+      {label:'Total Processing Fees',value:fmtMoney(effectiveLoansDisb.reduce((s,l)=>s+Number(l.processing_fee||0),0))}
     ],rows:filteredLoansDisb.map(l=>{const product=normalizePataFixProduct(l.loan_applications?.loan_products);return {
       'Loan #':l.loan_no,
       'Client':l.loan_clients?.full_name||'-',
@@ -6653,12 +6741,12 @@ async function renderOfficerDashboard(){
     const totalClients=oClientIds.size;
 
     // Loan count breakdown — month only
-    const oLoansMonth=oLoans.filter(l=>(l.disbursement_date||'').startsWith(nowM));
+    const oLoansMonth=oLoans.filter(l=>l.status!=='recalled'&&(l.disbursement_date||'').startsWith(nowM));
     const newLoans=oLoansMonth.filter(l=>l.loan_type==='new_loan'||(!l.loan_type&&oLoans.filter(x=>x.client_id===l.client_id).length===1));
     const repeatLoans=oLoansMonth.filter(l=>l.loan_type==='repeat_loan');
 
     // Disbursement amount this month
-    const disbMonth=oLoans.filter(l=>(l.disbursement_date||'').startsWith(nowM))
+    const disbMonth=oLoans.filter(l=>l.status!=='recalled'&&(l.disbursement_date||'').startsWith(nowM))
       .reduce((s,l)=>s+Number(l.principal_amount||0),0);
 
     // Daily collection rate — dues today vs paid today for this officer's loans
@@ -8659,7 +8747,7 @@ async function renderOfficerPerformance(){
       const oActive = oLoans.filter(l=>l.status==='active');
       const oApps = allApps.filter(a=>a.loan_officer_id===o.id);
       const oAppsMonth = oApps.filter(a=>a.created_at && a.created_at.startsWith(nowM));
-      const oLoansMonth = oLoans.filter(l=>l.disbursement_date && l.disbursement_date.startsWith(nowM));
+      const oLoansMonth = oLoans.filter(l=>l.status!=='recalled'&&l.disbursement_date && l.disbursement_date.startsWith(nowM));
       const oClientIds = new Set(oLoans.map(l=>l.client_id));
       const portfolio = oActive.reduce((s,l)=>s+Number(l.principal_amount||0),0);
       const outstanding = oActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
@@ -9061,7 +9149,7 @@ async function renderAccounting() {
     // These rows already came from one authoritative server-side period filter.
     // A second browser-side pass used to reinterpret UTC timestamps and could
     // move Kenya evening payments into a neighbouring reporting period.
-    const filteredLoans = allLoans.filter(l=>l.disbursement_date);
+    const filteredLoans = allLoans.filter(l=>l.disbursement_date&&l.status!=='recalled');
     const filteredReps = allReps;
     const filteredClients = allClients.filter(c=>registrationFeeIncomeAmount(c, clientFirstLoan[c.id])>0 && dateInSelectedRange(registrationFeeIncomeDate(c, clientFirstLoan[c.id])));
     const filteredPenalties = allPenalties.filter(p=>p.date_charged);
