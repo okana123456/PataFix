@@ -3955,16 +3955,32 @@ async function renderDisbursement(){
   const main=$('#mainContent');
   try{
     await loadPataFixBranches();
-    const{data:apps,error:appsError}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,branch_name),loan_products(*)').eq('business_id', currentUser.business_id).in('status',['approved','disbursed']).order('approved_at',{ascending:false});
+    const[{data:apps,error:appsError},{data:staff,error:staffError}]=await Promise.all([
+      sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,branch_name),loan_products(*)').eq('business_id', currentUser.business_id).in('status',['approved','disbursed']).order('approved_at',{ascending:false}),
+      sb('loan_staff').select('id,name,branch_name').eq('business_id',currentUser.business_id)
+    ]);
     if(appsError)throw appsError;
+    if(staffError)throw staffError;
+    const staffById=Object.fromEntries((staff||[]).map(s=>[s.id,s]));
     const appIds=(apps||[]).map(a=>a.id).filter(Boolean);
     let loansByApp={};
     if(appIds.length){
-      const{data:loans,error:loansError}=await sb('loans').select('id,application_id,loan_no,disbursed_amount,disbursement_method,disbursement_reference,disbursement_date,status').eq('business_id',currentUser.business_id).in('application_id',appIds);
+      const{data:loans,error:loansError}=await sb('loans').select('id,application_id,loan_no,loan_officer_id,branch_name,disbursed_amount,disbursement_method,disbursement_reference,disbursement_date,status').eq('business_id',currentUser.business_id).in('application_id',appIds);
       if(loansError)throw loansError;
       loansByApp=Object.fromEntries((loans||[]).map(l=>[l.application_id,l]));
     }
-    cachedData.disbursements=filterByBranch((apps||[]).map(a=>({...a,loan_record:loansByApp[a.id]||null})),'disbursement');
+    const disbursements=(apps||[]).map(a=>{
+      const loan=loansByApp[a.id]||null;
+      const officerId=loan?.loan_officer_id||a.loan_officer_id||null;
+      const officer=officerId?staffById[officerId]:null;
+      return {
+        ...a,
+        branch_name:normalizeBranchName(loan?.branch_name||a.branch_name||a.loan_clients?.branch_name||officer?.branch_name),
+        officer_name:officer?.name||'Unassigned',
+        loan_record:loan
+      };
+    });
+    cachedData.disbursements=filterByBranch(disbursements,'disbursement');
     main.innerHTML=`
       <div class="page-header">
         <h1>Disbursement</h1>
@@ -3973,7 +3989,7 @@ async function renderDisbursement(){
           <button class="btn btn-primary btn-sm" id="btnBulkDisburseApps" onclick="openBulkDisbursementModal()" style="display:none">Disburse Selected (<span id="bulkDisburseAppsCount">0</span>)</button>
         </div>
       </div>
-      ${getBranchFilterHtml('disbursement',apps||[])}
+      ${getBranchFilterHtml('disbursement',disbursements)}
       <div class="search-bar">
         <input class="input" id="disbursementSearch" placeholder="Search client, ID, phone, app or loan no..." oninput="applyDisbursementFilters()">
         <select class="select" id="disbursementStatusFilter" onchange="applyDisbursementFilters()">
@@ -3985,7 +4001,7 @@ async function renderDisbursement(){
         <input class="input" type="date" id="disbursementDateTo" onchange="applyDisbursementFilters()" title="To date">
         <button class="btn btn-primary btn-sm" onclick="exportDisbursementExcel()">&#11015; Download Excel</button>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager','cashier')?'<input type="checkbox" id="bulkDisburseAllApps" onchange="toggleBulkDisbursementApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Approved</th><th>Disbursed</th><th>Method</th><th>Reference</th><th>Actions</th></tr></thead><tbody id="disbursementBody"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>${hasRole('admin','branch_manager','cashier')?'<input type="checkbox" id="bulkDisburseAllApps" onchange="toggleBulkDisbursementApplications(this.checked)">':''}</th><th>App #</th><th>Client Name</th><th>ID Number</th><th>Phone</th><th>Branch</th><th>Loan Officer</th><th>Amount</th><th>Term</th><th>Tier</th><th>Status</th><th>Approved</th><th>Disbursed</th><th>Method</th><th>Reference</th><th>Actions</th></tr></thead><tbody id="disbursementBody"></tbody></table></div>
     `;
     const disbBody=$('#disbursementBody');
     if(disbBody)disbBody.innerHTML=renderDisbursementRows(cachedData.disbursements);
@@ -4007,6 +4023,8 @@ function renderDisbursementRows(rows){
       <td><strong>${a.loan_clients?.full_name||'-'}</strong></td>
       <td>${a.loan_clients?.id_number||'-'}</td>
       <td>${a.loan_clients?.phone||'-'}</td>
+      <td>${escapeHtml(a.branch_name||'Head Office')}</td>
+      <td>${escapeHtml(a.officer_name||'Unassigned')}</td>
       <td>${fmtMoney(loan.disbursed_amount||a.applied_amount)}</td>
       <td>${product?patafixTermLabel(product,a.applied_term_weeks):(a.applied_term_weeks||'-')+'w'}</td>
       <td><span class="badge badge-blue">${escapeHtml(a.loan_products?.name||getAutoTier(a.applied_amount))}</span></td>
@@ -4017,7 +4035,7 @@ function renderDisbursementRows(rows){
       <td>${isDisbursed?(loan.disbursement_reference||'-'):'-'}</td>
       <td>${isDisbursed?'<span class="badge badge-green">Done</span>':`<button class="btn btn-primary btn-sm" onclick="openDisburseModal('${a.id}')">Disburse</button>`}</td>
     </tr>`;
-  }).join('')||'<tr><td colspan="14" style="text-align:center;color:var(--text-secondary)">No disbursement records found</td></tr>';
+  }).join('')||'<tr><td colspan="16" style="text-align:center;color:var(--text-secondary)">No disbursement records found</td></tr>';
 }
 
 function applyDisbursementFilters(){
@@ -4037,7 +4055,7 @@ function getFilteredDisbursementRows(){
     const isDisbursed=a.status==='disbursed'||!!loan.id;
     if(status==='awaiting'&&isDisbursed)return false;
     if(status==='disbursed'&&!isDisbursed)return false;
-    const hay=[a.application_no,a.loan_clients?.full_name,a.loan_clients?.id_number,a.loan_clients?.phone,loan.loan_no,loan.disbursement_reference].join(' ').toLowerCase();
+    const hay=[a.application_no,a.loan_clients?.full_name,a.loan_clients?.id_number,a.loan_clients?.phone,a.branch_name,a.officer_name,loan.loan_no,loan.disbursement_reference].join(' ').toLowerCase();
     if(q&&!hay.includes(q))return false;
     const d=String(disbursementRowDate(a)).slice(0,10);
     if(from&&d<from)return false;
@@ -4060,6 +4078,8 @@ function exportDisbursementExcel(){
       'Client':a.loan_clients?.full_name||'-',
       'ID Number':a.loan_clients?.id_number||'-',
       'Phone':a.loan_clients?.phone||'-',
+      'Branch':a.branch_name||'Head Office',
+      'Loan Officer':a.officer_name||'Unassigned',
       'Approved Amount (KES)':Number(a.applied_amount||0),
       'Disbursed Amount (KES)':Number(loan.disbursed_amount||a.applied_amount||0),
       'Term':product?patafixTermLabel(product,a.applied_term_weeks):(a.applied_term_weeks||'-')+' weeks',
@@ -4072,7 +4092,7 @@ function exportDisbursementExcel(){
     };
   });
   const ws=XLSX.utils.json_to_sheet(data);
-  ws['!cols']=[{wch:16},{wch:12},{wch:26},{wch:16},{wch:16},{wch:20},{wch:22},{wch:12},{wch:18},{wch:22},{wch:16},{wch:18},{wch:16},{wch:18}];
+  ws['!cols']=[{wch:16},{wch:12},{wch:26},{wch:16},{wch:16},{wch:20},{wch:24},{wch:20},{wch:22},{wch:12},{wch:18},{wch:22},{wch:16},{wch:18},{wch:16},{wch:18}];
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Disbursement');
   XLSX.writeFile(wb,'PataFix_Disbursement_'+today()+'.xlsx');
