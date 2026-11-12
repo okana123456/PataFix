@@ -6705,33 +6705,35 @@ async function renderOfficerDashboard(){
     const nowM=localISODate().slice(0,7);
 
     // Admins can view any officer; others always see themselves
-    const isAdmin=hasRole('admin','branch_manager');
-    const{data:allStaff}=isAdmin
-      ? await sb('loan_staff').select('id,name,role').eq('business_id',currentUser.business_id).eq('is_active',true)
-      : {data:[{id:currentUser.id,name:currentUser.name,role:currentUser.role}]};
-    const officers=(allStaff||[]).filter(s=>{
+    const canSelectOfficer=hasRole('admin','branch_manager');
+    const{data:allStaff}=canSelectOfficer
+      ? await sb('loan_staff').select('id,name,role,branch_name').eq('business_id',currentUser.business_id).eq('is_active',true)
+      : {data:[{id:currentUser.id,name:currentUser.name,role:currentUser.role,branch_name:currentStaffBranchName()}]};
+    let officers=(allStaff||[]).filter(s=>{
       const roles=(s.role||'').split(',').map(r=>r.trim());
       return roles.some(r=>['loan_officer','admin','branch_manager'].includes(r));
     });
+    if(hasRole('branch_manager')&&!hasRole('admin')){
+      const managerBranch=currentStaffBranchName();
+      officers=officers.filter(o=>recordBranchName(o)===managerBranch);
+    }
 
     // Determine which officer is selected (default = self for officers, first for admins)
-    const selOfficerId=window._odSelOfficer||(isAdmin?officers[0]?.id:currentUser.id);
+    const selOfficerId=window._odSelOfficer||(canSelectOfficer?officers[0]?.id:currentUser.id);
     window._odSelOfficer=selOfficerId;
     const selOfficer=officers.find(o=>o.id===selOfficerId)||officers[0];
     if(!selOfficer){main.innerHTML='<div class="empty-state"><p>No officer data found.</p></div>';return;}
 
     // Fetch all data for this officer
-    const[loansR,repsR,schedsR,clientsR]=await Promise.all([
+    const[loansR,allReps,allSchedRows,allClients]=await Promise.all([
       sb('loans').select('*,loan_clients(full_name,phone)').eq('business_id',currentUser.business_id).eq('loan_officer_id',selOfficerId),
-      sb('loan_repayments').select('*').eq('business_id',currentUser.business_id),
-      sb('loan_schedules').select('*').eq('business_id',currentUser.business_id),
-      sb('loan_clients').select('id,full_name,created_at').eq('business_id',currentUser.business_id)
+      fetchAllBusinessRows('loan_repayments','*'),
+      fetchAllBusinessRows('loan_schedules','*'),
+      fetchAllBusinessRows('loan_clients','id,full_name,created_at')
     ]);
     const oLoans=loansR.data||[];
-    const allReps=repsR.data||[];
     // Paid schedules remain part of the expected dues for their due date.
-    const allScheds=(schedsR.data||[]).filter(isCurrentSchedule);
-    const allClients=clientsR.data||[];
+    const allScheds=allSchedRows.filter(isCurrentSchedule);
 
     const oLoanIds=new Set(oLoans.map(l=>l.id));
     const oReps=allReps.filter(r=>oLoanIds.has(r.loan_id));
@@ -6797,7 +6799,7 @@ async function renderOfficerDashboard(){
     const bookQuality=activeClients>0?((activeClients-clientsInArrears)/activeClients*100):100;
 
     // Build officer selector HTML (admin only)
-    const officerSel=isAdmin?`
+    const officerSel=canSelectOfficer?`
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
         <label style="font-size:12px;font-weight:700;color:var(--text-secondary)">Viewing officer:</label>
         <select class="select" style="width:auto;padding:5px 10px" onchange="window._odSelOfficer=this.value;renderOfficerDashboard()">
@@ -6807,8 +6809,32 @@ async function renderOfficerDashboard(){
 
     const rateColor=(r)=>r>=80?'var(--accent-green)':r>=50?'var(--accent-yellow)':'var(--accent-red)';
 
+    window._officerDashboardReport={
+      officer:selOfficer,
+      period:nowM,
+      totalClients,
+      activeClients,
+      newClientsMonth,
+      loanCountMonth:oLoansMonth.length,
+      olb,
+      totalArrears,
+      clientsInArrears,
+      disbMonth,
+      arrearsCollected,
+      dailyDue,
+      dailyPaid,
+      totalCollectedToday,
+      dailyRate,
+      monthDue,
+      monthPaid,
+      monthlyRate,
+      bookQuality,
+      activeLoans:oActive,
+      monthRepayments:oReps.filter(r=>(r.payment_date||'').startsWith(nowM))
+    };
+
     main.innerHTML=`
-      <div class="page-header"><h1>📊 Officer Dashboard</h1><button class="btn btn-outline btn-sm" onclick="renderOfficerDashboard()">Refresh</button></div>
+      <div class="page-header"><h1>📊 Officer Dashboard</h1><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="downloadOfficerDashboardReport()">⬇ Download Report</button><button class="btn btn-outline btn-sm" onclick="renderOfficerDashboard()">Refresh</button></div></div>
       ${officerSel}
       <div class="card" style="margin-bottom:14px;background:rgba(37,99,235,0.07);border-color:rgba(37,99,235,0.25);padding:10px 14px">
         <span style="font-size:13px;font-weight:700">${selOfficer.name}</span>
@@ -6946,6 +6972,68 @@ async function renderOfficerDashboard(){
     main.innerHTML=`<div class="empty-state"><p>Error: ${e.message}</p></div>`;
     toast(e.message,'error');
   }
+}
+
+function downloadOfficerDashboardReport(){
+  if(typeof XLSX==='undefined')return toast('Excel library is still loading. Please retry.','warning');
+  const r=window._officerDashboardReport;
+  if(!r)return toast('Open an officer dashboard before downloading.','warning');
+
+  const summary=[{
+    'Officer':r.officer?.name||'-',
+    'Branch':recordBranchName(r.officer),
+    'Period':r.period,
+    'Total Clients':r.totalClients,
+    'Active Clients':r.activeClients,
+    'New Clients (Month)':r.newClientsMonth,
+    'Loans Disbursed (Month)':r.loanCountMonth,
+    'Disbursed Amount (KES)':Number(r.disbMonth.toFixed(2)),
+    'Outstanding Loan Balance (KES)':Number(r.olb.toFixed(2)),
+    'Clients in Arrears':r.clientsInArrears,
+    'Total Arrears (KES)':Number(r.totalArrears.toFixed(2)),
+    'Arrears Collected (Month)':Number(r.arrearsCollected.toFixed(2)),
+    'Dues Today (KES)':Number(r.dailyDue.toFixed(2)),
+    "Paid Against Today's Dues (KES)":Number(r.dailyPaid.toFixed(2)),
+    'Total Repayments Today (KES)':Number(r.totalCollectedToday.toFixed(2)),
+    'Daily Collection Rate (%)':Number(r.dailyRate.toFixed(2)),
+    'Month Due (KES)':Number(r.monthDue.toFixed(2)),
+    'Month Collected (KES)':Number(r.monthPaid.toFixed(2)),
+    'Monthly Collection Rate (%)':Number(r.monthlyRate.toFixed(2)),
+    'Book Quality (%)':Number(r.bookQuality.toFixed(2))
+  }];
+  const loans=(r.activeLoans||[]).map(l=>({
+    'Client':l.loan_clients?.full_name||'-',
+    'Phone':l.loan_clients?.phone||'-',
+    'Loan #':l.loan_no||'-',
+    'Loan Type':l.loan_type==='repeat_loan'?'Repeat':'New',
+    'Principal (KES)':Number(l.principal_amount||0),
+    'Outstanding Balance (KES)':Number(l.outstanding_balance||0),
+    'Arrears (KES)':Number(loanPerformanceArrearsAmount(l).toFixed(2)),
+    'Overdue Days':Number(l._performance_arrears_days||l.overdue_days||0),
+    'Disbursement Date':l.disbursement_date||'-',
+    'Maturity Date':l.maturity_date||'-',
+    'Status':l.status||'-'
+  }));
+  const repayments=(r.monthRepayments||[]).map(p=>({
+    'Payment Date':p.payment_date||'-',
+    'Receipt / Reference':p.receipt_no||p.payment_reference||'-',
+    'Amount (KES)':Number(p.amount||0),
+    'Method':p.payment_method||'-'
+  }));
+
+  const wb=XLSX.utils.book_new();
+  const summaryWs=XLSX.utils.json_to_sheet(summary);
+  summaryWs['!cols']=Object.keys(summary[0]).map(k=>({wch:Math.max(16,Math.min(32,k.length+2))}));
+  XLSX.utils.book_append_sheet(wb,summaryWs,'Summary');
+  const loansWs=XLSX.utils.json_to_sheet(loans.length?loans:[{'Result':'No active loans'}]);
+  loansWs['!cols']=[{wch:26},{wch:16},{wch:14},{wch:12},{wch:18},{wch:24},{wch:18},{wch:14},{wch:18},{wch:18},{wch:14}];
+  XLSX.utils.book_append_sheet(wb,loansWs,'Active Loans');
+  const repaymentsWs=XLSX.utils.json_to_sheet(repayments.length?repayments:[{'Result':'No repayments this month'}]);
+  repaymentsWs['!cols']=[{wch:22},{wch:22},{wch:18},{wch:18}];
+  XLSX.utils.book_append_sheet(wb,repaymentsWs,'Month Repayments');
+  const safeOfficer=String(r.officer?.name||'Officer').replace(/[^a-z0-9_-]+/gi,'_');
+  XLSX.writeFile(wb,`PataFix_Officer_${safeOfficer}_${r.period}.xlsx`);
+  toast('Officer dashboard report downloaded','success');
 }
 
 async function fetchAllBusinessRows(table,selectClause){
@@ -8629,6 +8717,7 @@ function attachPerformanceArrears(loans, schedules, asOfDate){
 }
 
 function downloadOfficerPerformanceReport(){
+  if(typeof XLSX==='undefined')return toast('Excel library is still loading. Please retry.','warning');
   const rows = window._perfRows || [];
   if(!rows.length) return toast('No data to download','warning');
   const nowM = localISODate().slice(0,7);
@@ -8716,22 +8805,20 @@ async function renderOfficerPerformance(){
   }
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
   try{
-    const[loansR,repsR,appsR,staffR,schedulesR,todaySchedulesR]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name)').eq('business_id',currentUser.business_id),
-      sb('loan_repayments').select('*').eq('business_id',currentUser.business_id),
-      sb('loan_applications').select('*').eq('business_id',currentUser.business_id),
+    const[allLoansRaw,allReps,allApps,staffR,allSchedules]=await Promise.all([
+      fetchAllBusinessRows('loans','*,loan_clients(full_name)'),
+      fetchAllBusinessRows('loan_repayments','*'),
+      fetchAllBusinessRows('loan_applications','*'),
       // FIX #13: loan_staff column is `name`, not `full_name`
       sb('loan_staff').select('id,name,email,role,branch_name').eq('business_id',currentUser.business_id),
-      fetchAllBusinessRows('loan_schedules','loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status,created_at'),
-      sb('loan_schedules').select('loan_id,due_date,total_due,total_paid,status').eq('business_id',currentUser.business_id).eq('due_date',localISODate()).limit(100000)
+      fetchAllBusinessRows('loan_schedules','loan_id,due_date,principal_due,principal_paid,interest_due,interest_paid,total_due,total_paid,status,created_at')
     ]);
     await loadPataFixBranches();
-    const scopedPerformanceLoans=filterByBranch(loansR.data||[],'officer_performance');
-    const allLoans=attachPerformanceArrears(scopedPerformanceLoans,schedulesR.data||[],localISODate());
-    const allReps=repsR.data||[];
-    const allApps=appsR.data||[];
+    const todayStr=localISODate();
+    const scopedPerformanceLoans=filterByBranch(allLoansRaw,'officer_performance');
+    const allLoans=attachPerformanceArrears(scopedPerformanceLoans,allSchedules,todayStr);
     const allStaff=staffR.data||[];
-    const todaySchedules=(todaySchedulesR.data||[]).filter(isCurrentSchedule);
+    const todaySchedules=allSchedules.filter(s=>s.due_date===todayStr&&isCurrentSchedule(s));
 
     // Filter to staff who have the loan_officer role ONLY.
     // Admins/branch managers should not appear in officer performance —
@@ -8748,7 +8835,6 @@ async function renderOfficerPerformance(){
     const branchOfficers=performanceBranch==='all'?officers:officers.filter(o=>recordBranchName(o)===performanceBranch);
     const filteredOfficers = viewSelf ? branchOfficers.filter(o=>o.id===currentUser.id) : branchOfficers;
 
-    const todayStr=localISODate();
     const nowM = todayStr.slice(0,7);
 
     // Keep loans without a current loan-officer assignment visible so the
@@ -8799,7 +8885,7 @@ async function renderOfficerPerformance(){
         </div>
       </div>
       <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Period: <strong>${nowM}</strong> (current month) | Arrears as of <strong>${todayStr}</strong> | ${viewSelf?'Your performance':'All officers'}</p>
-      ${getBranchFilterHtml('officer_performance',loansR.data||[])}
+      ${getBranchFilterHtml('officer_performance',allLoansRaw)}
 
       <div class="table-wrap" style="margin-bottom:24px">
         <table>
