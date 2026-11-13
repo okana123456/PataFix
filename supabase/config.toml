@@ -3,3 +3,12 @@ verify_jwt = false
 
 [functions.patafix-platform-console]
 verify_jwt = false
+
+[functions.patafix-c2b-validation]
+verify_jwt = false
+
+[functions.patafix-payment-callback]
+verify_jwt = false
+
+[functions.register-daraja]
+verify_jwt = false

@@ -141,7 +141,7 @@ serve(async (req) => {
           admin.from("loan_clients").select("id", { count: "exact", head: true }).eq("business_id", businessId),
           admin.from("loan_staff").select("id", { count: "exact", head: true }).eq("business_id", businessId).eq("is_active", true),
           admin.from("loans").select("id", { count: "exact", head: true }).eq("business_id", businessId).eq("status", "active"),
-          admin.from("patafix_branches").select("id", { count: "exact", head: true }).eq("business_id", businessId).eq("is_active", true),
+          admin.from("patafix_branches").select("id", { count: "exact", head: true }).eq("business_id", businessId).eq("status", "active"),
         ]);
         return {
           ...business,
@@ -155,6 +155,185 @@ serve(async (req) => {
       }));
 
       return json({ ok: true, admin: platformAdmin, businesses: rows, plans: plans || [], payments: payments || [] });
+    }
+
+    if (action === "business_detail") {
+      const businessId = text(payload.businessId);
+      if (!businessId) return json({ ok: false, message: "Business is required." }, 400);
+
+      const { data: business, error: businessError } = await admin
+        .from("patafix_platform_businesses")
+        .select("*,patafix_platform_plans(*)")
+        .eq("business_id", businessId)
+        .single();
+      if (businessError || !business) return json({ ok: false, message: "Business not found." }, 404);
+
+      const [settingsResult, branchesResult, productsResult, staffResult, routeResult, overridesResult] = await Promise.all([
+        admin.from("loan_settings").select("business_id,company_name,company_phone,company_email,company_address,currency,mpesa_shortcode,daraja_environment,daraja_credentials_saved,mpesa_auto_confirm").eq("business_id", businessId).maybeSingle(),
+        admin.from("patafix_branches").select("id,name,branch_code,manager_name,phone,location,status").eq("business_id", businessId).order("name"),
+        admin.from("loan_products").select("id,name,description,min_amount,max_amount,interest_rate,interest_period,min_term_weeks,max_term_weeks,processing_fee_type,processing_fee_value,registration_fee,repayment_frequency,term_unit,requires_guarantor,is_active").eq("business_id", businessId).order("min_amount"),
+        admin.from("loan_staff").select("id,name,email,phone,role,is_active,branch_name").eq("business_id", businessId).order("created_at"),
+        admin.from("patafix_payment_routes").select("provider,shortcode,environment,status,validation_url,confirmation_url,registered_at,last_verified_at").eq("business_id", businessId).maybeSingle(),
+        admin.from("patafix_platform_feature_overrides").select("feature_key,enabled,config").eq("business_id", businessId),
+      ]);
+      for (const result of [settingsResult, branchesResult, productsResult, staffResult, routeResult, overridesResult]) {
+        if (result.error) throw result.error;
+      }
+
+      const settings = settingsResult.data;
+      const branches = branchesResult.data || [];
+      const products = productsResult.data || [];
+      const staff = staffResult.data || [];
+      const route = routeResult.data;
+      return json({
+        ok: true,
+        business,
+        settings,
+        branches,
+        products,
+        staff,
+        paymentRoute: route,
+        featureOverrides: overridesResult.data || [],
+        checklist: {
+          company_profile: Boolean(settings?.company_name && settings?.company_phone && settings?.company_email),
+          administrator: staff.some((member: any) => member.is_active && String(member.role || "").split(",").map((role: string) => role.trim()).includes("admin")),
+          branch: branches.some((branch: any) => branch.status === "active"),
+          loan_products: products.some((product: any) => product.is_active),
+          daraja: Boolean(route?.status === "active" && settings?.daraja_credentials_saved),
+          onboarding: ["paid", "waived"].includes(String(business.onboarding_payment_status || "")),
+        },
+      });
+    }
+
+    if (action === "update_vendor_profile") {
+      const businessId = text(payload.businessId);
+      const companyName = text(payload.companyName);
+      const companyPhone = text(payload.companyPhone);
+      const companyEmail = text(payload.companyEmail).toLowerCase();
+      const companyAddress = text(payload.companyAddress);
+      if (!businessId || !companyName) return json({ ok: false, message: "Business and company name are required." }, 400);
+
+      const { data: before, error: beforeError } = await admin
+        .from("loan_settings")
+        .select("company_name,company_phone,company_email,company_address")
+        .eq("business_id", businessId)
+        .single();
+      if (beforeError) throw beforeError;
+
+      const profile = {
+        company_name: companyName,
+        company_phone: companyPhone || null,
+        company_email: companyEmail || null,
+        company_address: companyAddress || null,
+      };
+      const { error: settingsError } = await admin.from("loan_settings").update(profile).eq("business_id", businessId);
+      if (settingsError) throw settingsError;
+      const { error: platformError } = await admin.from("patafix_platform_businesses").update({ display_name: companyName }).eq("business_id", businessId);
+      if (platformError) throw platformError;
+
+      await admin.from("patafix_platform_audit_log").insert({
+        platform_admin_id: platformAdmin.id,
+        business_id: businessId,
+        action: "vendor_profile_updated",
+        entity_type: "loan_settings",
+        entity_id: businessId,
+        old_value: before,
+        new_value: profile,
+      });
+      return json({ ok: true, message: "Vendor profile updated." });
+    }
+
+    if (action === "save_branch") {
+      const businessId = text(payload.businessId);
+      const branchId = text(payload.branchId);
+      const name = text(payload.name);
+      if (!businessId || !name) return json({ ok: false, message: "Business and branch name are required." }, 400);
+
+      const { data: business, error: businessError } = await admin
+        .from("patafix_platform_businesses")
+        .select("branch_limit_override,patafix_platform_plans(max_branches)")
+        .eq("business_id", businessId)
+        .single();
+      if (businessError) throw businessError;
+
+      if (!branchId) {
+        const { count, error: countError } = await admin.from("patafix_branches").select("id", { count: "exact", head: true }).eq("business_id", businessId).eq("status", "active");
+        if (countError) throw countError;
+        const branchLimit = business.branch_limit_override ?? business.patafix_platform_plans?.max_branches ?? null;
+        if (branchLimit && Number(count || 0) >= Number(branchLimit)) {
+          return json({ ok: false, message: `This package allows ${branchLimit} active branch${Number(branchLimit) === 1 ? "" : "es"}. Upgrade or add an override first.` }, 409);
+        }
+      }
+
+      const record = {
+        business_id: businessId,
+        name,
+        branch_code: text(payload.branchCode) || null,
+        manager_name: text(payload.managerName) || null,
+        phone: text(payload.phone) || null,
+        location: text(payload.location) || null,
+        status: text(payload.status) === "inactive" ? "inactive" : "active",
+      };
+      let saved;
+      if (branchId) {
+        const result = await admin.from("patafix_branches").update(record).eq("id", branchId).eq("business_id", businessId).select("*").single();
+        if (result.error) throw result.error;
+        saved = result.data;
+      } else {
+        const result = await admin.from("patafix_branches").insert(record).select("*").single();
+        if (result.error) throw result.error;
+        saved = result.data;
+      }
+      await admin.from("patafix_platform_audit_log").insert({ platform_admin_id: platformAdmin.id, business_id: businessId, action: branchId ? "branch_updated" : "branch_created", entity_type: "patafix_branches", entity_id: saved.id, new_value: saved });
+      return json({ ok: true, branch: saved });
+    }
+
+    if (action === "save_product") {
+      const businessId = text(payload.businessId);
+      const productId = text(payload.productId);
+      const name = text(payload.name);
+      const minAmount = Number(payload.minAmount);
+      const maxAmount = Number(payload.maxAmount);
+      const interestRate = Number(payload.interestRate);
+      const minTermWeeks = Number(payload.minTermWeeks);
+      const maxTermWeeks = Number(payload.maxTermWeeks);
+      if (!businessId || !name || minAmount < 0 || maxAmount < minAmount || interestRate < 0 || minTermWeeks < 1 || maxTermWeeks < minTermWeeks) {
+        return json({ ok: false, message: "Enter a valid product name, amount range, interest rate and term range." }, 400);
+      }
+      const processingFeeType = text(payload.processingFeeType) === "flat" ? "flat" : "percent";
+      const processingFeeValue = Math.max(0, Number(payload.processingFeeValue || 0));
+      const record = {
+        business_id: businessId,
+        name,
+        description: text(payload.description) || null,
+        min_amount: minAmount,
+        max_amount: maxAmount,
+        interest_rate: interestRate,
+        interest_type: "flat",
+        interest_period: ["weekly", "monthly", "term"].includes(text(payload.interestPeriod)) ? text(payload.interestPeriod) : "weekly",
+        min_term_weeks: minTermWeeks,
+        max_term_weeks: maxTermWeeks,
+        processing_fee_type: processingFeeType,
+        processing_fee_value: processingFeeValue,
+        processing_fee_pct: processingFeeType === "percent" ? processingFeeValue : 0,
+        registration_fee: Math.max(0, Number(payload.registrationFee || 0)),
+        repayment_frequency: ["weekly", "biweekly", "monthly"].includes(text(payload.repaymentFrequency)) ? text(payload.repaymentFrequency) : "weekly",
+        term_unit: text(payload.termUnit) === "months" ? "months" : "weeks",
+        requires_guarantor: Boolean(payload.requiresGuarantor),
+        is_active: payload.isActive !== false,
+      };
+      let saved;
+      if (productId) {
+        const result = await admin.from("loan_products").update(record).eq("id", productId).eq("business_id", businessId).select("*").single();
+        if (result.error) throw result.error;
+        saved = result.data;
+      } else {
+        const result = await admin.from("loan_products").insert(record).select("*").single();
+        if (result.error) throw result.error;
+        saved = result.data;
+      }
+      await admin.from("patafix_platform_audit_log").insert({ platform_admin_id: platformAdmin.id, business_id: businessId, action: productId ? "loan_product_updated" : "loan_product_created", entity_type: "loan_products", entity_id: saved.id, new_value: saved });
+      return json({ ok: true, product: saved });
     }
 
     if (action === "create_business") {

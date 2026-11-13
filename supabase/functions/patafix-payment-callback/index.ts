@@ -134,11 +134,22 @@ serve(async (req) => {
     );
     trackedSupabase = supabase;
 
-    const { data: settings, error: settingsError } = await supabase
-      .from("loan_settings")
-      .select("business_id, mpesa_auto_confirm")
-      .eq("mpesa_shortcode", shortcode)
+    const { data: route, error: routeError } = await supabase
+      .from("patafix_payment_routes")
+      .select("business_id, shortcode, status")
+      .eq("provider", "daraja")
+      .eq("shortcode", shortcode)
+      .eq("status", "active")
       .maybeSingle();
+    if (routeError) throw routeError;
+
+    let settingsQuery = supabase
+      .from("loan_settings")
+      .select("business_id, mpesa_auto_confirm");
+    settingsQuery = route?.business_id
+      ? settingsQuery.eq("business_id", route.business_id)
+      : settingsQuery.eq("mpesa_shortcode", shortcode);
+    const { data: settings, error: settingsError } = await settingsQuery.maybeSingle();
     if (settingsError) throw settingsError;
 
     const { data: existingCallback, error: existingCallbackError } = await supabase
@@ -148,7 +159,7 @@ serve(async (req) => {
       .maybeSingle();
     if (existingCallbackError) throw existingCallbackError;
 
-    const businessId = settings?.business_id || existingCallback?.business_id || null;
+    const businessId = route?.business_id || settings?.business_id || existingCallback?.business_id || null;
     let queue: any = existingCallback || null;
     if (existingCallback) {
       const { error: deliveryUpdateError } = await supabase

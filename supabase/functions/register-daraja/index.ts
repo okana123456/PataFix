@@ -301,6 +301,37 @@ Deno.serve(async (req) => {
       return json({ success: false, error: "Daraja was registered, but its saved status could not be updated. " + String(settingsResult.data?.message || settingsResult.status) }, 500);
     }
 
+    const routeResult = await backendRequest(
+      supabaseUrl,
+      serviceKey,
+      "/rest/v1/patafix_payment_routes?on_conflict=business_id,provider",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Prefer: "resolution=merge-duplicates,return=minimal",
+        },
+        body: JSON.stringify({
+          business_id: staff.business_id,
+          provider: "daraja",
+          shortcode: cleanShortcode,
+          environment: sandbox ? "sandbox" : "production",
+          status: "active",
+          validation_url: validationUrl,
+          confirmation_url: confirmationUrl,
+          registered_at: new Date().toISOString(),
+          last_verified_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }),
+      },
+    );
+    if (!routeResult.ok) {
+      return json({
+        success: false,
+        error: "Daraja was registered, but the business payment route could not be saved. Run patafix-platform-phase2-isolation.sql, then save again. " + String(routeResult.data?.message || routeResult.status),
+      }, 500);
+    }
+
     return json({
       success: true,
       warning: registration.alreadyRegistered ? registration.message : undefined,
