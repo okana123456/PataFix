@@ -32,8 +32,8 @@ function env(name: string) {
 }
 
 function billingMonth() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+  const d = new Date(Date.now() + 3 * 60 * 60 * 1000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-01`;
 }
 
 function serviceBillingAmount(month: string) {
@@ -78,7 +78,29 @@ serve(async (req) => {
     }
 
     const month = billingMonth();
-    const amount = serviceBillingAmount(month);
+    let amount = serviceBillingAmount(month);
+    let packageCode = "legacy";
+    const { data: platformBusiness, error: platformError } = await supabase
+      .from("patafix_platform_businesses")
+      .select("status,onboarding_payment_status,subscription_start_date,monthly_fee_override,settings,patafix_platform_plans(code,monthly_fee)")
+      .eq("business_id", staff.business_id)
+      .maybeSingle();
+    if (platformError && !String(platformError.message || "").includes("patafix_platform_businesses")) throw platformError;
+    const managed = platformBusiness?.settings?.enforcement_enabled === true;
+    if (managed) {
+      if (!["paid", "waived"].includes(String(platformBusiness.onboarding_payment_status || ""))) {
+        return json({ ok: false, message: "The onboarding payment must be confirmed by the platform owner first." }, 403);
+      }
+      if (["suspended", "closed"].includes(String(platformBusiness.status || ""))) {
+        return json({ ok: false, message: "This business subscription is not active. Contact the platform owner." }, 403);
+      }
+      const today = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      if (platformBusiness.subscription_start_date && today < platformBusiness.subscription_start_date) {
+        return json({ ok: false, message: `Monthly billing begins on ${platformBusiness.subscription_start_date}. No payment is due yet.` }, 409);
+      }
+      amount = Math.max(1, Number(platformBusiness.monthly_fee_override ?? platformBusiness.patafix_platform_plans?.monthly_fee ?? 3000));
+      packageCode = String(platformBusiness.patafix_platform_plans?.code || "managed");
+    }
     const shortcode = env("SERVICE_SHORTCODE");
     const consumerKey = env("SERVICE_CONSUMER_KEY");
     const consumerSecret = env("SERVICE_CONSUMER_SECRET");
@@ -142,6 +164,7 @@ serve(async (req) => {
       merchant_request_id: stk.MerchantRequestID,
       checkout_request_id: stk.CheckoutRequestID,
       result_description: stk.ResponseDescription,
+      metadata: { managed_subscription: managed, package_code: packageCode },
     };
 
     const { error: saveError } = await supabase
@@ -159,6 +182,7 @@ serve(async (req) => {
       ok: true,
       message: "Subscription payment prompt sent.",
       amount,
+      package_code: packageCode,
       checkout_request_id: stk.CheckoutRequestID,
       customer_message: stk.CustomerMessage,
     });

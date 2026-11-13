@@ -23,8 +23,14 @@ function slugify(value: string) {
 }
 
 function firstDayOfNextMonth() {
-  const now = new Date();
+  const now = new Date(Date.now() + 3 * 60 * 60 * 1000);
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
+}
+
+function lastDayOfMonth(value: string) {
+  const [year, month] = value.slice(0, 10).split("-").map(Number);
+  if (!year || !month) throw new Error("Enter a valid billing month.");
+  return new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
 }
 
 function defaultProducts(businessId: string) {
@@ -168,15 +174,16 @@ serve(async (req) => {
         .single();
       if (businessError || !business) return json({ ok: false, message: "Business not found." }, 404);
 
-      const [settingsResult, branchesResult, productsResult, staffResult, routeResult, overridesResult] = await Promise.all([
+      const [settingsResult, branchesResult, productsResult, staffResult, routeResult, overridesResult, billingResult] = await Promise.all([
         admin.from("loan_settings").select("business_id,company_name,company_phone,company_email,company_address,currency,mpesa_shortcode,daraja_environment,daraja_credentials_saved,mpesa_auto_confirm").eq("business_id", businessId).maybeSingle(),
         admin.from("patafix_branches").select("id,name,branch_code,manager_name,phone,location,status").eq("business_id", businessId).order("name"),
         admin.from("loan_products").select("id,name,description,min_amount,max_amount,interest_rate,interest_period,min_term_weeks,max_term_weeks,processing_fee_type,processing_fee_value,registration_fee,repayment_frequency,term_unit,requires_guarantor,is_active").eq("business_id", businessId).order("min_amount"),
         admin.from("loan_staff").select("id,name,email,phone,role,is_active,branch_name").eq("business_id", businessId).order("created_at"),
         admin.from("patafix_payment_routes").select("provider,shortcode,environment,status,validation_url,confirmation_url,registered_at,last_verified_at").eq("business_id", businessId).maybeSingle(),
         admin.from("patafix_platform_feature_overrides").select("feature_key,enabled,config").eq("business_id", businessId),
+        admin.from("loan_billing_cycles").select("billing_month,amount,status,phone,receipt_number,paid_at,paid_until,result_description").eq("business_id", businessId).order("billing_month", { ascending: false }).limit(12),
       ]);
-      for (const result of [settingsResult, branchesResult, productsResult, staffResult, routeResult, overridesResult]) {
+      for (const result of [settingsResult, branchesResult, productsResult, staffResult, routeResult, overridesResult, billingResult]) {
         if (result.error) throw result.error;
       }
 
@@ -194,6 +201,7 @@ serve(async (req) => {
         staff,
         paymentRoute: route,
         featureOverrides: overridesResult.data || [],
+        billingCycles: billingResult.data || [],
         checklist: {
           company_profile: Boolean(settings?.company_name && settings?.company_phone && settings?.company_email),
           administrator: staff.some((member: any) => member.is_active && String(member.role || "").split(",").map((role: string) => role.trim()).includes("admin")),
@@ -241,6 +249,60 @@ serve(async (req) => {
         new_value: profile,
       });
       return json({ ok: true, message: "Vendor profile updated." });
+    }
+
+    if (action === "record_subscription_payment") {
+      const businessId = text(payload.businessId);
+      const reference = text(payload.reference);
+      const phone = text(payload.phone);
+      const rawMonth = text(payload.billingMonth);
+      const billingMonth = /^\d{4}-\d{2}$/.test(rawMonth) ? `${rawMonth}-01` : rawMonth;
+      if (!businessId || !reference || !/^\d{4}-\d{2}-01$/.test(billingMonth)) {
+        return json({ ok: false, message: "Business, payment reference and a valid billing month are required." }, 400);
+      }
+
+      const { data: business, error: businessError } = await admin
+        .from("patafix_platform_businesses")
+        .select("monthly_fee_override,patafix_platform_plans(monthly_fee)")
+        .eq("business_id", businessId)
+        .single();
+      if (businessError) throw businessError;
+      const amount = Math.max(1, Number(payload.amount || business.monthly_fee_override || business.patafix_platform_plans?.monthly_fee || 3000));
+      const paidAt = new Date().toISOString();
+      const paidUntil = lastDayOfMonth(billingMonth);
+
+      const { data: cycle, error: cycleError } = await admin.from("loan_billing_cycles").upsert({
+        business_id: businessId,
+        billing_month: billingMonth,
+        amount,
+        status: "paid",
+        phone: phone || null,
+        receipt_number: reference,
+        result_code: "0",
+        result_description: "Subscription payment recorded by platform owner",
+        paid_at: paidAt,
+        paid_until: paidUntil,
+        metadata: { source: "platform_console", platform_admin_id: platformAdmin.id },
+      }, { onConflict: "business_id,billing_month" }).select("*").single();
+      if (cycleError) throw cycleError;
+
+      const { error: paymentError } = await admin.from("patafix_platform_payments").upsert({
+        business_id: businessId,
+        payment_type: "subscription",
+        billing_month: billingMonth,
+        amount,
+        status: "paid",
+        payment_method: text(payload.paymentMethod) || "manual",
+        payment_reference: reference,
+        phone: phone || null,
+        paid_at: paidAt,
+        metadata: { paid_until: paidUntil, source: "platform_console" },
+      }, { onConflict: "business_id,payment_type,payment_reference" });
+      if (paymentError) throw paymentError;
+
+      await admin.from("patafix_platform_businesses").update({ status: "active" }).eq("business_id", businessId).in("status", ["past_due", "active"]);
+      await admin.from("patafix_platform_audit_log").insert({ platform_admin_id: platformAdmin.id, business_id: businessId, action: "subscription_payment_recorded", entity_type: "loan_billing_cycles", entity_id: cycle.id, new_value: cycle });
+      return json({ ok: true, cycle, message: "Subscription payment recorded and access restored." });
     }
 
     if (action === "save_branch") {
@@ -422,7 +484,7 @@ serve(async (req) => {
           onboarding_payment_status: "pending",
           subscription_start_date: null,
           created_by: platformAdmin.id,
-          settings: { vendor_app_unchanged: true, enforcement_enabled: false },
+          settings: { vendor_app_unchanged: true, enforcement_enabled: true },
         });
         if (businessError) throw businessError;
 

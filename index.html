@@ -367,7 +367,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-09-03-portfolio-transfer-v1';
+const APP_VERSION = 'patafix-2026-11-13-platform-billing-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -386,7 +386,7 @@ let currentSection = 'dashboard';
 let cachedData = {};
 let charts = {};
 let appSettings = null; 
-let serviceBilling = { status:'unknown', paid:false, locked:false, reminder:false, pending:false, cycleMonth:null, checkedAt:null };
+let serviceBilling = { status:'unknown', paid:false, locked:false, reminder:false, pending:false, managed:false, accessState:null, amount:null, graceDeadline:null, cycleMonth:null, checkedAt:null };
 let emailLoginInProgress = false;
 const SERVICE_BILLING_BASE_AMOUNT = 3000;
 const SERVICE_BILLING_GOLD_AMOUNT = 7500;
@@ -983,9 +983,11 @@ function serviceBillingMonth(d=new Date()){
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
 }
 function serviceBillingAmount(month=serviceBillingMonth()){
+  if(serviceBilling.managed && Number(serviceBilling.amount)>0) return Number(serviceBilling.amount);
   return String(month||'') >= SERVICE_BILLING_GOLD_EFFECTIVE_MONTH ? SERVICE_BILLING_GOLD_AMOUNT : SERVICE_BILLING_BASE_AMOUNT;
 }
 function serviceBillingDueDate(){
+  if(serviceBilling.managed && serviceBilling.graceDeadline) return serviceBilling.graceDeadline;
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(SERVICE_BILLING_LOCK_DAY).padStart(2,'0')}`;
 }
@@ -993,9 +995,13 @@ function serviceBillingDateOnly(value){
   return value ? String(value).slice(0,10) : '';
 }
 function isBeforeServiceBillingStart(){
+  if(serviceBilling.managed) return false;
   return localISODate() < SERVICE_BILLING_FIRST_REMINDER_DATE;
 }
 function isServiceBillingUser(){
+  return !!currentUser && (serviceBilling.managed || hasRole('admin','branch_manager'));
+}
+function canPayServiceBilling(){
   return !!currentUser && hasRole('admin','branch_manager');
 }
 function serviceBillingCacheKey(){
@@ -1015,9 +1021,43 @@ function loadCachedServiceBilling(){
   }catch(e){}
 }
 async function loadServiceBillingStatus({silent=false}={}){
-  if(!currentUser?.business_id || !isServiceBillingUser()) return;
+  if(!currentUser?.business_id) return;
   const month = serviceBillingMonth();
   const todayStr = localISODate();
+  try{
+    const {data:platformStatus,error:platformStatusError}=await supabaseClient.rpc('patafix_vendor_subscription_status');
+    if(!platformStatusError && platformStatus?.managed){
+      const paid=platformStatus.state==='paid'||platformStatus.state==='onboarding_period';
+      setServiceBillingState({
+        managed:true,
+        accessState:platformStatus.state,
+        status:platformStatus.state,
+        paid,
+        locked:!!platformStatus.locked,
+        reminder:!!platformStatus.reminder,
+        pending:false,
+        amount:Number(platformStatus.amount||0),
+        graceDeadline:platformStatus.grace_deadline||null,
+        cycleMonth:platformStatus.billing_month||month,
+        row:{
+          phone:platformStatus.phone||'',
+          paid_at:platformStatus.paid_at||null,
+          paid_until:platformStatus.paid_until||null,
+          receipt_number:platformStatus.receipt_number||null,
+          billing_month:platformStatus.billing_month||month,
+          amount:Number(platformStatus.amount||0)
+        }
+      });
+      if(paid) localStorage.removeItem(serviceBillingMinKey());
+      renderServiceBillingOverlay();
+      return;
+    }
+  }catch(platformError){
+    console.warn('Managed subscription status unavailable; using legacy billing:',platformError.message);
+  }
+  serviceBilling.managed=false;
+  serviceBilling.accessState=null;
+  if(!hasRole('admin','branch_manager')) return;
   if(isBeforeServiceBillingStart()){
     setServiceBillingState({
       status:'paid',
@@ -1094,6 +1134,9 @@ function renderServiceBillingOverlay(){
   const minimized = !serviceBilling.locked && localStorage.getItem(serviceBillingMinKey()) === '1';
   const due = fmtDate(serviceBillingDueDate());
   const billingAmount = serviceBillingAmount(serviceBillingMonth());
+  const onboardingBlocked=serviceBilling.managed&&serviceBilling.accessState==='onboarding_pending';
+  const administrativelyBlocked=serviceBilling.managed&&['suspended','closed'].includes(serviceBilling.accessState);
+  const payerAllowed=canPayServiceBilling()&&!onboardingBlocked&&!administrativelyBlocked;
   if(minimized){
     const pill = document.createElement('div');
     pill.id = 'serviceBillingPill';
@@ -1110,19 +1153,19 @@ function renderServiceBillingOverlay(){
     <div class="service-billing-box ${serviceBilling.locked?'locked':''}">
       <div class="service-billing-top">
         <div>
-          <div class="service-billing-title">${serviceBilling.locked?'System locked until subscription is paid':'Subscription payment reminder'}</div>
-          <div class="service-billing-muted">${serviceBilling.locked?'Payment is overdue. Pay to reopen admin access.':'Subscription payment is due. Please pay before '+due+' to avoid admin lock.'}</div>
+          <div class="service-billing-title">${onboardingBlocked?'Onboarding payment awaiting confirmation':administrativelyBlocked?'Business access suspended':serviceBilling.locked?'System locked until subscription is paid':'Subscription payment reminder'}</div>
+          <div class="service-billing-muted">${onboardingBlocked?'Contact the platform owner to confirm onboarding and activate this business.':administrativelyBlocked?'Contact the platform owner to restore this business account.':serviceBilling.locked?(canPayServiceBilling()?'Payment is overdue. Pay to reopen access.':'Payment is overdue. Contact your business administrator to renew the subscription.'):'Subscription payment is due. Please pay before '+due+' to avoid account lock.'}</div>
         </div>
         <div class="service-billing-amount">KES ${billingAmount.toLocaleString('en-KE')}</div>
       </div>
-      <div class="form-group">
+      ${payerAllowed?`<div class="form-group">
         <label>Phone number for payment prompt</label>
         <input class="input" id="serviceBillingPhone" placeholder="07XXXXXXXX" value="${serviceBilling.row?.phone || ''}">
         <div class="service-billing-muted" style="margin-top:4px">Enter the Safaricom number that should receive the payment prompt.</div>
-      </div>
+      </div>`:''}
       <div class="service-billing-actions">
-        <button class="btn btn-primary" onclick="startServiceBillingPayment(this)">Pay KES ${billingAmount.toLocaleString('en-KE')}</button>
-        <button class="btn btn-outline" onclick="checkServiceBillingPayment(this)">Check payment</button>
+        ${payerAllowed?`<button class="btn btn-primary" onclick="startServiceBillingPayment(this)">Pay KES ${billingAmount.toLocaleString('en-KE')}</button>
+        <button class="btn btn-outline" onclick="checkServiceBillingPayment(this)">Check payment</button>`:''}
         ${!serviceBilling.locked?`<button class="btn btn-outline" onclick="localStorage.setItem(serviceBillingMinKey(),'1');renderServiceBillingOverlay()">Minimize</button>`:''}
         <button class="btn btn-outline" onclick="handleLogout()">Sign out</button>
       </div>
@@ -1169,7 +1212,7 @@ async function checkServiceBillingPayment(btn){
   }
   if(btn){ btn.disabled = false; btn.textContent = oldText; }
 }
-setInterval(()=>{ if(currentUser && isServiceBillingUser()) loadServiceBillingStatus({silent:true}); }, 60000);
+setInterval(()=>{ if(currentUser) loadServiceBillingStatus({silent:true}); }, 60000);
 
 // ═══ PAGINATION ═══
 function paginate(items,page,perPage=25){
@@ -1791,6 +1834,7 @@ function handleLogout(){
   localStorage.removeItem('patafix_last_activity');
   supabaseClient.auth.signOut();
   currentUser=null;
+  serviceBilling={status:'unknown',paid:false,locked:false,reminder:false,pending:false,managed:false,accessState:null,amount:null,graceDeadline:null,cycleMonth:null,checkedAt:null};
   $('#appShell').style.display='none';$('#loginScreen').style.display='flex';
 }
 
@@ -1818,6 +1862,7 @@ function showApp(){
       else navigateTo('calculator');
   }
   
+  serviceBilling={status:'unknown',paid:false,locked:false,reminder:false,pending:false,managed:false,accessState:null,amount:null,graceDeadline:null,cycleMonth:null,checkedAt:null};
   loadCachedServiceBilling();
   renderServiceBillingOverlay();
   loadServiceBillingStatus({ silent:true });
