@@ -1,7 +1,8 @@
-const CACHE_NAME = 'patafix-cache-v6';
+const CACHE_NAME = 'patafix-cache-v7';
 const APP_SHELL = [
   './',
   './index.html',
+  './platform-console.html',
   './manifest.webmanifest',
   './assets/patafix-icon.svg',
   './assets/patafix-icon-192.png',
@@ -30,6 +31,21 @@ self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   const requestUrl = new URL(event.request.url);
   if (requestUrl.pathname.includes('/auth/') || requestUrl.pathname.includes('/rest/') || requestUrl.pathname.includes('/functions/')) return;
+
+  // The private owner console must never fall back to the vendor application.
+  if (requestUrl.pathname.endsWith('/platform-console.html')) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .then(response => {
+          if (!response.ok) throw new Error('Platform console unavailable');
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put('./platform-console.html', copy));
+          return response;
+        })
+        .catch(() => caches.match('./platform-console.html'))
+    );
+    return;
+  }
 
   if (event.request.mode === 'navigate') {
     event.respondWith(
