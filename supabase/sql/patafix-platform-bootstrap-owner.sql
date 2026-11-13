@@ -1,16 +1,14 @@
 -- Run after patafix-platform-control-plane.sql.
--- Replace the placeholder with the email address you will use to sign in to
--- the private platform console. The user must already exist in Supabase Auth.
+-- The platform owner must already exist in Supabase Auth before this runs.
 
 do $$
 declare
-  v_owner_email constant text := 'REPLACE_WITH_OWNER_EMAIL';
+  v_owner_email constant text := 'brucedataanalytics@gmail.com';
   v_owner_name constant text := 'Platform Owner';
   v_auth_user_id uuid;
 begin
-  if v_owner_email = 'REPLACE_WITH_OWNER_EMAIL'
-     or nullif(btrim(v_owner_email), '') is null then
-    raise exception 'Replace REPLACE_WITH_OWNER_EMAIL with the platform owner email before running this script.';
+  if nullif(btrim(v_owner_email), '') is null then
+    raise exception 'The platform owner email is required.';
   end if;
 
   select u.id
@@ -50,4 +48,4 @@ select
   a.created_at,
   'Platform owner access ready' as status
 from public.patafix_platform_admins a
-where lower(a.email) = lower('REPLACE_WITH_OWNER_EMAIL');
+where lower(a.email) = lower('brucedataanalytics@gmail.com');
