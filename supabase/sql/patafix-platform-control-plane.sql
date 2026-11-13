@@ -193,7 +193,7 @@ grant execute on function public.patafix_business_feature_enabled(text,text) to 
 insert into public.patafix_platform_plans
   (code,name,description,onboarding_fee,monthly_fee,max_clients,max_branches,features,is_active,is_public,sort_order)
 values
-  ('starter','Starter','Single-branch entry package',7500,3000,100,1,
+  ('starter','Starter','Single-branch package for up to 1,000 clients',7500,3000,1000,1,
    '{"branches":false,"advanced_accounting":false,"company_assets":false,"expenses":true}'::jsonb,true,false,10),
   ('growth','Growth','Growing lender package',7500,5000,300,3,
    '{"branches":true,"advanced_accounting":true,"company_assets":true,"expenses":true}'::jsonb,true,false,20),
