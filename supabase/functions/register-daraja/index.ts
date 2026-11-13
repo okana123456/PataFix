@@ -177,6 +177,19 @@ Deno.serve(async (req) => {
       return json({ success: false, error: "Only the business admin can register Daraja URLs." }, 403);
     }
 
+    const businessResult = await backendRequest(
+      supabaseUrl,
+      serviceKey,
+      `/rest/v1/patafix_platform_businesses?select=settings&business_id=eq.${encodeURIComponent(String(staff.business_id))}&limit=1`,
+    );
+    const platformBusiness = Array.isArray(businessResult.data) ? businessResult.data[0] : null;
+    if (businessResult.ok && platformBusiness?.settings?.demo_mode === true) {
+      return json({
+        success: false,
+        error: "Live M-Pesa integration is disabled for demonstration businesses.",
+      }, 403);
+    }
+
     const credentialsResult = await backendRequest(
       supabaseUrl,
       serviceKey,

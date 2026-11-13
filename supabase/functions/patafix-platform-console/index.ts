@@ -404,6 +404,7 @@ serve(async (req) => {
       const email = text(payload.email).toLowerCase();
       const password = String(payload.password || "");
       const planCode = text(payload.planCode || "starter").toLowerCase();
+      const demoMode = payload.demoMode === true;
       if (!businessName || !adminName || !email || password.length < 8) {
         return json({ ok: false, message: "Enter the business, administrator, email and a password of at least 8 characters." }, 400);
       }
@@ -478,13 +479,14 @@ serve(async (req) => {
           business_id: businessId,
           display_name: businessName,
           slug,
-          status: "pending_onboarding",
+          status: demoMode ? "active" : "pending_onboarding",
           plan_id: plan.id,
-          onboarding_fee: plan.onboarding_fee,
-          onboarding_payment_status: "pending",
+          onboarding_fee: demoMode ? 0 : plan.onboarding_fee,
+          onboarding_payment_status: demoMode ? "waived" : "pending",
           subscription_start_date: null,
           created_by: platformAdmin.id,
-          settings: { vendor_app_unchanged: true, enforcement_enabled: true },
+          settings: { vendor_app_unchanged: true, enforcement_enabled: !demoMode, demo_mode: demoMode },
+          notes: demoMode ? "Platform demonstration tenant. No live financial integrations." : null,
         });
         if (businessError) throw businessError;
 
@@ -503,10 +505,10 @@ serve(async (req) => {
           action: "business_created",
           entity_type: "business",
           entity_id: businessId,
-          new_value: { business_name: businessName, admin_name: adminName, email, plan_code: planCode },
+          new_value: { business_name: businessName, admin_name: adminName, email, plan_code: planCode, demo_mode: demoMode },
         });
 
-        return json({ ok: true, businessId, message: "Vendor created in pending onboarding status." });
+        return json({ ok: true, businessId, message: demoMode ? "Demo business created and activated." : "Vendor created in pending onboarding status." });
       } catch (error) {
         if (businessId) {
           await admin.from("patafix_platform_memberships").delete().eq("business_id", businessId);
