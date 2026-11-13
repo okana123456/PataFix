@@ -1,2 +1,5 @@
 [functions.patafix-staff-auth-management]
 verify_jwt = false
+
+[functions.patafix-platform-console]
+verify_jwt = false
