@@ -53,6 +53,13 @@ begin
   from public.patafix_platform_plans
   where id = v_business.plan_id;
 
+  if coalesce(v_business.settings,'{}'::jsonb) @> '{"demo_mode":true}'::jsonb then
+    return jsonb_build_object(
+      'managed',true,'allowed',true,'locked',false,'reminder',false,
+      'state','demo','business_id',v_business_id,'amount',0
+    );
+  end if;
+
   begin
     v_enforced := coalesce((v_business.settings ->> 'enforcement_enabled')::boolean,false);
   exception when invalid_text_representation then

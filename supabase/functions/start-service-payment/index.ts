@@ -86,6 +86,9 @@ serve(async (req) => {
       .eq("business_id", staff.business_id)
       .maybeSingle();
     if (platformError && !String(platformError.message || "").includes("patafix_platform_businesses")) throw platformError;
+    if (platformBusiness?.settings?.demo_mode === true) {
+      return json({ ok: false, message: "This demonstration business is subscription-exempt." }, 409);
+    }
     const managed = platformBusiness?.settings?.enforcement_enabled === true;
     if (managed) {
       if (!["paid", "waived"].includes(String(platformBusiness.onboarding_payment_status || ""))) {

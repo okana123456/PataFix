@@ -305,6 +305,57 @@ serve(async (req) => {
       return json({ ok: true, cycle, message: "Subscription payment recorded and access restored." });
     }
 
+    if (action === "reset_demo_data") {
+      const businessId = text(payload.businessId);
+      if (!businessId) return json({ ok: false, message: "Business is required." }, 400);
+
+      const { data: business, error: businessError } = await admin
+        .from("patafix_platform_businesses")
+        .select("business_id,display_name,settings")
+        .eq("business_id", businessId)
+        .single();
+      if (businessError || business?.settings?.demo_mode !== true) {
+        return json({ ok: false, message: "Only an explicitly marked demo business can be reset." }, 403);
+      }
+
+      const { data: membership, error: membershipError } = await admin
+        .from("patafix_platform_memberships")
+        .select("staff_id,auth_user_id")
+        .eq("business_id", businessId)
+        .eq("role", "admin")
+        .eq("is_active", true)
+        .limit(1)
+        .maybeSingle();
+      if (membershipError || !membership?.staff_id) {
+        return json({ ok: false, message: "The demo administrator could not be identified." }, 409);
+      }
+
+      const { data: extraStaff, error: staffError } = await admin
+        .from("loan_staff")
+        .select("id,auth_user_id")
+        .eq("business_id", businessId)
+        .neq("id", membership.staff_id);
+      if (staffError) throw staffError;
+      for (const member of extraStaff || []) {
+        if (member.auth_user_id) await admin.auth.admin.deleteUser(member.auth_user_id).catch(() => undefined);
+      }
+
+      const { data: resetResult, error: resetError } = await admin.rpc("patafix_reset_demo_business", {
+        p_business_id: businessId,
+      });
+      if (resetError) throw resetError;
+
+      await admin.from("patafix_platform_audit_log").insert({
+        platform_admin_id: platformAdmin.id,
+        business_id: businessId,
+        action: "demo_data_reset",
+        entity_type: "business",
+        entity_id: businessId,
+        new_value: resetResult,
+      });
+      return json({ ok: true, result: resetResult, message: `${business.display_name} sample data has been restored.` });
+    }
+
     if (action === "save_branch") {
       const businessId = text(payload.businessId);
       const branchId = text(payload.branchId);

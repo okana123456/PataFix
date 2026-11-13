@@ -1,12 +1,19 @@
--- Seed the isolated PataFix demo tenant created for demoloan08@gmail.com.
--- Safe to rerun: only records carrying the DEMO prefixes/marker are replaced.
+-- Install the reusable demo reset and seed demoloan08@gmail.com.
+-- The reset is restricted to businesses explicitly marked with demo_mode=true.
 
 begin;
 
-do $$
+create or replace function public.patafix_reset_demo_business(p_business_id text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
 declare
-  v_business_id text;
+  v_business_id text := p_business_id;
   v_admin_id uuid;
+  v_admin_email text;
+  v_display_name text;
   v_product_id uuid;
   v_officer_id uuid;
   v_client_id uuid;
@@ -39,23 +46,23 @@ declare
   i integer;
   j integer;
 begin
-  select b.business_id,s.id
-    into v_business_id,v_admin_id
+  select s.id,s.email,b.display_name
+    into v_admin_id,v_admin_email,v_display_name
   from public.patafix_platform_businesses b
   join public.loan_staff s on s.business_id=b.business_id
-  where lower(trim(s.email))='demoloan08@gmail.com'
+  where b.business_id=v_business_id
     and s.is_active=true
+    and 'admin'=any(regexp_split_to_array(coalesce(s.role,''),'\s*,\s*'))
     and coalesce((b.settings->>'demo_mode')::boolean,false)=true
-  order by s.created_at
+  order by (s.auth_user_id is not null) desc,s.created_at
   limit 1;
 
-  if v_business_id is null then
-    raise exception 'Create the Demo business for demoloan08@gmail.com from the platform console first';
+  if v_admin_id is null then
+    raise exception 'The selected business is not an active demonstration tenant';
   end if;
 
   update public.patafix_platform_businesses
-  set display_name='PataFix Demo',
-      status='active',
+  set status='active',
       onboarding_fee=0,
       onboarding_payment_status='waived',
       subscription_start_date=null,
@@ -70,8 +77,8 @@ begin
   where business_id=v_business_id;
 
   update public.loan_settings
-  set company_name='PataFix Demo',
-      company_email='demoloan08@gmail.com',
+  set company_name=v_display_name,
+      company_email=v_admin_email,
       company_phone='0700 000 000',
       company_address='Demo Office, Kenya',
       mpesa_shortcode=null,
@@ -86,16 +93,17 @@ begin
 
   delete from public.patafix_payment_routes where business_id=v_business_id;
   delete from public.patafix_daraja_credentials where business_id=v_business_id;
-  delete from public.loan_audit_log
-  where business_id=v_business_id and coalesce(new_value->>'demo_seed','false')='true';
-  delete from public.patafix_expenses
-  where business_id=v_business_id and expense_no like 'DEMO-EXP-%';
-  delete from public.journal_entries
-  where business_id=v_business_id and ref like 'DEMO-%';
-  delete from public.loan_clients
-  where business_id=v_business_id and notes='PATAFIX_DEMO_SEED';
-  delete from public.loan_staff
-  where business_id=v_business_id and email like 'demo.officer%@patafix.invalid';
+  delete from public.patafix_company_assets where business_id=v_business_id;
+  delete from public.patafix_expenses where business_id=v_business_id;
+  delete from public.journal_entries where business_id=v_business_id;
+  delete from public.loan_audit_log where business_id=v_business_id;
+  delete from public.mpesa_callback_queue where business_id=v_business_id;
+  delete from public.unmatched_payments where business_id=v_business_id;
+  delete from public.loan_billing_cycles where business_id=v_business_id;
+  delete from public.loan_clients where business_id=v_business_id;
+  delete from public.loan_products where business_id=v_business_id;
+  delete from public.loan_staff where business_id=v_business_id and id<>v_admin_id;
+  delete from public.patafix_branches where business_id=v_business_id;
 
   insert into public.patafix_branches
     (business_id,name,branch_code,manager_name,phone,location,status)
@@ -117,6 +125,16 @@ begin
     (v_business_id,'Mary Demo Officer','demo.officer1@patafix.invalid','0700 100 001','loan_officer',true,'Head Office'),
     (v_business_id,'John Demo Officer','demo.officer2@patafix.invalid','0700 100 002','loan_officer',true,'Central Branch'),
     (v_business_id,'Lydia Demo Officer','demo.officer3@patafix.invalid','0700 100 003','loan_officer',true,'Lakeside Branch');
+
+  insert into public.loan_products (
+    business_id,name,description,min_amount,max_amount,interest_rate,interest_period,
+    interest_type,min_term_weeks,max_term_weeks,processing_fee_type,
+    processing_fee_value,processing_fee_pct,registration_fee,repayment_frequency,
+    term_unit,requires_guarantor,is_active
+  ) values
+    (v_business_id,'INUA BIZ','KES 5,000-10,000 | configurable weekly loan',5000,10000,20,'monthly','flat',1,52,'flat',500,0,200,'weekly','weeks',true,true),
+    (v_business_id,'KUZA','KES 11,000-15,000 | configurable weekly loan',11000,15000,20,'monthly','flat',1,52,'percent',5,5,300,'weekly','weeks',true,true),
+    (v_business_id,'NAWIRI','KES 16,000-20,000 | configurable weekly loan',16000,20000,20,'monthly','flat',1,52,'percent',6,6,400,'weekly','weeks',true,true);
 
   select id into v_product_id
   from public.loan_products
@@ -257,14 +275,32 @@ begin
     (business_id,user_id,action,table_name,record_id,new_value)
   values (
     v_business_id,v_admin_id,'demo_data_seeded','platform_demo',v_business_id,
-    jsonb_build_object('demo_seed',true,'clients',30,'loans',24,'email','demoloan08@gmail.com')
+    jsonb_build_object('demo_seed',true,'clients',30,'loans',24,'email',v_admin_email)
   );
 
   if to_regprocedure('public.patafix_refresh_credit_scores_for_business(text)') is not null then
     execute 'select public.patafix_refresh_credit_scores_for_business($1)' using v_business_id;
   end if;
+
+  return jsonb_build_object(
+    'business_id',v_business_id,
+    'status','Demo data refreshed',
+    'clients',(select count(*) from public.loan_clients where business_id=v_business_id),
+    'loans',(select count(*) from public.loans where business_id=v_business_id),
+    'repayments',(select count(*) from public.loan_repayments where business_id=v_business_id),
+    'expenses',(select count(*) from public.patafix_expenses where business_id=v_business_id)
+  );
 end;
 $$;
+
+revoke all on function public.patafix_reset_demo_business(text) from public;
+grant execute on function public.patafix_reset_demo_business(text) to service_role;
+
+select public.patafix_reset_demo_business((
+  select business_id from public.loan_staff
+  where lower(trim(email))='demoloan08@gmail.com'
+  order by created_at limit 1
+)) as reset_result;
 
 commit;
 

@@ -391,7 +391,7 @@ html,body{width:100%;max-width:100%;overflow-x:hidden}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-11-13-mobile-layout-v1';
+const APP_VERSION = 'patafix-2026-11-13-demo-controls-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1051,7 +1051,7 @@ async function loadServiceBillingStatus({silent=false}={}){
   try{
     const {data:platformStatus,error:platformStatusError}=await supabaseClient.rpc('patafix_vendor_subscription_status');
     if(!platformStatusError && platformStatus?.managed){
-      const paid=platformStatus.state==='paid'||platformStatus.state==='onboarding_period';
+      const paid=['paid','onboarding_period','demo'].includes(platformStatus.state);
       setServiceBillingState({
         managed:true,
         accessState:platformStatus.state,
