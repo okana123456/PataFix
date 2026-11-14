@@ -399,7 +399,7 @@ body{width:100%;max-width:100%;min-height:100%;overflow-x:hidden;overflow-y:visi
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'patafix-2026-11-14-mobile-scroll-v2';
+const APP_VERSION = 'patafix-2026-11-14-accounting-trail-v1';
 const SUPABASE_URL = 'https://ixxnjxqwbpetdituqvyp.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4eG5qeHF3YnBldGRpdHVxdnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MzE3ODUsImV4cCI6MjEwMDQwNzc4NX0.1160hs2orD_D_y8-f46_vmDrn16XngLn2mHWITzv8-8';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -9288,6 +9288,89 @@ function downloadExpensesExcel(){
 }
 
 // ═══ ACCOUNTING ═══
+const accountingTrailState={page:1,perPage:25,query:''};
+window._patafixAccountingJournalEntries=[];
+
+function accountingTrailPeriodOptions(){
+  const selected=appFilters.accounting.type;
+  return [
+    ['today','Today'],['yesterday','Yesterday'],['this_week','This Week'],
+    ['this_month','This Month'],['all','All Time'],['custom','Custom Range']
+  ].map(([value,label])=>`<option value="${value}" ${selected===value?'selected':''}>${label}</option>`).join('');
+}
+
+function setAccountingTrailPeriod(type){
+  accountingTrailState.page=1;
+  appFilters.accounting.type=type;
+  renderAccounting();
+}
+
+function applyAccountingTrailDateRange(){
+  const start=document.getElementById('accountingTrailStart')?.value||'';
+  const end=document.getElementById('accountingTrailEnd')?.value||'';
+  if(!start||!end)return toast('Select both movement trail dates.','warning');
+  if(start>end)return toast('The start date cannot be after the end date.','warning');
+  appFilters.accounting.type='custom';
+  appFilters.accounting.start=start;
+  appFilters.accounting.end=end;
+  accountingTrailState.page=1;
+  renderAccounting();
+}
+
+function applyAccountingTrailSearch(){
+  accountingTrailState.query=(document.getElementById('accountingTrailSearch')?.value||'').trim();
+  accountingTrailState.page=1;
+  renderAccountingMovementTrail();
+}
+
+function setAccountingTrailPageSize(value){
+  accountingTrailState.perPage=Math.max(10,Number(value)||25);
+  accountingTrailState.page=1;
+  renderAccountingMovementTrail();
+}
+
+function setAccountingTrailPage(page){
+  accountingTrailState.page=Math.max(1,Number(page)||1);
+  renderAccountingMovementTrail();
+  document.getElementById('accountingMovementTrailCard')?.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function renderAccountingMovementTrail(entries=window._patafixAccountingJournalEntries||[]){
+  const target=document.getElementById('accountingMovementTrail');
+  if(!target)return;
+  const query=accountingTrailState.query.toLowerCase();
+  const filtered=query?entries.filter(j=>[
+    j.date,j.ref,j.debit,j.credit,j.description,j.amount,
+    journalPartyLabel(j,'debit'),journalPartyLabel(j,'credit')
+  ].some(value=>String(value??'').toLowerCase().includes(query))):entries;
+  const totalPages=Math.max(1,Math.ceil(filtered.length/accountingTrailState.perPage));
+  accountingTrailState.page=Math.min(accountingTrailState.page,totalPages);
+  const page=paginate(filtered,accountingTrailState.page,accountingTrailState.perPage);
+  const filter=appFilters.accounting;
+  target.innerHTML=`
+    <div class="card" id="accountingMovementTrailCard" style="margin-top:24px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div><h3 style="font-size:16px;margin-bottom:4px;color:var(--accent-purple)">Accounting Movement Trail</h3><p style="font-size:12px;color:var(--text-secondary)">${filtered.length} movement${filtered.length===1?'':'s'} in the selected period</p></div>
+        <select class="select" style="width:auto;min-width:130px" onchange="setAccountingTrailPageSize(this.value)">
+          ${[10,25,50,100].map(size=>`<option value="${size}" ${accountingTrailState.perPage===size?'selected':''}>${size} rows</option>`).join('')}
+        </select>
+      </div>
+      <div class="search-bar" style="margin-bottom:10px">
+        <select class="select" onchange="setAccountingTrailPeriod(this.value)">${accountingTrailPeriodOptions()}</select>
+        <input class="input" id="accountingTrailSearch" value="${escapeHtml(accountingTrailState.query)}" placeholder="Search reference, party or description" onkeydown="if(event.key==='Enter')applyAccountingTrailSearch()">
+        <button class="btn btn-outline" onclick="applyAccountingTrailSearch()">Search</button>
+        ${accountingTrailState.query?'<button class="btn btn-outline" onclick="accountingTrailState.query=\'\';accountingTrailState.page=1;renderAccountingMovementTrail()">Clear</button>':''}
+      </div>
+      ${filter.type==='custom'?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px"><input type="date" class="input" id="accountingTrailStart" style="width:auto" value="${escapeHtml(filter.start||'')}"><span style="color:var(--text-secondary)">to</span><input type="date" class="input" id="accountingTrailEnd" style="width:auto" value="${escapeHtml(filter.end||'')}"><button class="btn btn-primary btn-sm" onclick="applyAccountingTrailDateRange()">Apply dates</button></div>`:''}
+      <div class="table-wrap"><table>
+        <thead><tr><th>Date</th><th>Reference</th><th>Debit Party</th><th>Credit Party</th><th>Description</th><th>Amount</th></tr></thead>
+        <tbody>${page.items.length?page.items.map(j=>`<tr><td>${fmtDate(j.date)}</td><td><strong>${escapeHtml(j.ref||'-')}</strong></td><td style="font-size:12px">${escapeHtml(journalPartyLabel(j,'debit'))}</td><td style="font-size:12px">${escapeHtml(journalPartyLabel(j,'credit'))}</td><td style="font-size:12px">${escapeHtml(j.description||'-')}</td><td><strong>${fmtMoney(j.amount)}</strong></td></tr>`).join(''):'<tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:18px">No accounting movements match these filters</td></tr>'}</tbody>
+      </table></div>
+      ${paginationHtml(page,'setAccountingTrailPage')}
+    </div>`;
+  scheduleResponsiveTableEnhancement();
+}
+
 async function renderAccounting() {
   const main=$('#mainContent');
   if(!currentUser?.business_id) return;
@@ -9582,24 +9665,10 @@ async function renderAccounting() {
         </div>
       </div>
 
-      <div class="card" style="margin-top:24px">
-        <h3 style="font-size:16px;margin-bottom:8px;color:var(--accent-purple)">Accounting Movement Trail</h3>
-        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:10px">Recent ledger entries for the selected period, including the debit and credit party credentials available from each transaction reference.</p>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Date</th><th>Reference</th><th>Debit Party</th><th>Credit Party</th><th>Description</th><th>Amount</th></tr></thead>
-          <tbody>
-            ${journalEntries.length?journalEntries.map(j=>`<tr>
-              <td>${fmtDate(j.date)}</td>
-              <td><strong>${escapeHtml(j.ref||'-')}</strong></td>
-              <td style="font-size:12px">${escapeHtml(journalPartyLabel(j,'debit'))}</td>
-              <td style="font-size:12px">${escapeHtml(journalPartyLabel(j,'credit'))}</td>
-              <td style="font-size:12px">${escapeHtml(j.description||'-')}</td>
-              <td><strong>${fmtMoney(j.amount)}</strong></td>
-            </tr>`).join(''):'<tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:18px">No accounting movements for this period</td></tr>'}
-          </tbody>
-        </table></div>
-      </div>
+      <div id="accountingMovementTrail"></div>
     `;
+    window._patafixAccountingJournalEntries=journalEntries;
+    renderAccountingMovementTrail(journalEntries);
   } catch(e) { 
     console.error('Accounting error:', e);
     main.innerHTML=`<div class="card" style="border-color:var(--accent-red)"><h3 style="color:var(--accent-red)">Accounting Error</h3><p style="font-size:13px;color:var(--text-secondary)">${e.message}</p></div>`;
