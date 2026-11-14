@@ -1,4 +1,4 @@
-const CACHE_NAME = 'patafix-cache-v12';
+const CACHE_NAME = 'patafix-cache-v13';
 const APP_SHELL = [
   './',
   './index.html',
