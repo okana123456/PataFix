@@ -5,6 +5,9 @@
 
 begin;
 
+-- Required when the cross-business schedule integrity safeguard is installed.
+select set_config('app.patafix_schedule_change', 'controlled_repair', true);
+
 create temporary table _patafix_msambweni_contracts (
   loan_no text primary key,
   expected_name text not null,

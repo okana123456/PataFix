@@ -205,6 +205,10 @@ begin
   from public.loan_schedules
   where loan_id = p_loan_id;
 
+  -- Authorise only this transaction to replace the unpaid schedule. The
+  -- integrity trigger blocks unaudited replacement rows on repaying loans.
+  perform set_config('app.patafix_schedule_change', 'approved_restructure', true);
+
   update public.loan_schedules
   set status = 'restructured', updated_at = now()
   where loan_id = p_loan_id

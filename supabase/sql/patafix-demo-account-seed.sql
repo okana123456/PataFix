@@ -46,6 +46,9 @@ declare
   i integer;
   j integer;
 begin
+  -- Demo refresh intentionally replaces its isolated sample portfolio.
+  perform set_config('app.patafix_schedule_change', 'approved_demo_reset', true);
+
   select s.id,s.email,b.display_name
     into v_admin_id,v_admin_email,v_display_name
   from public.patafix_platform_businesses b
