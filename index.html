@@ -493,6 +493,7 @@ const $ = (sel) => document.querySelector(sel);
 let appFilters = {
     dashboard: { type: 'this_month', start: '', end: '', branch: 'all' },
     clients: { type: 'all', start: '', end: '', branch: 'all' },
+    inactive_clients: { type: 'all', start: '', end: '', branch: 'all' },
     credit_scores: { type: 'all', start: '', end: '', branch: 'all' },
     applications: { type: 'all', start: '', end: '', branch: 'all' },
     disbursement: { type: 'all', start: '', end: '', branch: 'all' },
@@ -1914,6 +1915,7 @@ function buildSidebar() {
     
     { isHeader: true, label: 'Lending', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier', 'viewer'] },
     { id: 'clients', icon: 'C', label: 'Clients', roles: ['admin', 'branch_manager', 'loan_officer'] },
+    { id: 'inactive_clients', icon: 'I', label: 'Inactive Clients', roles: ['admin', 'branch_manager', 'loan_officer'] },
     { id: 'credit_scores', icon: 'Q', label: 'Credit Ratings', roles: ['admin', 'branch_manager', 'loan_officer'] },
     { id: 'products', icon: 'P', label: 'Loan Products', roles: ['admin', 'branch_manager'] },
     { id: 'applications', icon: 'A', label: 'Applications', roles: ['admin', 'branch_manager', 'loan_officer'] },
@@ -2126,7 +2128,7 @@ function navigateTo(section){
   resetWorkspaceScroll();
   showLoading(main);
   const renderers={
-    dashboard:renderDashboard,clients:renderClients,credit_scores:renderCreditScores,products:renderProducts,
+    dashboard:renderDashboard,clients:renderClients,inactive_clients:renderInactiveClients,credit_scores:renderCreditScores,products:renderProducts,
     applications:renderApplications,disbursement:renderDisbursement,loans:renderLoans,
     repayments:renderRepayments,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,charges_excess:renderChargesExcessAccount,mpesa_transactions:renderMpesaTransactions,suspense:renderSuspense,
     branches:renderBranches,company_assets:renderCompanyAssets,
@@ -2838,6 +2840,73 @@ async function renderClients(page=1){
       </div>
     `;
   }catch(e){toast(e.message,'error')}
+}
+
+async function renderInactiveClients(){
+  const main=$('#mainContent');
+  showLoading(main);
+  try{
+    await loadPataFixBranches();
+    const data=await loadReportData('inactive_clients');
+    window._inactiveClientRows=data?.rows||[];
+    window._inactiveClientSearch='';
+    const summary=Object.fromEntries((data?.summary||[]).map(item=>[item.label,item.value]));
+    const branchRows=window._inactiveClientRows.map(row=>({branch_name:row.Branch}));
+    main.innerHTML=`
+      <div class="page-header">
+        <div><h1>Inactive Clients</h1><p style="font-size:12px;color:var(--text-secondary);margin-top:3px">Clients without an active loan, including their most recent loan and dormancy period.</p></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-outline btn-sm" onclick="renderInactiveClients()">Refresh</button>
+          <button class="btn btn-primary btn-sm" onclick="downloadReport('inactive_clients')">Download Excel</button>
+        </div>
+      </div>
+      ${getBranchFilterHtml('inactive_clients',branchRows)}
+      <div class="kpi-grid" style="margin-bottom:14px">
+        <div class="kpi-card"><div class="kpi-label">Inactive Clients</div><div class="kpi-value">${summary['Inactive Clients']||0}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Past Borrowers</div><div class="kpi-value" style="color:var(--accent-blue)">${summary['Past Borrowers']||0}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Never Borrowed</div><div class="kpi-value" style="color:var(--accent-orange)">${summary['Never Borrowed']||0}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Average Dormancy</div><div class="kpi-value" style="color:var(--accent-purple)">${summary['Average Dormancy']||'0 days'}</div></div>
+      </div>
+      <div class="search-bar">
+        <input class="input" id="inactiveClientSearch" placeholder="Search client, ID, phone, officer or branch..." oninput="filterInactiveClients(this.value)" style="flex:1;max-width:420px">
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('inactiveClientSearch').value='';filterInactiveClients('')">Clear</button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Branch</th><th>Loan Officer</th><th>Client Name</th><th>ID Number</th><th>Phone Number</th><th>Last Loan Amount</th><th>Dormancy Days</th></tr></thead>
+        <tbody id="inactiveClientsBody"></tbody>
+      </table></div>
+      <div id="inactiveClientsPagination"></div>
+    `;
+    showInactiveClientPage(1);
+  }catch(e){
+    main.innerHTML=`<div class="empty-state"><p>Unable to load inactive clients.</p></div>`;
+    toast(e.message,'error');
+  }
+}
+
+function filterInactiveClients(value){
+  window._inactiveClientSearch=String(value||'').trim().toLowerCase();
+  showInactiveClientPage(1);
+}
+
+function showInactiveClientPage(page=1){
+  const query=window._inactiveClientSearch||'';
+  const filtered=(window._inactiveClientRows||[]).filter(row=>!query||[
+    row.Branch,row['Loan Officer'],row['Client Name'],row['ID Number'],row['Phone Number']
+  ].some(value=>String(value||'').toLowerCase().includes(query)));
+  const paged=paginate(filtered,page);
+  const body=document.getElementById('inactiveClientsBody');
+  const pagination=document.getElementById('inactiveClientsPagination');
+  if(body)body.innerHTML=paged.items.length?paged.items.map(row=>`<tr>
+    <td>${escapeHtml(row.Branch||'-')}</td>
+    <td>${escapeHtml(row['Loan Officer']||'Unassigned')}</td>
+    <td><strong>${escapeHtml(row['Client Name']||'-')}</strong></td>
+    <td>${escapeHtml(row['ID Number']||'-')}</td>
+    <td>${escapeHtml(row['Phone Number']||'-')}</td>
+    <td style="white-space:nowrap">${fmtMoney(Number(row['Last Loan Amount']||0))}</td>
+    <td><span class="badge badge-gray">${Number(row['Dormancy Days']||0)} days</span></td>
+  </tr>`).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:28px">No inactive clients found.</td></tr>';
+  if(pagination)pagination.innerHTML=paginationHtml(paged,'showInactiveClientPage');
 }
 
 function showAllClients(show){
@@ -5013,6 +5082,7 @@ function updateBranchFilter(section, branch){
     appFilters[section].branch = branch || 'all';
     if(section==='dashboard') renderDashboard();
     if(section==='clients') renderClients();
+    if(section==='inactive_clients') renderInactiveClients();
     if(section==='credit_scores') renderCreditScores();
     if(section==='applications') renderApplications();
     if(section==='disbursement') renderDisbursement();
@@ -6561,7 +6631,8 @@ async function loadReportData(id){
         dormancyDays
       };
     }).filter(Boolean);
-    inactive=filterByBranch(inactive,'reports');
+    const inactiveFilterSection=currentSection==='inactive_clients'?'inactive_clients':'reports';
+    inactive=filterByBranch(inactive,inactiveFilterSection);
     if(officerOnly)inactive=inactive.filter(item=>item.officerId===currentUser.id);
     inactive.sort((a,b)=>b.dormancyDays-a.dormancyDays||String(a.client.full_name||'').localeCompare(String(b.client.full_name||'')));
     const rows=inactive.map(item=>({
