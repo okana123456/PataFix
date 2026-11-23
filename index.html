@@ -6426,6 +6426,7 @@ async function renderReports(){
     {id:'aging',              title:'Arrears Report',      icon:'⚠️', desc:'Past-due principal and interest by client and loan officer',          color:'var(--accent-red)'},
     {id:'income',             title:'Income Report',               icon:'💰', desc:'Interest, fees, registration and penalties collected',                 color:'var(--accent-green)'},
     {id:'portfolio_summary',  title:'Portfolio Summary',           icon:'📊', desc:'Active clients without arrears vs total clients',                     color:'var(--accent-orange)'},
+    {id:'inactive_clients',    title:'Inactive Clients Report',     icon:'⏸', desc:'Clients without an active loan, their last loan amount and dormancy period', color:'var(--accent-orange)'},
   ];
   main.innerHTML=`
     <div class="page-header"><h1>Reports & Analytics</h1></div>
@@ -6438,7 +6439,7 @@ async function renderReports(){
             <div style="flex:1">
               <strong style="font-size:14px">${r.title}</strong>
               <p style="font-size:12px;color:var(--text-secondary);margin:4px 0 12px">${r.desc}</p>
-              ${r.id==='aging'?getBranchFilterHtml('reports',[]):''}
+              ${['aging','inactive_clients'].includes(r.id)?getBranchFilterHtml('reports',[]):''}
               <div style="display:flex;gap:8px">
                 <button class="btn btn-outline btn-sm" onclick="previewReport('${r.id}')">👁 Preview</button>
                 <button class="btn btn-primary btn-sm" onclick="downloadReport('${r.id}')">⬇ Download</button>
@@ -6510,6 +6511,80 @@ async function loadReportData(id){
       {label:'Active Borrowers',value:rows.filter(r=>r['Status']==='Active Borrower').length},
       {label:'Past Borrowers',value:rows.filter(r=>r['Status']==='Past Borrower').length}
     ],rows,cols:['Full Name','ID Number','Phone','Alt Phone','Email','Gender','DOB','Address / Location','Occupation','Business Type','Employer','Daily Income','Next of Kin','Next of Kin Phone','Next of Kin Relation','Date Onboarded','Loan Officer','Total Loans','Active Loans','Latest Loan #','Total Borrowed','Outstanding (KES)','Arrears (KES)','Status']};
+  }
+  if(id==='inactive_clients'){
+    const[clients,loans,repayments,staffResult]=await Promise.all([
+      fetchAllBusinessRows('loan_clients','id,full_name,id_number,phone,notes,status,loan_officer_id,branch_name,created_at'),
+      fetchAllBusinessRows('loans','id,client_id,loan_no,status,principal_amount,disbursed_amount,outstanding_balance,loan_officer_id,branch_name,disbursement_date,maturity_date,created_at'),
+      fetchAllBusinessRows('loan_repayments','loan_id,payment_date,created_at'),
+      sb('loan_staff').select('id,name,branch_name,is_active').eq('business_id',biz)
+    ]);
+    const staff=staffResult.data||[];
+    const staffMap={};staff.forEach(s=>{staffMap[s.id]=s;});
+    const loansByClient={};
+    (loans||[]).forEach(loan=>{
+      if(!loansByClient[loan.client_id])loansByClient[loan.client_id]=[];
+      loansByClient[loan.client_id].push(loan);
+    });
+    const latestPaymentByLoan={};
+    (repayments||[]).forEach(payment=>{
+      const stamp=payment.payment_date||payment.created_at;
+      if(!stamp)return;
+      if(!latestPaymentByLoan[payment.loan_id]||new Date(stamp)>new Date(latestPaymentByLoan[payment.loan_id])){
+        latestPaymentByLoan[payment.loan_id]=stamp;
+      }
+    });
+    const reportDate=parseLocalDate(today());
+    const officerOnly=hasRole('loan_officer')&&!hasRole('admin','branch_manager');
+    let inactive=(clients||[]).map(client=>{
+      const clientLoans=(loansByClient[client.id]||[]).slice().sort((a,b)=>{
+        const aDate=a.disbursement_date||a.created_at||'';
+        const bDate=b.disbursement_date||b.created_at||'';
+        return String(bDate).localeCompare(String(aDate));
+      });
+      const activeLoans=clientLoans.filter(loan=>loan.status==='active'&&Number(loan.outstanding_balance||0)>0.01);
+      if(activeLoans.length)return null;
+      const validLoans=clientLoans.filter(loan=>loan.status!=='recalled');
+      const latestLoan=validLoans[0]||null;
+      const noteOfficer=String(client.notes||'').match(/\[OFFICER:([^\]]+)\]/)?.[1]||'';
+      const officerId=client.loan_officer_id||latestLoan?.loan_officer_id||noteOfficer;
+      const lastActivity=latestLoan
+        ? latestPaymentByLoan[latestLoan.id]||latestLoan.maturity_date||latestLoan.disbursement_date
+        : client.created_at;
+      const activityDate=lastActivity?parseLocalDate(String(lastActivity).slice(0,10)):reportDate;
+      const dormancyDays=Math.max(0,Math.floor((reportDate-activityDate)/(24*60*60*1000)));
+      return{
+        client,
+        latestLoan,
+        officerId,
+        branch_name:normalizeBranchName(client.branch_name||latestLoan?.branch_name||staffMap[officerId]?.branch_name),
+        dormancyDays
+      };
+    }).filter(Boolean);
+    inactive=filterByBranch(inactive,'reports');
+    if(officerOnly)inactive=inactive.filter(item=>item.officerId===currentUser.id);
+    inactive.sort((a,b)=>b.dormancyDays-a.dormancyDays||String(a.client.full_name||'').localeCompare(String(b.client.full_name||'')));
+    const rows=inactive.map(item=>({
+      'Branch':item.branch_name,
+      'Loan Officer':item.officerId?(staffMap[item.officerId]?.name||'Unassigned'):'Unassigned',
+      'Client Name':item.client.full_name||'-',
+      'ID Number':item.client.id_number||'-',
+      'Phone Number':item.client.phone||'-',
+      'Last Loan Amount':item.latestLoan?Number(item.latestLoan.principal_amount||item.latestLoan.disbursed_amount||0):0,
+      'Dormancy Days':item.dormancyDays
+    }));
+    const pastBorrowers=inactive.filter(item=>item.latestLoan).length;
+    const neverBorrowed=inactive.length-pastBorrowers;
+    const averageDormancy=inactive.length
+      ? Math.round(inactive.reduce((sum,item)=>sum+item.dormancyDays,0)/inactive.length)
+      : 0;
+    return{title:'Inactive Clients Report',summary:[
+      {label:'Report Date',value:today()},
+      {label:'Inactive Clients',value:inactive.length},
+      {label:'Past Borrowers',value:pastBorrowers},
+      {label:'Never Borrowed',value:neverBorrowed},
+      {label:'Average Dormancy',value:averageDormancy+' days'}
+    ],rows,cols:['Branch','Loan Officer','Client Name','ID Number','Phone Number','Last Loan Amount','Dormancy Days']};
   }
   if(id==='collection_daily'){
     const todayStr=today();
