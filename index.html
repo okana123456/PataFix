@@ -4145,21 +4145,26 @@ async function renderDisbursement(){
   const main=$('#mainContent');
   try{
     await loadPataFixBranches();
-    const[{data:apps,error:appsError},{data:staff,error:staffError}]=await Promise.all([
-      sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,branch_name),loan_products(*)').eq('business_id', currentUser.business_id).in('status',['approved','disbursed']).order('approved_at',{ascending:false}),
-      sb('loan_staff').select('id,name,branch_name').eq('business_id',currentUser.business_id)
+    const biz=currentUser.business_id;
+    const[apps,{data:staff,error:staffError}]=await Promise.all([
+      loadDisbursementApplications(biz),
+      sb('loan_staff').select('id,name,branch_name').eq('business_id',biz)
     ]);
-    if(appsError)throw appsError;
     if(staffError)throw staffError;
     const staffById=Object.fromEntries((staff||[]).map(s=>[s.id,s]));
-    const appIds=(apps||[]).map(a=>a.id).filter(Boolean);
-    let loansByApp={};
-    if(appIds.length){
-      const{data:loans,error:loansError}=await sb('loans').select('id,application_id,loan_no,loan_officer_id,branch_name,disbursed_amount,disbursement_method,disbursement_reference,disbursement_date,status').eq('business_id',currentUser.business_id).in('application_id',appIds);
+    const appIds=apps.map(a=>a.id).filter(Boolean);
+    const loansByApp={};
+    const batchSize=75;
+    for(let from=0;from<appIds.length;from+=batchSize){
+      const{data:loans,error:loansError}=await sb('loans').select('id,application_id,loan_no,loan_officer_id,branch_name,disbursed_amount,disbursement_method,disbursement_reference,disbursement_date,status').eq('business_id',biz).in('application_id',appIds.slice(from,from+batchSize)).order('disbursement_date',{ascending:false}).order('id');
       if(loansError)throw loansError;
-      loansByApp=Object.fromEntries((loans||[]).map(l=>[l.application_id,l]));
+      for(const loan of loans||[]){
+        const prior=loansByApp[loan.application_id];
+        if(!prior||(prior.status==='recalled'&&loan.status!=='recalled'))loansByApp[loan.application_id]=loan;
+      }
     }
-    const disbursements=(apps||[]).map(a=>{
+    if(currentSection!=='disbursement'||currentUser?.business_id!==biz)return;
+    const disbursements=apps.map(a=>{
       const loan=loansByApp[a.id]||null;
       const officerId=loan?.loan_officer_id||a.loan_officer_id||null;
       const officer=officerId?staffById[officerId]:null;
@@ -4195,7 +4200,27 @@ async function renderDisbursement(){
     `;
     const disbBody=$('#disbursementBody');
     if(disbBody)disbBody.innerHTML=renderDisbursementRows(cachedData.disbursements);
-  }catch(e){toast(e.message,'error')}
+  }catch(e){
+    console.error('PataFix disbursement load failed',e);
+    if(currentSection!=='disbursement')return;
+    main.innerHTML='<div class="empty-state"><p>Could not load disbursements.</p><button class="btn btn-outline btn-sm" onclick="navigateTo(\'disbursement\')">Retry</button></div>';
+    toast(e.message||'Could not load disbursements.','error');
+  }
+}
+
+async function loadDisbursementApplications(biz){
+  const pageSize=250;
+  const apps=[];
+  for(let from=0;;from+=pageSize){
+    const{data,error}=await sb('loan_applications')
+      .select('*,loan_clients(full_name,phone,id_number,branch_name),loan_products(*)')
+      .eq('business_id',biz).in('status',['approved','disbursed'])
+      .order('approved_at',{ascending:false}).order('id')
+      .range(from,from+pageSize-1);
+    if(error)throw error;
+    apps.push(...(data||[]));
+    if((data||[]).length<pageSize)return apps;
+  }
 }
 
 function disbursementRowDate(a){
@@ -6509,7 +6534,7 @@ async function renderReports(){
             <div style="flex:1">
               <strong style="font-size:14px">${r.title}</strong>
               <p style="font-size:12px;color:var(--text-secondary);margin:4px 0 12px">${r.desc}</p>
-              ${['aging','inactive_clients'].includes(r.id)?getBranchFilterHtml('reports',[]):''}
+              ${['aging','inactive_clients','disbursement'].includes(r.id)?getBranchFilterHtml('reports',[]):''}
               <div style="display:flex;gap:8px">
                 <button class="btn btn-outline btn-sm" onclick="previewReport('${r.id}')">👁 Preview</button>
                 <button class="btn btn-primary btn-sm" onclick="downloadReport('${r.id}')">⬇ Download</button>
@@ -6768,13 +6793,16 @@ async function loadReportData(id){
     })),cols:['Loan #','Client','ID Number','Phone','Location','Business Type','Loan Officer','Principal (KES)','Interest (KES)','Total P+I (KES)','Outstanding (KES)','Total Paid (KES)','Arrears (KES)','Overdue Days','Status','Disbursed','Maturity']};
   }
   if(id==='disbursement'){
-    const[{data:loans},{data:staff}]=await Promise.all([
-      sb('loans').select('*,loan_clients(full_name,phone,id_number,address),loan_applications(loan_products(*))').eq('business_id',biz).order('disbursement_date',{ascending:false}),
+    const[loans,{data:staff,error:staffError}]=await Promise.all([
+      fetchAllBusinessRows('loans','*,loan_clients(full_name,phone,id_number,address,branch_name),loan_applications(loan_products(*))'),
       sb('loan_staff').select('id,name').eq('business_id',biz)
     ]);
+    if(staffError)throw staffError;
     const staffMap={};(staff||[]).forEach(s=>{staffMap[s.id]=s.name;});
     const isOnlyOfficerDisb = hasRole('loan_officer') && !hasRole('admin','branch_manager');
-    const filteredLoansDisb = isOnlyOfficerDisb ? (loans||[]).filter(l=>l.loan_officer_id===currentUser.id) : (loans||[]);
+    const branchLoans=filterByBranch(loans,'reports');
+    const filteredLoansDisb=(isOnlyOfficerDisb?branchLoans.filter(l=>l.loan_officer_id===currentUser.id):branchLoans)
+      .slice().sort((a,b)=>String(b.disbursement_date||'').localeCompare(String(a.disbursement_date||'')));
     const effectiveLoansDisb=filteredLoansDisb.filter(l=>l.status!=='recalled');
     const total=effectiveLoansDisb.reduce((s,l)=>s+Number(l.disbursed_amount||0),0);
     return{title:'Disbursement Report',summary:[
